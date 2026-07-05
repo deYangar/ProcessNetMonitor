@@ -4,6 +4,7 @@
 #include "PluginInterface.h"
 #include "capture.h"
 #include "tooltip_popup.h"
+#include "detail_window.h"
 #include <map>
 
 struct RecentProc {
@@ -20,6 +21,7 @@ public:
     enum Direction { DIR_UPLOAD = 0, DIR_DOWNLOAD = 1 };
 
     void Init(Direction dir) { m_dir = dir; }
+    int OnMouseEvent(MouseEventType type, int x, int y, void* hWnd, int flag) override;
     const wchar_t* GetItemName() const override;
     const wchar_t* GetItemId() const override;
     const wchar_t* GetItemLableText() const override;
@@ -58,6 +60,12 @@ private:
     // Rich tooltip popup
     CTooltipPopup m_popup;
     bool m_popup_created = false;
+
+public:
+    // Detail window (Huorong-style)
+    CDetailWindow m_detail;
+    bool m_detail_created = false;
+private:
     ULONGLONG m_last_hover_check = 0;
     bool m_was_hovering = false;
     HWND m_taskbar_wnd = nullptr;

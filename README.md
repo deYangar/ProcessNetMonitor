@@ -8,6 +8,8 @@ TrafficMonitor 的插件，显示每个进程的网络速度。
 
 ![悬浮信息窗口](docs/screenshot-popup.jpg)
 
+![详情窗口](docs/screenshot-detail.jpg)
+
 ## 功能
 
 - **任务栏**：两行显示，Upload 和 Download 各一行
@@ -50,6 +52,7 @@ ProcessNetMonitor/
 │   │   ├── capture.h / .cpp     # 网络抓包（GetIfTable2）
 │   │   ├── plugin_main.h / .cpp # 插件主体（2个item：Up/Down）
 │   │   ├── tooltip_popup.h/.cpp # 富文本悬浮信息窗口
+│   │   ├── detail_window.h/.cpp # 火绒风格详情窗口
 │   ├── ProcessNetMonitor.dll    # 编译输出
 │   └── Makefile
 ├── TrafficMonitor/
@@ -69,6 +72,17 @@ ProcessNetMonitor/
 **推荐设置**：选项 → 主窗口设置 → 取消勾选「显示鼠标提示」，否则主悬浮窗鼠标悬停时会同时出现两个信息窗口（TM 自带的文本提示 + 本插件的富文本弹窗）
 
 ## 版本历史
+
+### v1.3.0 (2026-07-05)
+- 新增「详情窗口」：点击插件区域打开火绒风格的全功能流量监控窗口
+- 可排序表格：程序名称 / 程序类别 / 下载速度 / 上传速度 / 连接数
+- 进程图标 + 进程名 + .exe 自动去除
+- 展开行：显示进程 ID 和完整路径
+- 右键菜单：定位文件 / 文件属性 / 结束进程
+- 标题栏可拖动，Esc 关闭
+- 实时/历史标签页（UI 骨架，历史功能待实现）
+- 连接数统计：从 TCP 连接表实时统计每进程活跃连接数
+- 深色/浅色主题跟随系统
 
 ### v1.2.0 (2026-07-05)
 - 新增 Rich Tooltip Popup：鼠标悬停主悬浮窗时弹出带进程图标的详情窗口

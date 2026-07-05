@@ -28,6 +28,21 @@ const wchar_t* CProcessNetItem::GetItemValueSampleText() const {
     return m_dir == DIR_UPLOAD ? L"U:chrome.exe 5.6KB/s" : L"D:mihomo 1.4KB/s";
 }
 
+int CProcessNetItem::OnMouseEvent(MouseEventType type, int x, int y, void* hWnd, int flag) {
+    if (type == MT_LCLICKED || type == MT_DBCLICKED) {
+        auto& plugin = CProcessNetPlugin::Instance();
+        if (plugin.m_detail_created) {
+            if (plugin.m_detail.IsVisible()) {
+                plugin.m_detail.Hide();
+            } else {
+                plugin.m_detail.Show((HWND)hWnd);
+            }
+            return 1; // handled
+        }
+    }
+    return 0;
+}
+
 void CProcessNetItem::Update(const std::vector<ProcTraffic>& stats, double sys_up, double sys_down) {
     const double EMA_ALPHA = 0.3;
 
@@ -128,6 +143,11 @@ void CProcessNetPlugin::DataRequired() {
     m_cached_up = su;
     m_cached_down = sd;
 
+    // Update detail window if visible
+    if (m_detail_created && m_detail.IsVisible()) {
+        m_detail.UpdateData(stats, su, sd);
+    }
+
     // Build tooltip text (TM's default text tooltip, kept as fallback)
     wchar_t line[256];
     wcscpy_s(m_tooltip, L"Process Net Monitor\n");
@@ -173,7 +193,7 @@ const wchar_t* CProcessNetPlugin::GetInfo(PluginInfoIndex i) {
     case TMI_DESCRIPTION: return L"Per-process network speed";
     case TMI_AUTHOR: return L"Aemeath";
     case TMI_COPYRIGHT: return L"MIT";
-    case TMI_VERSION: return L"1.2.0";
+    case TMI_VERSION: return L"1.3.0";
     case TMI_URL: return L"https://github.com";
     default: return L"";
     }
@@ -185,6 +205,7 @@ void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
     m_app = p;
     HINSTANCE hInst = (HINSTANCE)GetModuleHandleW(NULL);
     m_popup_created = m_popup.Initialize(hInst);
+    m_detail_created = m_detail.Initialize(hInst);
 }
 
 // ============================================================

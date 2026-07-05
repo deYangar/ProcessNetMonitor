@@ -21,6 +21,7 @@ struct ProcTraffic {
     uint64_t prev_recv = 0;
     double speed_up = 0.0;
     double speed_down = 0.0;
+    int conn_count = 0;    // active TCP connections
 };
 
 class PacketCapture {

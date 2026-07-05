@@ -296,6 +296,12 @@ std::vector<ProcTraffic> PacketCapture::GetStats(double dt) {
     FILE* dbg = fopen("C:\\Users\\Yang\\AppData\\Local\\Temp\\procnet_debug.txt", "w");
     if (dbg) fprintf(dbg, "dt=%.3f count=%zu\n", dt, m_stats.size());
 
+    // Count connections per process
+    std::map<DWORD, int> conn_counts;
+    for (auto& [key, pid] : m_tcp_conns) {
+        conn_counts[pid]++;
+    }
+
     for (auto& [pid, st] : m_stats) {
         if (dbg) fprintf(dbg, "PID=%u sent=%llu prev=%llu recv=%llu prev=%llu\n",
             pid, st.bytes_sent, st.prev_sent, st.bytes_recv, st.prev_recv);
@@ -306,6 +312,8 @@ std::vector<ProcTraffic> PacketCapture::GetStats(double dt) {
         st.prev_recv = st.bytes_recv;
         if (st.name.empty() || st.name[0] == L'[') st.name = GetProcessName(pid);
         if (st.exe_path.empty()) st.exe_path = GetProcessPath(pid);
+        auto cit = conn_counts.find(pid);
+        st.conn_count = (cit != conn_counts.end()) ? cit->second : 0;
         result.push_back(st);
     }
     if (dbg) fclose(dbg);
