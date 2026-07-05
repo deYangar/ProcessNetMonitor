@@ -150,10 +150,10 @@ private:
     // Time range filter (history tab)
     TimeRange m_time_range = TR_24H;
 
-    // Table state
-    int m_sort_col = 3;        // default sort by download speed
-    bool m_sort_desc = true;
-    int m_scroll_pos = 0;      // first visible row index
+    // Table state (per-tab sort)
+    int m_sort_col[2] = { 3, 3 };     // default sort by download/total_down
+    bool m_sort_desc[2] = { true, true };
+    int m_scroll_pos = 0;
     int m_hovered_row = -1;
     int m_hovered_col = -1;
     bool m_hovering_close = false;

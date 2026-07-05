@@ -356,11 +356,12 @@ int CDetailWindow::GetVisibleRows(int client_h) const {
 
 void CDetailWindow::ResortRows() {
     bool is_hist = (m_active_tab == 1);
+    int sc = m_sort_col[m_active_tab];
+    bool sd = m_sort_desc[m_active_tab];
     std::sort(m_rows.begin(), m_rows.end(), [&](const DisplayRow& a, const DisplayRow& b) {
         int cmp = 0;
         if (is_hist) {
-            // History columns: icon, name, category, total_down, total_up, avg_down, avg_up
-            switch (m_sort_col) {
+            switch (sc) {
             case 1: cmp = _wcsicmp(a.name.c_str(), b.name.c_str()); break;
             case 2: cmp = _wcsicmp(a.category.c_str(), b.category.c_str()); break;
             case 3: cmp = (a.hist_recv > b.hist_recv) ? 1 : (a.hist_recv < b.hist_recv ? -1 : 0); break;
@@ -370,7 +371,7 @@ void CDetailWindow::ResortRows() {
             default: cmp = 0;
             }
         } else {
-            switch (m_sort_col) {
+            switch (sc) {
             case 1: cmp = _wcsicmp(a.name.c_str(), b.name.c_str()); break;
             case 2: cmp = _wcsicmp(a.category.c_str(), b.category.c_str()); break;
             case 3: cmp = (a.speed_down > b.speed_down) ? 1 : (a.speed_down < b.speed_down ? -1 : 0); break;
@@ -379,16 +380,16 @@ void CDetailWindow::ResortRows() {
             default: cmp = 0;
             }
         }
-        return m_sort_desc ? (cmp > 0) : (cmp < 0);
+        return sd ? (cmp > 0) : (cmp < 0);
     });
 }
 
 void CDetailWindow::SortByColumn(int col) {
-    if (m_sort_col == col) {
-        m_sort_desc = !m_sort_desc;
+    if (m_sort_col[m_active_tab] == col) {
+        m_sort_desc[m_active_tab] = !m_sort_desc[m_active_tab];
     } else {
-        m_sort_col = col;
-        m_sort_desc = true;
+        m_sort_col[m_active_tab] = col;
+        m_sort_desc[m_active_tab] = true;
     }
     ResortRows();
 }
@@ -440,19 +441,21 @@ void CDetailWindow::ShowContextMenu(int row, int x, int y) {
     AppendMenuW(hMenu, MF_STRING, 2, L"\u6587\u4EF6\u5C5E\u6027");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenu, MF_STRING, 3, L"\u7ED3\u675F\u8FDB\u7A0B");
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(hMenu, MF_STRING, 4, L"\u67E5\u770B\u8FDE\u63A5");
 
     int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y, 0, m_hwnd, NULL);
     DestroyMenu(hMenu);
 
     switch (cmd) {
-    case 1:
+    case 1: // \u5B9A\u4F4D\u6587\u4EF6
         if (!r.exe_path.empty()) {
             wchar_t arg[MAX_PATH + 32];
             swprintf_s(arg, L"/select,\"%s\"", r.exe_path.c_str());
             ShellExecuteW(NULL, L"open", L"explorer.exe", arg, NULL, SW_SHOWNORMAL);
         }
         break;
-    case 2:
+    case 2: // \u6587\u4EF6\u5C5E\u6027
         if (!r.exe_path.empty()) {
             SHELLEXECUTEINFOW sei = { sizeof(sei) };
             sei.fMask = SEE_MASK_INVOKEIDLIST;
@@ -462,7 +465,7 @@ void CDetailWindow::ShowContextMenu(int row, int x, int y) {
             ShellExecuteExW(&sei);
         }
         break;
-    case 3:
+    case 3: // \u7ED3\u675F\u8FDB\u7A0B
         if (r.pid > 0) {
             HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, r.pid);
             if (hProc) {
@@ -470,6 +473,9 @@ void CDetailWindow::ShowContextMenu(int row, int x, int y) {
                 CloseHandle(hProc);
             }
         }
+        break;
+    case 4: // \u67E5\u770B\u8FDE\u63A5 - expand row to show PID/path
+        ToggleExpand(row);
         break;
     }
 }
@@ -526,11 +532,11 @@ void CDetailWindow::OnLButtonDown(int x, int y) {
 
     // Tabs
     if (PtInRect(&m_rcTab0, { x, y })) {
-        if (m_active_tab != 0) { m_active_tab = 0; m_sort_col = 3; m_sort_desc = true; m_scroll_pos = 0; RebuildRows(); }
+        if (m_active_tab != 0) { m_active_tab = 0; m_scroll_pos = 0; RebuildRows(); }
         return;
     }
     if (PtInRect(&m_rcTab1, { x, y })) {
-        if (m_active_tab != 1) { m_active_tab = 1; m_sort_col = 3; m_sort_desc = true; m_scroll_pos = 0; RebuildRows(); }
+        if (m_active_tab != 1) { m_active_tab = 1; m_scroll_pos = 0; RebuildRows(); }
         return;
     }
 
@@ -559,12 +565,22 @@ void CDetailWindow::OnLButtonDown(int x, int y) {
         return;
     }
 
-    // Table row click -> expand
+    // Table row click
     int row = HitTestRow(y);
     if (row >= 0) {
-        int table_left = PADDING;
-        if (x >= table_left && x < table_left + 20) {
+        int rel_x = x - PADDING;
+        // Icon/arrow column (0~32px): toggle expand
+        if (rel_x >= 0 && rel_x < 32) {
             ToggleExpand(row);
+        }
+        // Action column (last col): show context menu
+        if (m_active_tab == 0) {
+            int action_start = 32 + 180 + 90 + 100 + 100 + 60; // = 562
+            if (rel_x >= action_start && rel_x < action_start + 80) {
+                POINT pt = { x, y };
+                ClientToScreen(m_hwnd, &pt);
+                ShowContextMenu(row, pt.x, pt.y);
+            }
         }
     }
 
@@ -842,9 +858,9 @@ void CDetailWindow::DrawTableHeader(HDC hdc, int w, int y) {
         }
         DrawTextW(hdc, cols[i].title, -1, &rc, fmt);
 
-        if (i == m_sort_col && i >= 1) {
+        if (i == m_sort_col[m_active_tab] && i >= 1) {
             SetTextColor(hdc, GetAccentColor(false));
-            const wchar_t* arrow = m_sort_desc ? L" \u25BC" : L" \u25B2";
+            const wchar_t* arrow = m_sort_desc[m_active_tab] ? L" \u25BC" : L" \u25B2";
             RECT arrow_rc = { rc.right - 16, y, rc.right + 4, y + TABLE_HEADER_H };
             DrawTextW(hdc, arrow, -1, &arrow_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
             SetTextColor(hdc, GetSecondaryTextColor());
