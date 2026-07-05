@@ -62,6 +62,8 @@ private:
     int HitTestRow(int y) const;
     int HitTestColumn(int x) const;
     void SortByColumn(int col);
+    void ResortRows();
+    void RebuildRows();
     void ShowContextMenu(int row, int x, int y);
     void ToggleExpand(int row);
     void ScrollTo(int pos);
@@ -114,6 +116,9 @@ private:
     std::vector<DisplayRow> m_rows;
     double m_total_up = 0;
     double m_total_down = 0;
+
+    // Cached raw stats for tab switching
+    std::vector<ProcTraffic> m_cached_stats;
 
     // Table state
     int m_sort_col = 3;        // default sort by download speed

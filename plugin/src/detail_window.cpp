@@ -3,6 +3,7 @@
 #include <dwmapi.h>
 #include <algorithm>
 #include <cmath>
+#include <set>
 
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "dwmapi.lib")
@@ -188,10 +189,26 @@ void CDetailWindow::Hide() {
 void CDetailWindow::UpdateData(const std::vector<ProcTraffic>& stats, double total_up, double total_down) {
     m_total_up = total_up;
     m_total_down = total_down;
+    m_cached_stats = stats;
+
+    RebuildRows();
+}
+
+void CDetailWindow::RebuildRows() {
+    auto& stats = m_cached_stats;
+
+    // Save expanded PIDs before rebuild
+    std::set<DWORD> expanded_pids;
+    for (auto& r : m_rows) {
+        if (r.expanded) expanded_pids.insert(r.pid);
+    }
 
     // Build display rows from stats
     std::map<DWORD, DisplayRow> row_map;
     for (auto& st : stats) {
+        // Tab 0 = 实时(only active), Tab 1 = 历史(all)
+        if (m_active_tab == 0 && st.speed_up < 0.01 && st.speed_down < 0.01)
+            continue;
         auto& r = row_map[st.pid];
         r.pid = st.pid;
         r.name = st.name;
@@ -199,7 +216,6 @@ void CDetailWindow::UpdateData(const std::vector<ProcTraffic>& stats, double tot
         r.speed_up = st.speed_up;
         r.speed_down = st.speed_down;
         r.conn_count = st.conn_count;
-        // Category: simple heuristic
         if (r.category.empty()) {
             std::wstring lower = st.name;
             for (auto& c : lower) c = towlower(c);
@@ -215,11 +231,12 @@ void CDetailWindow::UpdateData(const std::vector<ProcTraffic>& stats, double tot
 
     m_rows.clear();
     for (auto& [pid, r] : row_map) {
+        if (expanded_pids.count(pid)) r.expanded = true;
         m_rows.push_back(std::move(r));
     }
 
-    // Sort
-    SortByColumn(m_sort_col);
+    // Re-sort using current column/direction (no toggle)
+    ResortRows();
 
     // Clamp scroll
     int max_scroll = (int)m_rows.size() - 1;
@@ -253,17 +270,11 @@ int CDetailWindow::GetVisibleRows(int client_h) const {
 // Sorting
 // ============================================================
 
-void CDetailWindow::SortByColumn(int col) {
-    if (m_sort_col == col) {
-        m_sort_desc = !m_sort_desc;
-    } else {
-        m_sort_col = col;
-        m_sort_desc = true;
-    }
-
+void CDetailWindow::ResortRows() {
+    // Sort using current m_sort_col / m_sort_desc without toggling
     std::sort(m_rows.begin(), m_rows.end(), [&](const DisplayRow& a, const DisplayRow& b) {
         int cmp = 0;
-        switch (col) {
+        switch (m_sort_col) {
         case COL_NAME: cmp = _wcsicmp(a.name.c_str(), b.name.c_str()); break;
         case COL_CATEGORY: cmp = _wcsicmp(a.category.c_str(), b.category.c_str()); break;
         case COL_DOWN: cmp = (a.speed_down > b.speed_down) ? 1 : (a.speed_down < b.speed_down ? -1 : 0); break;
@@ -273,6 +284,16 @@ void CDetailWindow::SortByColumn(int col) {
         }
         return m_sort_desc ? (cmp > 0) : (cmp < 0);
     });
+}
+
+void CDetailWindow::SortByColumn(int col) {
+    if (m_sort_col == col) {
+        m_sort_desc = !m_sort_desc;
+    } else {
+        m_sort_col = col;
+        m_sort_desc = true;
+    }
+    ResortRows();
 }
 
 // ============================================================
@@ -447,8 +468,14 @@ void CDetailWindow::OnLButtonDown(int x, int y) {
         return;
     }
     // Tabs
-    if (PtInRect(&m_rcTab0, { x, y })) { m_active_tab = 0; InvalidateRect(m_hwnd, NULL, FALSE); return; }
-    if (PtInRect(&m_rcTab1, { x, y })) { m_active_tab = 1; InvalidateRect(m_hwnd, NULL, FALSE); return; }
+    if (PtInRect(&m_rcTab0, { x, y })) {
+        if (m_active_tab != 0) { m_active_tab = 0; RebuildRows(); InvalidateRect(m_hwnd, NULL, FALSE); }
+        return;
+    }
+    if (PtInRect(&m_rcTab1, { x, y })) {
+        if (m_active_tab != 1) { m_active_tab = 1; RebuildRows(); InvalidateRect(m_hwnd, NULL, FALSE); }
+        return;
+    }
 
     // Table header click -> sort
     if (y >= PADDING + GetHeaderHeight() + GetTabsHeight() + GetSummaryHeight() &&
@@ -865,7 +892,7 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
             SetTextColor(hdc, m_dark_mode ? RGB(255, 165, 0) : RGB(230, 126, 34));
             SelectObject(hdc, hSmallFont);
             RECT act_rc = { cx + 4, text_y, cx + m_columns[6].width - 4, text_y + row_h };
-            DrawTextW(hdc, L"\u9650\u5236\u7F51\u901F", -1, &act_rc, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+            DrawTextW(hdc, L"\u67E5\u770B\u8FDE\u63A5", -1, &act_rc, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
         }
 
         // Draw expanded children
