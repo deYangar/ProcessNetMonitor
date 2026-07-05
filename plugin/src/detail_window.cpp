@@ -441,8 +441,6 @@ void CDetailWindow::ShowContextMenu(int row, int x, int y) {
     AppendMenuW(hMenu, MF_STRING, 2, L"\u6587\u4EF6\u5C5E\u6027");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenu, MF_STRING, 3, L"\u7ED3\u675F\u8FDB\u7A0B");
-    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hMenu, MF_STRING, 4, L"\u67E5\u770B\u8FDE\u63A5");
 
     int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y, 0, m_hwnd, NULL);
     DestroyMenu(hMenu);
@@ -473,9 +471,6 @@ void CDetailWindow::ShowContextMenu(int row, int x, int y) {
                 CloseHandle(hProc);
             }
         }
-        break;
-    case 4: // \u67E5\u770B\u8FDE\u63A5 - expand row to show PID/path
-        ToggleExpand(row);
         break;
     }
 }
@@ -569,8 +564,8 @@ void CDetailWindow::OnLButtonDown(int x, int y) {
     int row = HitTestRow(y);
     if (row >= 0) {
         int rel_x = x - PADDING;
-        // Icon/arrow column (0~32px): toggle expand
-        if (rel_x >= 0 && rel_x < 32) {
+        // Icon + name area (0~212px): toggle expand
+        if (rel_x >= 0 && rel_x < 32 + 180) {
             ToggleExpand(row);
         }
         // Action column (last col): show context menu
@@ -581,6 +576,10 @@ void CDetailWindow::OnLButtonDown(int x, int y) {
                 ClientToScreen(m_hwnd, &pt);
                 ShowContextMenu(row, pt.x, pt.y);
             }
+        } else {
+            // History tab: action col at different position
+            int action_start = 32 + 180 + 90 + 100 + 100 + 100 + 100; // = 702 (7 cols)
+            // History tab has no action col, so no click handler needed
         }
     }
 
@@ -1019,7 +1018,7 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
             SetTextColor(hdc, m_dark_mode ? RGB(255, 165, 0) : RGB(230, 126, 34));
             SelectObject(hdc, hSmallFont);
             RECT r6 = { cx + 4, ry, cx + 80 - 4, ry + row_h };
-            DrawTextW(hdc, L"\u67E5\u770B\u8FDE\u63A5", -1, &r6, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+            DrawTextW(hdc, L"\u00B7\u00B7\u00B7", -1, &r6, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
         }
 
         // Expanded children
