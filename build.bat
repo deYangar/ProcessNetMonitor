@@ -18,8 +18,8 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 
-:: Deploy
-taskkill /f /im TrafficMonitor.exe 2>nul
+:: Deploy (use CIM to kill admin-privileged TM, works without elevation)
+powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"name='TrafficMonitor.exe'\" | Invoke-CimMethod -MethodName Terminate | Out-Null"
 timeout /t 2 /nobreak >nul
 copy /y ProcessNetMonitor.dll "C:\Users\Yang\.openclaw\workspace\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor\plugins\ProcessNetMonitor.dll"
 if %ERRORLEVEL% NEQ 0 (
