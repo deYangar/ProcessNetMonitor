@@ -401,9 +401,18 @@ void CDetailWindow::SortByColumn(int col) {
 int CDetailWindow::HitTestRow(int y) const {
     int table_top = GetTableAreaTop();
     if (y < table_top) return -1;
-    int row_idx = (y - table_top) / GetRowHeight() + m_scroll_pos;
-    if (row_idx < 0 || row_idx >= (int)m_rows.size()) return -1;
-    return row_idx;
+    int cur_y = table_top;
+    int row_h = GetRowHeight();
+    for (int i = m_scroll_pos; i < (int)m_rows.size(); i++) {
+        int this_h = row_h;
+        if (m_rows[i].expanded) {
+            this_h += CHILD_ROW_H;
+            if (!m_rows[i].exe_path.empty()) this_h += CHILD_ROW_H;
+        }
+        if (y >= cur_y && y < cur_y + this_h) return i;
+        cur_y += this_h;
+    }
+    return -1;
 }
 
 int CDetailWindow::HitTestColumn(int x) const {
@@ -873,7 +882,6 @@ void CDetailWindow::DrawTableHeader(HDC hdc, int w, int y) {
 }
 
 void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
-    int visible = GetVisibleRows(client_h);
     int row_h = GetRowHeight();
 
     HFONT hFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
@@ -902,11 +910,26 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
         return;
     }
 
-    for (int vi = 0; vi < visible && m_scroll_pos + vi < (int)m_rows.size(); vi++) {
-        int ri = m_scroll_pos + vi;
+    // Draw rows with dynamic height (expanded rows take more space)
+    int cur_y = y;
+    for (int ri = m_scroll_pos; ri < (int)m_rows.size(); ri++) {
+        if (cur_y >= table_bottom) break;
+
         auto& row = m_rows[ri];
-        int ry = y + vi * row_h;
-        if (ry + row_h > table_bottom) break;
+        // Calculate this row's total height (parent + children if expanded)
+        int this_row_h = row_h;
+        if (row.expanded) {
+            this_row_h += CHILD_ROW_H; // PID row
+            if (!row.exe_path.empty()) this_row_h += CHILD_ROW_H; // path row
+        }
+
+        // Skip if this row is entirely above visible area
+        if (cur_y + this_row_h < y) {
+            cur_y += this_row_h;
+            continue;
+        }
+
+        int ry = cur_y;
 
         // Row background
         bool hovered = (ri == m_hovered_row);
@@ -1072,6 +1095,8 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
                 DeleteObject(hPen3);
             }
         }
+
+        cur_y += this_row_h;
     }
 
     SelectObject(hdc, hOldFont);
