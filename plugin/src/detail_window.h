@@ -197,12 +197,12 @@ private:
     // Columns - history
     Column m_hist_cols[NUM_COLS] = {
         { L"",            32,  32,  Column::CENTER },
-        { L"\u7A0B\u5E8F\u540D\u79F0",    160, 100, Column::LEFT   },
-        { L"\u7A0B\u5E8F\u7C7B\u522B",    80,  60,  Column::LEFT   },
-        { L"\u603B\u4E0B\u8F7D",          100, 70,  Column::RIGHT  },
-        { L"\u603B\u4E0A\u4F20",          100, 70,  Column::RIGHT  },
-        { L"\u5E73\u5747\u4E0B\u8F7D",    95,  70,  Column::RIGHT  },
-        { L"\u5E73\u5747\u4E0A\u4F20",    95,  70,  Column::RIGHT  },
+        { L"\u7A0B\u5E8F\u540D\u79F0",    140, 80,  Column::LEFT   },
+        { L"\u7A0B\u5E8F\u7C7B\u522B",    70,  50,  Column::LEFT   },
+        { L"\u603B\u4E0B\u8F7D",          90,  60,  Column::RIGHT  },
+        { L"\u603B\u4E0A\u4F20",          90,  60,  Column::RIGHT  },
+        { L"\u5E73\u5747\u4E0B\u8F7D",    85,  60,  Column::RIGHT  },
+        { L"\u5E73\u5747\u4E0A\u4F20",    85,  60,  Column::RIGHT  },
     };
     Column* GetActiveCols() const { return (Column*)(m_active_tab == 0 ? m_rt_cols : m_hist_cols); }
 

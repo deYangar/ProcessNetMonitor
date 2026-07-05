@@ -689,8 +689,9 @@ void CDetailWindow::OnLButtonDown(int x, int y) {
         }
         // Action column (last col): show context menu
         if (m_active_tab == 0) {
-            int action_start = 32 + 180 + 90 + 100 + 100 + 60; // = 562
-            if (rel_x >= action_start && rel_x < action_start + 80) {
+            Column* c = GetActiveCols();
+            int action_start = c[0].width + c[1].width + c[2].width + c[3].width + c[4].width + c[5].width;
+            if (rel_x >= action_start && rel_x < action_start + c[6].width) {
                 POINT pt = { x, y };
                 ClientToScreen(m_hwnd, &pt);
                 ShowContextMenu(row, pt.x, pt.y);
@@ -1028,6 +1029,7 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
                                     CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
     HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
     SetBkMode(hdc, TRANSPARENT);
+    Column* cols = GetActiveCols();
 
     int table_bottom = client_h - PADDING;
     bool is_hist = (m_active_tab == 1);
@@ -1113,18 +1115,18 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
                 display.back() = L'\u2026';
                 GetTextExtentPoint32W(hdc, display.c_str(), (int)display.size(), &sz);
             }
-            RECT name_rc = { cx + 4, ry, cx + 180 - 4, ry + row_h };
+            RECT name_rc = { cx + 4, ry, cx + cols[1].width - 4, ry + row_h };
             DrawTextW(hdc, display.c_str(), -1, &name_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
         }
-        cx += 180;
+        cx += cols[1].width;
 
         // Col 2: Category
         SetTextColor(hdc, GetSecondaryTextColor());
         {
-            RECT cat_rc = { cx + 4, ry, cx + 90 - 4, ry + row_h };
+            RECT cat_rc = { cx + 4, ry, cx + cols[2].width - 4, ry + row_h };
             DrawTextW(hdc, row.category.c_str(), -1, &cat_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
         }
-        cx += 90;
+        cx += cols[2].width;
 
         if (is_hist) {
             // History: total_down, total_up, avg_down, avg_up
@@ -1132,25 +1134,25 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
 
             FormatBytes(row.hist_recv, buf, 32);
             SetTextColor(hdc, row.hist_recv > 0 ? GetAccentColor(false) : GetSecondaryTextColor());
-            RECT r3 = { cx + 4, ry, cx + 100 - 4, ry + row_h };
+            RECT r3 = { cx + 4, ry, cx + cols[3].width - 4, ry + row_h };
             DrawTextW(hdc, buf, -1, &r3, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
-            cx += 100;
+            cx += cols[3].width;
 
             FormatBytes(row.hist_sent, buf, 32);
             SetTextColor(hdc, row.hist_sent > 0 ? GetAccentColor(true) : GetSecondaryTextColor());
-            RECT r4 = { cx + 4, ry, cx + 100 - 4, ry + row_h };
+            RECT r4 = { cx + 4, ry, cx + cols[4].width - 4, ry + row_h };
             DrawTextW(hdc, buf, -1, &r4, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
-            cx += 100;
+            cx += cols[4].width;
 
             FormatSpeed(row.hist_avg_down, buf, 32);
             SetTextColor(hdc, row.hist_avg_down > 0.01 ? GetAccentColor(false) : GetSecondaryTextColor());
-            RECT r5 = { cx + 4, ry, cx + 100 - 4, ry + row_h };
+            RECT r5 = { cx + 4, ry, cx + cols[5].width - 4, ry + row_h };
             DrawTextW(hdc, buf, -1, &r5, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
-            cx += 100;
+            cx += cols[5].width;
 
             FormatSpeed(row.hist_avg_up, buf, 32);
             SetTextColor(hdc, row.hist_avg_up > 0.01 ? GetAccentColor(true) : GetSecondaryTextColor());
-            RECT r6 = { cx + 4, ry, cx + 100 - 4, ry + row_h };
+            RECT r6 = { cx + 4, ry, cx + cols[6].width - 4, ry + row_h };
             DrawTextW(hdc, buf, -1, &r6, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
         } else {
             // Real-time: speed_down, speed_up, conn_count, action
@@ -1158,25 +1160,25 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
 
             FormatSpeed(row.speed_down, spd, 32);
             SetTextColor(hdc, row.speed_down > 0.01 ? GetAccentColor(false) : GetSecondaryTextColor());
-            RECT r3 = { cx + 4, ry, cx + 100 - 4, ry + row_h };
+            RECT r3 = { cx + 4, ry, cx + cols[3].width - 4, ry + row_h };
             DrawTextW(hdc, spd, -1, &r3, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
-            cx += 100;
+            cx += cols[3].width;
 
             FormatSpeed(row.speed_up, spd, 32);
             SetTextColor(hdc, row.speed_up > 0.01 ? GetAccentColor(true) : GetSecondaryTextColor());
-            RECT r4 = { cx + 4, ry, cx + 100 - 4, ry + row_h };
+            RECT r4 = { cx + 4, ry, cx + cols[4].width - 4, ry + row_h };
             DrawTextW(hdc, spd, -1, &r4, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
-            cx += 100;
+            cx += cols[4].width;
 
             wchar_t conn[16]; swprintf_s(conn, L"%d", row.conn_count);
             SetTextColor(hdc, row.conn_count > 0 ? GetAccentColor(true) : GetSecondaryTextColor());
-            RECT r5 = { cx + 4, ry, cx + 60 - 4, ry + row_h };
+            RECT r5 = { cx + 4, ry, cx + cols[5].width - 4, ry + row_h };
             DrawTextW(hdc, conn, -1, &r5, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
-            cx += 60;
+            cx += cols[5].width;
 
             SetTextColor(hdc, m_dark_mode ? RGB(255, 165, 0) : RGB(230, 126, 34));
             SelectObject(hdc, hSmallFont);
-            RECT r6 = { cx + 4, ry, cx + 80 - 4, ry + row_h };
+            RECT r6 = { cx + 4, ry, cx + cols[6].width - 4, ry + row_h };
             DrawTextW(hdc, L"\u00B7\u00B7\u00B7", -1, &r6, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
         }
 
