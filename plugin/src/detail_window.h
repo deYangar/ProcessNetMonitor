@@ -133,6 +133,9 @@ private:
     bool m_visible = false;
     bool m_dark_mode = true;
     bool m_tracking_mouse = false;
+    bool m_context_menu_open = false;
+    DWORD m_context_menu_pid = 0;
+    std::wstring m_context_menu_path;
 
     // Data
     std::vector<DisplayRow> m_rows;

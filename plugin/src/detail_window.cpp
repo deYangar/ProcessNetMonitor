@@ -271,11 +271,17 @@ void CDetailWindow::BuildHistoryRows() {
 void CDetailWindow::UpdateData(const std::vector<ProcTraffic>& stats, double total_up, double total_down) {
     m_total_up = total_up;
     m_total_down = total_down;
-    m_cached_stats = stats;
 
-    // Record history every cycle
+    // Always record history
     RecordHistory(stats);
 
+    // Pause visual updates while context menu is open
+    if (m_context_menu_open) {
+        m_cached_stats = stats;
+        return;
+    }
+
+    m_cached_stats = stats;
     RebuildRows();
 }
 
@@ -445,6 +451,11 @@ void CDetailWindow::ShowContextMenu(int row, int x, int y) {
     if (row < 0 || row >= (int)m_rows.size()) return;
     auto& r = m_rows[row];
 
+    // Lock target process before showing menu
+    m_context_menu_pid = r.pid;
+    m_context_menu_path = r.exe_path;
+    m_context_menu_open = true;
+
     HMENU hMenu = CreatePopupMenu();
     AppendMenuW(hMenu, MF_STRING, 1, L"\u5B9A\u4F4D\u6587\u4EF6");
     AppendMenuW(hMenu, MF_STRING, 2, L"\u6587\u4EF6\u5C5E\u6027");
@@ -454,27 +465,32 @@ void CDetailWindow::ShowContextMenu(int row, int x, int y) {
     int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y, 0, m_hwnd, NULL);
     DestroyMenu(hMenu);
 
+    // Use locked target, not current row
+    DWORD pid = m_context_menu_pid;
+    std::wstring path = m_context_menu_path;
+    m_context_menu_open = false;
+
     switch (cmd) {
     case 1: // \u5B9A\u4F4D\u6587\u4EF6
-        if (!r.exe_path.empty()) {
+        if (!path.empty()) {
             wchar_t arg[MAX_PATH + 32];
-            swprintf_s(arg, L"/select,\"%s\"", r.exe_path.c_str());
+            swprintf_s(arg, L"/select,\"%s\"", path.c_str());
             ShellExecuteW(NULL, L"open", L"explorer.exe", arg, NULL, SW_SHOWNORMAL);
         }
         break;
     case 2: // \u6587\u4EF6\u5C5E\u6027
-        if (!r.exe_path.empty()) {
+        if (!path.empty()) {
             SHELLEXECUTEINFOW sei = { sizeof(sei) };
             sei.fMask = SEE_MASK_INVOKEIDLIST;
             sei.lpVerb = L"properties";
-            sei.lpFile = r.exe_path.c_str();
+            sei.lpFile = path.c_str();
             sei.nShow = SW_SHOWNORMAL;
             ShellExecuteExW(&sei);
         }
         break;
     case 3: // \u7ED3\u675F\u8FDB\u7A0B
-        if (r.pid > 0) {
-            HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, r.pid);
+        if (pid > 0) {
+            HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
             if (hProc) {
                 TerminateProcess(hProc, 1);
                 CloseHandle(hProc);
