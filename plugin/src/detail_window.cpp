@@ -27,6 +27,7 @@ CDetailWindow::CDetailWindow() {
 }
 
 CDetailWindow::~CDetailWindow() {
+    SaveHistory();
     if (m_hwnd) DestroyWindow(m_hwnd);
     for (auto& [path, icon] : m_icon_cache) {
         if (icon) DestroyIcon(icon);
@@ -265,6 +266,103 @@ void CDetailWindow::BuildHistoryRows() {
 }
 
 // ============================================================
+// Persistence
+// ============================================================
+
+void CDetailWindow::SaveHistory() {
+    if (m_config_dir.empty()) return;
+
+    // Create directory if needed
+    CreateDirectoryW(m_config_dir.c_str(), NULL);
+
+    wchar_t path[MAX_PATH];
+    swprintf_s(path, MAX_PATH, L"%s\\history.dat", m_config_dir.c_str());
+
+    FILE* f = _wfopen(path, L"wb");
+    if (!f) return;
+
+    // Header: magic + entry count
+    uint32_t magic = 0x504E4D48; // 'PNMH'
+    uint32_t version = 1;
+    uint32_t count = (uint32_t)m_history.size();
+    fwrite(&magic, 4, 1, f);
+    fwrite(&version, 4, 1, f);
+    fwrite(&count, 4, 1, f);
+
+    for (auto& [name, hist] : m_history) {
+        // Write name (length-prefixed UTF-16)
+        uint32_t name_len = (uint32_t)name.size();
+        fwrite(&name_len, 4, 1, f);
+        fwrite(name.c_str(), sizeof(wchar_t), name_len, f);
+
+        // Write exe_path
+        uint32_t path_len = (uint32_t)hist.exe_path.size();
+        fwrite(&path_len, 4, 1, f);
+        fwrite(hist.exe_path.c_str(), sizeof(wchar_t), path_len, f);
+
+        // Write snapshots
+        uint32_t snap_count = (uint32_t)hist.snapshots.size();
+        fwrite(&snap_count, 4, 1, f);
+        for (auto& snap : hist.snapshots) {
+            fwrite(&snap.tick, sizeof(ULONGLONG), 1, f);
+            fwrite(&snap.cum_recv, sizeof(uint64_t), 1, f);
+            fwrite(&snap.cum_sent, sizeof(uint64_t), 1, f);
+        }
+    }
+    fclose(f);
+}
+
+void CDetailWindow::LoadHistory() {
+    if (m_config_dir.empty()) return;
+    wchar_t path[MAX_PATH];
+    swprintf_s(path, MAX_PATH, L"%s\\history.dat", m_config_dir.c_str());
+
+    FILE* f = _wfopen(path, L"rb");
+    if (!f) return;
+
+    uint32_t magic, version, count;
+    if (fread(&magic, 4, 1, f) != 1 || magic != 0x504E4D48) { fclose(f); return; }
+    if (fread(&version, 4, 1, f) != 1 || version != 1) { fclose(f); return; }
+    if (fread(&count, 4, 1, f) != 1) { fclose(f); return; }
+
+    ULONGLONG now = GetTickCount64();
+
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t name_len;
+        if (fread(&name_len, 4, 1, f) != 1) break;
+        if (name_len > 512) break;
+        std::wstring name(name_len, L'\0');
+        if (fread(&name[0], sizeof(wchar_t), name_len, f) != name_len) break;
+
+        uint32_t path_len;
+        if (fread(&path_len, 4, 1, f) != 1) break;
+        if (path_len > MAX_PATH) break;
+        std::wstring exe_path(path_len, L'\0');
+        if (fread(&exe_path[0], sizeof(wchar_t), path_len, f) != path_len) break;
+
+        uint32_t snap_count;
+        if (fread(&snap_count, 4, 1, f) != 1) break;
+        if (snap_count > MAX_HISTORY_SNAPSHOTS + 100) break;
+
+        auto& hist = m_history[name];
+        hist.name = name;
+        hist.exe_path = exe_path;
+
+        for (uint32_t j = 0; j < snap_count; j++) {
+            HistorySnapshot snap;
+            if (fread(&snap.tick, sizeof(ULONGLONG), 1, f) != 1) break;
+            if (fread(&snap.cum_recv, sizeof(uint64_t), 1, f) != 1) break;
+            if (fread(&snap.cum_sent, sizeof(uint64_t), 1, f) != 1) break;
+
+            // Skip very old entries (>30 days)
+            if (now - snap.tick > 30ULL * 24 * 3600 * 1000) continue;
+            hist.snapshots.push_back(snap);
+        }
+    }
+    fclose(f);
+}
+
+// ============================================================
 // Data update
 // ============================================================
 
@@ -274,6 +372,13 @@ void CDetailWindow::UpdateData(const std::vector<ProcTraffic>& stats, double tot
 
     // Always record history
     RecordHistory(stats);
+
+    // Auto-save every 60 seconds
+    ULONGLONG now = GetTickCount64();
+    if (now - m_last_save_tick > 60000) {
+        m_last_save_tick = now;
+        SaveHistory();
+    }
 
     // Pause visual updates while context menu is open
     if (m_context_menu_open) {

@@ -10,7 +10,7 @@
 #pragma comment(lib, "user32.lib")
 
 CTooltipPopup* CTooltipPopup::s_instance = nullptr;
-static HINSTANCE s_dll_hinst = nullptr;
+HINSTANCE s_dll_hinst = nullptr;
 
 // Standalone WndProc to avoid member function pointer ABI issues
 static LRESULT CALLBACK StaticWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {

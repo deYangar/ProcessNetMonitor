@@ -30,6 +30,11 @@ public:
 
     LRESULT HandleMessage(UINT msg, WPARAM wp, LPARAM lp);
 
+    // Persistence (called from plugin_main)
+    void SaveHistory();
+    void LoadHistory();
+    void SetConfigDir(const std::wstring& dir) { m_config_dir = dir; }
+
     // History time range
     enum TimeRange { TR_24H = 0, TR_3D, TR_7D, TR_30D };
 
@@ -78,6 +83,8 @@ private:
     // History
     void RecordHistory(const std::vector<ProcTraffic>& stats);
     void BuildHistoryRows();
+
+    std::wstring m_config_dir;
 
     // Helpers
     bool IsDarkMode();
@@ -148,6 +155,7 @@ private:
     // History: process name -> history
     std::map<std::wstring, ProcessHistory> m_history;
     ULONGLONG m_history_start_tick = 0;  // when TM plugin started
+    ULONGLONG m_last_save_tick = 0;
     static const int MAX_HISTORY_SNAPSHOTS = 3600;  // 1 hour at 1/sec
 
     // Time range filter (history tab)

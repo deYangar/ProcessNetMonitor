@@ -2,6 +2,9 @@
 #include <algorithm>
 #include <shellapi.h>
 
+// From tooltip_popup.cpp DllMain - DLL's HINSTANCE
+extern HINSTANCE s_dll_hinst;
+
 CProcessNetPlugin CProcessNetPlugin::s_instance;
 wchar_t CProcessNetItem::s_value_buf[2][256] = { L"starting...", L"starting..." };
 
@@ -143,8 +146,8 @@ void CProcessNetPlugin::DataRequired() {
     m_cached_up = su;
     m_cached_down = sd;
 
-    // Update detail window if visible
-    if (m_detail_created && m_detail.IsVisible()) {
+    // Update detail window (always, for history recording)
+    if (m_detail_created) {
         m_detail.UpdateData(stats, su, sd);
     }
 
@@ -206,6 +209,17 @@ void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
     HINSTANCE hInst = (HINSTANCE)GetModuleHandleW(NULL);
     m_popup_created = m_popup.Initialize(hInst);
     m_detail_created = m_detail.Initialize(hInst);
+
+    // Set config dir: use DLL directory + \\data
+    if (s_dll_hinst) {
+        wchar_t dll_path[MAX_PATH];
+        GetModuleFileNameW(s_dll_hinst, dll_path, MAX_PATH);
+        wchar_t* slash = wcsrchr(dll_path, L'\\');
+        if (slash) *slash = 0;
+        std::wstring data_dir = std::wstring(dll_path) + L"\\data";
+        m_detail.SetConfigDir(data_dir);
+    }
+    m_detail.LoadHistory();
 }
 
 // ============================================================
