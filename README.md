@@ -8,7 +8,9 @@ TrafficMonitor 的插件，显示每个进程的网络速度。
 
 ![悬浮信息窗口](docs/screenshot-popup.jpg)
 
-![详情窗口](docs/screenshot-detail.jpg)
+![详情窗口-实时流量](docs/screenshot-detail-realtime.jpg)
+
+![详情窗口-历史流量](docs/screenshot-detail-history.jpg)
 
 ## 功能
 
