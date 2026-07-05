@@ -9,18 +9,7 @@
 #pragma comment(lib, "dwmapi.lib")
 
 CDetailWindow* CDetailWindow::s_instance = nullptr;
-static HINSTANCE s_detail_hinst = nullptr;
 
-BOOL APIENTRY DllMain_Detail(HMODULE hModule, DWORD reason, LPVOID);
-
-// Reuse DllMain from tooltip_popup.cpp - we capture hinst differently
-static struct DetailHinstCapture {
-    HINSTANCE hinst = nullptr;
-} s_dhinst;
-
-// ============================================================
-// Static WndProc
-// ============================================================
 static LRESULT CALLBACK DetailStaticWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (CDetailWindow::s_instance)
         return CDetailWindow::s_instance->HandleMessage(msg, wp, lp);
@@ -28,12 +17,13 @@ static LRESULT CALLBACK DetailStaticWndProc(HWND hwnd, UINT msg, WPARAM wp, LPAR
 }
 
 // ============================================================
-// Construction
+// Construction / Destruction
 // ============================================================
 
 CDetailWindow::CDetailWindow() {
     s_instance = this;
     m_dark_mode = IsDarkMode();
+    m_history_start_tick = GetTickCount64();
 }
 
 CDetailWindow::~CDetailWindow() {
@@ -85,33 +75,26 @@ HICON CDetailWindow::GetProcessIcon(const std::wstring& exe_path) {
 COLORREF CDetailWindow::GetBgColor() {
     return m_dark_mode ? RGB(32, 32, 36) : RGB(249, 249, 249);
 }
-
 COLORREF CDetailWindow::GetTitleBarColor() {
     return m_dark_mode ? RGB(28, 28, 32) : RGB(243, 243, 243);
 }
-
 COLORREF CDetailWindow::GetTextColor() {
     return m_dark_mode ? RGB(240, 240, 240) : RGB(30, 30, 30);
 }
-
 COLORREF CDetailWindow::GetSecondaryTextColor() {
     return m_dark_mode ? RGB(140, 140, 140) : RGB(130, 130, 130);
 }
-
 COLORREF CDetailWindow::GetAccentColor(bool is_upload) {
     if (is_upload) return m_dark_mode ? RGB(255, 165, 0) : RGB(230, 126, 34);
     return m_dark_mode ? RGB(80, 200, 120) : RGB(46, 160, 67);
 }
-
 COLORREF CDetailWindow::GetHeaderBgColor() {
     return m_dark_mode ? RGB(38, 38, 42) : RGB(240, 240, 240);
 }
-
 COLORREF CDetailWindow::GetRowBgColor(int row, bool hovered) {
     if (hovered) return m_dark_mode ? RGB(48, 48, 54) : RGB(232, 232, 232);
     return (row % 2 == 0) ? GetBgColor() : (m_dark_mode ? RGB(35, 35, 39) : RGB(245, 245, 245));
 }
-
 COLORREF CDetailWindow::GetBorderColor() {
     return m_dark_mode ? RGB(55, 55, 60) : RGB(220, 220, 220);
 }
@@ -121,6 +104,14 @@ void CDetailWindow::FormatSpeed(double bps, wchar_t* buf, int n) {
     else if (bps < 1024) swprintf_s(buf, n, L"%.0f B/s", bps);
     else if (bps < 1048576) swprintf_s(buf, n, L"%.1f KB/s", bps / 1024.0);
     else swprintf_s(buf, n, L"%.2f MB/s", bps / 1048576.0);
+}
+
+void CDetailWindow::FormatBytes(uint64_t bytes, wchar_t* buf, int n) {
+    if (bytes == 0) wcsncpy_s(buf, n, L"0 B", _TRUNCATE);
+    else if (bytes < 1024ULL) swprintf_s(buf, n, L"%llu B", bytes);
+    else if (bytes < 1048576ULL) swprintf_s(buf, n, L"%.1f KB", bytes / 1024.0);
+    else if (bytes < 1073741824ULL) swprintf_s(buf, n, L"%.2f MB", bytes / 1048576.0);
+    else swprintf_s(buf, n, L"%.2f GB", bytes / 1073741824.0);
 }
 
 // ============================================================
@@ -139,12 +130,11 @@ bool CDetailWindow::Initialize(HINSTANCE hInst) {
     wc.lpfnWndProc = DefWindowProcW;
     wc.hInstance = m_hinst;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = NULL;
     wc.lpszClassName = className;
     RegisterClassExW(&wc);
 
     m_hwnd = CreateWindowExW(
-        WS_EX_TOOLWINDOW,  // no taskbar icon
+        WS_EX_TOOLWINDOW,
         className, L"ProcessNetMonitor",
         WS_POPUP | WS_THICKFRAME,
         CW_USEDEFAULT, CW_USEDEFAULT, MIN_WIDTH + 40, MIN_HEIGHT + 80,
@@ -154,7 +144,6 @@ bool CDetailWindow::Initialize(HINSTANCE hInst) {
 
     SetWindowLongPtrW(m_hwnd, GWLP_WNDPROC, (LONG_PTR)DetailStaticWndProc);
 
-    // Rounded corners (Win11+)
     int corner_pref = 2;
     DwmSetWindowAttribute(m_hwnd, 33, &corner_pref, sizeof(corner_pref));
 
@@ -165,7 +154,6 @@ void CDetailWindow::Show(HWND parent_wnd) {
     m_parent_wnd = parent_wnd;
     m_dark_mode = IsDarkMode();
 
-    // Center on screen
     int sw = GetSystemMetrics(SM_CXSCREEN);
     int sh = GetSystemMetrics(SM_CYSCREEN);
     int w = min(720, sw - 100);
@@ -186,10 +174,107 @@ void CDetailWindow::Hide() {
     }
 }
 
+// ============================================================
+// History recording
+// ============================================================
+
+void CDetailWindow::RecordHistory(const std::vector<ProcTraffic>& stats) {
+    ULONGLONG now = GetTickCount64();
+
+    for (auto& st : stats) {
+        auto& hist = m_history[st.name];
+        if (hist.name.empty()) {
+            hist.name = st.name;
+            hist.exe_path = st.exe_path;
+        }
+        if (hist.exe_path.empty() && !st.exe_path.empty())
+            hist.exe_path = st.exe_path;
+
+        // Add snapshot
+        HistorySnapshot snap;
+        snap.tick = now;
+        snap.cum_recv = st.bytes_recv;
+        snap.cum_sent = st.bytes_sent;
+        hist.snapshots.push_back(snap);
+
+        // Cap at MAX_HISTORY_SNAPSHOTS
+        while ((int)hist.snapshots.size() > MAX_HISTORY_SNAPSHOTS)
+            hist.snapshots.pop_front();
+    }
+}
+
+void CDetailWindow::BuildHistoryRows() {
+    m_rows.clear();
+
+    ULONGLONG now = GetTickCount64();
+    ULONGLONG range_ms = 0;
+    switch (m_time_range) {
+    case TR_24H: range_ms = 24ULL * 3600 * 1000; break;
+    case TR_3D:  range_ms = 3ULL * 24 * 3600 * 1000; break;
+    case TR_7D:  range_ms = 7ULL * 24 * 3600 * 1000; break;
+    case TR_30D: range_ms = 30ULL * 24 * 3600 * 1000; break;
+    }
+    ULONGLONG cutoff = (now > range_ms) ? (now - range_ms) : 0;
+    // Don't go before plugin start
+    if (cutoff < m_history_start_tick) cutoff = m_history_start_tick;
+
+    for (auto& [name, hist] : m_history) {
+        if (hist.snapshots.empty()) continue;
+
+        // Find first and last snapshot in range
+        const HistorySnapshot* first = nullptr;
+        const HistorySnapshot* last = nullptr;
+        for (auto& snap : hist.snapshots) {
+            if (snap.tick < cutoff) continue;
+            if (!first) first = &snap;
+            last = &snap;
+        }
+        if (!first || !last || first == last) continue;
+
+        uint64_t recv_delta = last->cum_recv - first->cum_recv;
+        uint64_t sent_delta = last->cum_sent - first->cum_sent;
+        double elapsed_sec = (double)(last->tick - first->tick) / 1000.0;
+        if (elapsed_sec < 1.0) elapsed_sec = 1.0;
+
+        DisplayRow row;
+        row.name = hist.name;
+        row.exe_path = hist.exe_path;
+        row.hist_recv = recv_delta;
+        row.hist_sent = sent_delta;
+        row.hist_avg_down = (double)recv_delta / elapsed_sec;
+        row.hist_avg_up = (double)sent_delta / elapsed_sec;
+
+        // Category
+        std::wstring lower = hist.name;
+        for (auto& c : lower) c = towlower(c);
+        if (lower.find(L"svchost") != std::wstring::npos ||
+            lower.find(L"system") != std::wstring::npos ||
+            lower.find(L"csrss") != std::wstring::npos ||
+            lower.find(L"lsass") != std::wstring::npos)
+            row.category = L"\u7CFB\u7EDF\u8FDB\u7A0B";
+        else
+            row.category = L"\u7B2C\u4E09\u65B9\u7A0B\u5E8F";
+
+        // Restore expanded state
+        for (auto& old : m_rows) {
+            if (old.name == name && old.expanded) { row.expanded = true; break; }
+        }
+
+        m_rows.push_back(row);
+    }
+}
+
+// ============================================================
+// Data update
+// ============================================================
+
 void CDetailWindow::UpdateData(const std::vector<ProcTraffic>& stats, double total_up, double total_down) {
     m_total_up = total_up;
     m_total_down = total_down;
     m_cached_stats = stats;
+
+    // Record history every cycle
+    RecordHistory(stats);
 
     RebuildRows();
 }
@@ -197,54 +282,51 @@ void CDetailWindow::UpdateData(const std::vector<ProcTraffic>& stats, double tot
 void CDetailWindow::RebuildRows() {
     auto& stats = m_cached_stats;
 
-    // Save expanded PIDs before rebuild
+    if (m_active_tab == 1) {
+        // History tab
+        BuildHistoryRows();
+        ResortRows();
+        int max_scroll = (int)m_rows.size() - 1;
+        if (m_scroll_pos > max_scroll) m_scroll_pos = max(0, max_scroll);
+        if (m_visible) InvalidateRect(m_hwnd, NULL, FALSE);
+        return;
+    }
+
+    // Tab 0: real-time - show ALL processes with connections or traffic
     std::set<DWORD> expanded_pids;
     for (auto& r : m_rows) {
         if (r.expanded) expanded_pids.insert(r.pid);
     }
 
-    // Build display rows from stats
-    std::map<DWORD, DisplayRow> row_map;
-    for (auto& st : stats) {
-        // Tab 0 = 实时(only active), Tab 1 = 历史(all)
-        if (m_active_tab == 0 && st.speed_up < 0.01 && st.speed_down < 0.01)
-            continue;
-        auto& r = row_map[st.pid];
-        r.pid = st.pid;
-        r.name = st.name;
-        r.exe_path = st.exe_path;
-        r.speed_up = st.speed_up;
-        r.speed_down = st.speed_down;
-        r.conn_count = st.conn_count;
-        if (r.category.empty()) {
-            std::wstring lower = st.name;
-            for (auto& c : lower) c = towlower(c);
-            if (lower.find(L"svchost") != std::wstring::npos ||
-                lower.find(L"system") != std::wstring::npos ||
-                lower.find(L"csrss") != std::wstring::npos ||
-                lower.find(L"lsass") != std::wstring::npos)
-                r.category = L"系统进程";
-            else
-                r.category = L"第三方程序";
-        }
-    }
-
     m_rows.clear();
-    for (auto& [pid, r] : row_map) {
-        if (expanded_pids.count(pid)) r.expanded = true;
-        m_rows.push_back(std::move(r));
+    for (auto& st : stats) {
+        DisplayRow row;
+        row.pid = st.pid;
+        row.name = st.name;
+        row.exe_path = st.exe_path;
+        row.speed_up = st.speed_up;
+        row.speed_down = st.speed_down;
+        row.conn_count = st.conn_count;
+        // Category
+        std::wstring lower = st.name;
+        for (auto& c : lower) c = towlower(c);
+        if (lower.find(L"svchost") != std::wstring::npos ||
+            lower.find(L"system") != std::wstring::npos ||
+            lower.find(L"csrss") != std::wstring::npos ||
+            lower.find(L"lsass") != std::wstring::npos)
+            row.category = L"\u7CFB\u7EDF\u8FDB\u7A0B";
+        else
+            row.category = L"\u7B2C\u4E09\u65B9\u7A0B\u5E8F";
+
+        if (expanded_pids.count(st.pid)) row.expanded = true;
+        m_rows.push_back(row);
     }
 
-    // Re-sort using current column/direction (no toggle)
     ResortRows();
 
-    // Clamp scroll
     int max_scroll = (int)m_rows.size() - 1;
     if (m_scroll_pos > max_scroll) m_scroll_pos = max(0, max_scroll);
-
-    if (m_visible) {
-        InvalidateRect(m_hwnd, NULL, FALSE);
-    }
+    if (m_visible) InvalidateRect(m_hwnd, NULL, FALSE);
 }
 
 // ============================================================
@@ -253,12 +335,14 @@ void CDetailWindow::RebuildRows() {
 
 int CDetailWindow::GetHeaderHeight() const { return TITLE_BAR_H; }
 int CDetailWindow::GetTabsHeight() const { return TAB_BAR_H; }
+int CDetailWindow::GetTimeRangeHeight() const { return m_active_tab == 1 ? TIME_RANGE_H : 0; }
 int CDetailWindow::GetSummaryHeight() const { return SUMMARY_H; }
 int CDetailWindow::GetTableHeaderHeight() const { return TABLE_HEADER_H; }
 int CDetailWindow::GetRowHeight() const { return ROW_H; }
 
 int CDetailWindow::GetTableAreaTop() const {
-    return PADDING + GetHeaderHeight() + GetTabsHeight() + GetSummaryHeight() + GetTableHeaderHeight();
+    return PADDING + GetHeaderHeight() + GetTabsHeight() + GetTimeRangeHeight()
+           + GetSummaryHeight() + GetTableHeaderHeight();
 }
 
 int CDetailWindow::GetVisibleRows(int client_h) const {
@@ -271,16 +355,29 @@ int CDetailWindow::GetVisibleRows(int client_h) const {
 // ============================================================
 
 void CDetailWindow::ResortRows() {
-    // Sort using current m_sort_col / m_sort_desc without toggling
+    bool is_hist = (m_active_tab == 1);
     std::sort(m_rows.begin(), m_rows.end(), [&](const DisplayRow& a, const DisplayRow& b) {
         int cmp = 0;
-        switch (m_sort_col) {
-        case COL_NAME: cmp = _wcsicmp(a.name.c_str(), b.name.c_str()); break;
-        case COL_CATEGORY: cmp = _wcsicmp(a.category.c_str(), b.category.c_str()); break;
-        case COL_DOWN: cmp = (a.speed_down > b.speed_down) ? 1 : (a.speed_down < b.speed_down ? -1 : 0); break;
-        case COL_UP: cmp = (a.speed_up > b.speed_up) ? 1 : (a.speed_up < b.speed_up ? -1 : 0); break;
-        case COL_CONN: cmp = (a.conn_count > b.conn_count) ? 1 : (a.conn_count < b.conn_count ? -1 : 0); break;
-        default: cmp = 0;
+        if (is_hist) {
+            // History columns: icon, name, category, total_down, total_up, avg_down, avg_up
+            switch (m_sort_col) {
+            case 1: cmp = _wcsicmp(a.name.c_str(), b.name.c_str()); break;
+            case 2: cmp = _wcsicmp(a.category.c_str(), b.category.c_str()); break;
+            case 3: cmp = (a.hist_recv > b.hist_recv) ? 1 : (a.hist_recv < b.hist_recv ? -1 : 0); break;
+            case 4: cmp = (a.hist_sent > b.hist_sent) ? 1 : (a.hist_sent < b.hist_sent ? -1 : 0); break;
+            case 5: cmp = (a.hist_avg_down > b.hist_avg_down) ? 1 : (a.hist_avg_down < b.hist_avg_down ? -1 : 0); break;
+            case 6: cmp = (a.hist_avg_up > b.hist_avg_up) ? 1 : (a.hist_avg_up < b.hist_avg_up ? -1 : 0); break;
+            default: cmp = 0;
+            }
+        } else {
+            switch (m_sort_col) {
+            case 1: cmp = _wcsicmp(a.name.c_str(), b.name.c_str()); break;
+            case 2: cmp = _wcsicmp(a.category.c_str(), b.category.c_str()); break;
+            case 3: cmp = (a.speed_down > b.speed_down) ? 1 : (a.speed_down < b.speed_down ? -1 : 0); break;
+            case 4: cmp = (a.speed_up > b.speed_up) ? 1 : (a.speed_up < b.speed_up ? -1 : 0); break;
+            case 5: cmp = (a.conn_count > b.conn_count) ? 1 : (a.conn_count < b.conn_count ? -1 : 0); break;
+            default: cmp = 0;
+            }
         }
         return m_sort_desc ? (cmp > 0) : (cmp < 0);
     });
@@ -309,10 +406,11 @@ int CDetailWindow::HitTestRow(int y) const {
 }
 
 int CDetailWindow::HitTestColumn(int x) const {
+    const Column* cols = (m_active_tab == 0) ? m_rt_cols : m_hist_cols;
     int cx = PADDING;
-    for (int i = 0; i < 7; i++) {
-        if (x >= cx && x < cx + m_columns[i].width) return i;
-        cx += m_columns[i].width;
+    for (int i = 0; i < NUM_COLS; i++) {
+        if (x >= cx && x < cx + cols[i].width) return i;
+        cx += cols[i].width;
     }
     return -1;
 }
@@ -324,7 +422,7 @@ void CDetailWindow::ToggleExpand(int row) {
 }
 
 void CDetailWindow::ScrollTo(int pos) {
-    int max_pos = max(0, (int)m_rows.size() - GetVisibleRows(GetSystemMetrics(SM_CYSCREEN)));
+    int max_pos = max(0, (int)m_rows.size() - 10);
     m_scroll_pos = max(0, min(pos, max_pos));
     InvalidateRect(m_hwnd, NULL, FALSE);
 }
@@ -338,25 +436,23 @@ void CDetailWindow::ShowContextMenu(int row, int x, int y) {
     auto& r = m_rows[row];
 
     HMENU hMenu = CreatePopupMenu();
-    AppendMenuW(hMenu, MF_STRING, 1, L"定位文件");
-    AppendMenuW(hMenu, MF_STRING, 2, L"文件属性");
+    AppendMenuW(hMenu, MF_STRING, 1, L"\u5B9A\u4F4D\u6587\u4EF6");
+    AppendMenuW(hMenu, MF_STRING, 2, L"\u6587\u4EF6\u5C5E\u6027");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hMenu, MF_STRING, 3, L"结束进程");
-    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hMenu, MF_STRING | (r.speed_up + r.speed_down > 0.01 ? MF_ENABLED : MF_GRAYED), 4, L"查看详情");
+    AppendMenuW(hMenu, MF_STRING, 3, L"\u7ED3\u675F\u8FDB\u7A0B");
 
     int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y, 0, m_hwnd, NULL);
     DestroyMenu(hMenu);
 
     switch (cmd) {
-    case 1: // 定位文件
+    case 1:
         if (!r.exe_path.empty()) {
             wchar_t arg[MAX_PATH + 32];
             swprintf_s(arg, L"/select,\"%s\"", r.exe_path.c_str());
             ShellExecuteW(NULL, L"open", L"explorer.exe", arg, NULL, SW_SHOWNORMAL);
         }
         break;
-    case 2: // 文件属性
+    case 2:
         if (!r.exe_path.empty()) {
             SHELLEXECUTEINFOW sei = { sizeof(sei) };
             sei.fMask = SEE_MASK_INVOKEIDLIST;
@@ -366,7 +462,7 @@ void CDetailWindow::ShowContextMenu(int row, int x, int y) {
             ShellExecuteExW(&sei);
         }
         break;
-    case 3: // 结束进程
+    case 3:
         if (r.pid > 0) {
             HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, r.pid);
             if (hProc) {
@@ -374,9 +470,6 @@ void CDetailWindow::ShowContextMenu(int row, int x, int y) {
                 CloseHandle(hProc);
             }
         }
-        break;
-    case 4: // 查看详情 (expand)
-        ToggleExpand(row);
         break;
     }
 }
@@ -387,49 +480,20 @@ void CDetailWindow::ShowContextMenu(int row, int x, int y) {
 
 LRESULT CDetailWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
-    case WM_PAINT:
-        OnPaint();
-        return 0;
-
-    case WM_SIZE:
-        OnSize(LOWORD(lp), HIWORD(lp));
-        return 0;
-
-    case WM_LBUTTONDOWN:
-        OnLButtonDown((short)LOWORD(lp), (short)HIWORD(lp));
-        return 0;
-
-    case WM_LBUTTONDBLCLK:
-        OnLButtonDblClk((short)LOWORD(lp), (short)HIWORD(lp));
-        return 0;
-
-    case WM_RBUTTONDOWN:
-        OnRButtonDown((short)LOWORD(lp), (short)HIWORD(lp));
-        return 0;
-
-    case WM_MOUSEMOVE:
-        OnMouseMove((short)LOWORD(lp), (short)HIWORD(lp));
-        return 0;
-
-    case WM_MOUSELEAVE:
-        OnMouseLeave();
-        return 0;
-
-    case WM_MOUSEWHEEL:
-        OnMouseWheel(GET_WHEEL_DELTA_WPARAM(wp));
-        return 0;
-
-    case WM_VSCROLL:
-        OnVScroll(LOWORD(wp));
-        return 0;
-
-    case WM_ERASEBKGND:
-        return 1;
+    case WM_PAINT: OnPaint(); return 0;
+    case WM_SIZE: OnSize(LOWORD(lp), HIWORD(lp)); return 0;
+    case WM_LBUTTONDOWN: OnLButtonDown((short)LOWORD(lp), (short)HIWORD(lp)); return 0;
+    case WM_LBUTTONDBLCLK: OnLButtonDblClk((short)LOWORD(lp), (short)HIWORD(lp)); return 0;
+    case WM_RBUTTONDOWN: OnRButtonDown((short)LOWORD(lp), (short)HIWORD(lp)); return 0;
+    case WM_MOUSEMOVE: OnMouseMove((short)LOWORD(lp), (short)HIWORD(lp)); return 0;
+    case WM_MOUSELEAVE: OnMouseLeave(); return 0;
+    case WM_MOUSEWHEEL: OnMouseWheel(GET_WHEEL_DELTA_WPARAM(wp)); return 0;
+    case WM_VSCROLL: OnVScroll(LOWORD(wp)); return 0;
+    case WM_ERASEBKGND: return 1;
 
     case WM_NCHITTEST: {
         POINT pt = { (short)LOWORD(lp), (short)HIWORD(lp) };
         ScreenToClient(m_hwnd, &pt);
-        // Title bar area: allow drag
         if (pt.y < TITLE_BAR_H && pt.y >= 0) {
             if (PtInRect(&m_rcClose, pt)) return HTCLIENT;
             if (PtInRect(&m_rcMin, pt)) return HTCLIENT;
@@ -457,48 +521,54 @@ void CDetailWindow::OnSize(int w, int h) {
 }
 
 void CDetailWindow::OnLButtonDown(int x, int y) {
-    // Close button
-    if (PtInRect(&m_rcClose, { x, y })) {
-        Hide();
-        return;
-    }
-    // Minimize button
-    if (PtInRect(&m_rcMin, { x, y })) {
-        ShowWindow(m_hwnd, SW_MINIMIZE);
-        return;
-    }
+    if (PtInRect(&m_rcClose, { x, y })) { Hide(); return; }
+    if (PtInRect(&m_rcMin, { x, y })) { ShowWindow(m_hwnd, SW_MINIMIZE); return; }
+
     // Tabs
     if (PtInRect(&m_rcTab0, { x, y })) {
-        if (m_active_tab != 0) { m_active_tab = 0; RebuildRows(); InvalidateRect(m_hwnd, NULL, FALSE); }
+        if (m_active_tab != 0) { m_active_tab = 0; m_sort_col = 3; m_sort_desc = true; m_scroll_pos = 0; RebuildRows(); }
         return;
     }
     if (PtInRect(&m_rcTab1, { x, y })) {
-        if (m_active_tab != 1) { m_active_tab = 1; RebuildRows(); InvalidateRect(m_hwnd, NULL, FALSE); }
+        if (m_active_tab != 1) { m_active_tab = 1; m_sort_col = 3; m_sort_desc = true; m_scroll_pos = 0; RebuildRows(); }
         return;
     }
 
+    // Time range buttons (history tab only)
+    if (m_active_tab == 1) {
+        for (int i = 0; i < 4; i++) {
+            if (PtInRect(&m_rcTRButtons[i], { x, y })) {
+                if (m_time_range != (TimeRange)i) {
+                    m_time_range = (TimeRange)i;
+                    m_scroll_pos = 0;
+                    RebuildRows();
+                }
+                return;
+            }
+        }
+    }
+
     // Table header click -> sort
-    if (y >= PADDING + GetHeaderHeight() + GetTabsHeight() + GetSummaryHeight() &&
-        y < PADDING + GetHeaderHeight() + GetTabsHeight() + GetSummaryHeight() + GetTableHeaderHeight()) {
+    int th_top = PADDING + GetHeaderHeight() + GetTabsHeight() + GetTimeRangeHeight() + GetSummaryHeight();
+    if (y >= th_top && y < th_top + GetTableHeaderHeight()) {
         int col = HitTestColumn(x);
-        if (col >= COL_NAME && col <= COL_CONN) {
+        if (col >= 1) {
             SortByColumn(col);
             InvalidateRect(m_hwnd, NULL, FALSE);
         }
         return;
     }
 
-    // Table row click -> select / expand
+    // Table row click -> expand
     int row = HitTestRow(y);
     if (row >= 0) {
-        // Check if click is on expand arrow area (first 20px of row)
         int table_left = PADDING;
         if (x >= table_left && x < table_left + 20) {
             ToggleExpand(row);
         }
     }
 
-    // Start drag for title bar
+    // Title bar drag
     if (y < TITLE_BAR_H) {
         ReleaseCapture();
         SendMessage(m_hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
@@ -507,9 +577,7 @@ void CDetailWindow::OnLButtonDown(int x, int y) {
 
 void CDetailWindow::OnLButtonDblClk(int x, int y) {
     int row = HitTestRow(y);
-    if (row >= 0) {
-        ToggleExpand(row);
-    }
+    if (row >= 0) ToggleExpand(row);
 }
 
 void CDetailWindow::OnRButtonDown(int x, int y) {
@@ -528,7 +596,6 @@ void CDetailWindow::OnMouseMove(int x, int y) {
         m_tracking_mouse = true;
     }
 
-    // Update hover states
     bool old_close = m_hovering_close;
     bool old_min = m_hovering_min;
     int old_row = m_hovered_row;
@@ -541,7 +608,6 @@ void CDetailWindow::OnMouseMove(int x, int y) {
         InvalidateRect(m_hwnd, NULL, FALSE);
     }
 
-    // Change cursor for title bar buttons
     if (m_hovering_close || m_hovering_min) {
         SetCursor(LoadCursor(NULL, IDC_HAND));
     } else {
@@ -565,9 +631,8 @@ void CDetailWindow::OnVScroll(int code) {
     switch (code) {
     case SB_LINEUP: ScrollTo(m_scroll_pos - 1); break;
     case SB_LINEDOWN: ScrollTo(m_scroll_pos + 1); break;
-    case SB_PAGEUP: ScrollTo(m_scroll_pos - GetVisibleRows(MIN_HEIGHT)); break;
-    case SB_PAGEDOWN: ScrollTo(m_scroll_pos + GetVisibleRows(MIN_HEIGHT)); break;
-    case SB_THUMBPOSITION: /* handled */ break;
+    case SB_PAGEUP: ScrollTo(m_scroll_pos - 10); break;
+    case SB_PAGEDOWN: ScrollTo(m_scroll_pos + 10); break;
     }
 }
 
@@ -581,7 +646,6 @@ void CDetailWindow::DrawTitleBar(HDC hdc, int w) {
     FillRect(hdc, &rc, hBrush);
     DeleteObject(hBrush);
 
-    // Bottom border
     HPEN hPen = CreatePen(PS_SOLID, 1, GetBorderColor());
     HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
     MoveToEx(hdc, 0, TITLE_BAR_H - 1, NULL);
@@ -589,13 +653,9 @@ void CDetailWindow::DrawTitleBar(HDC hdc, int w) {
     SelectObject(hdc, hOldPen);
     DeleteObject(hPen);
 
-    // App icon (shield-like)
     HICON hIcon = (HICON)LoadImageW(NULL, IDI_APPLICATION, IMAGE_ICON, 16, 16, LR_SHARED);
-    if (hIcon) {
-        DrawIconEx(hdc, PADDING, (TITLE_BAR_H - 16) / 2, hIcon, 16, 16, 0, NULL, DI_NORMAL);
-    }
+    if (hIcon) DrawIconEx(hdc, PADDING, (TITLE_BAR_H - 16) / 2, hIcon, 16, 16, 0, NULL, DI_NORMAL);
 
-    // Title text
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, GetTextColor());
     HFONT hFont = CreateFontW(-14, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
@@ -603,22 +663,17 @@ void CDetailWindow::DrawTitleBar(HDC hdc, int w) {
                                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
     HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
     RECT title_rc = { PADDING + 22, 0, w - 100, TITLE_BAR_H };
-    DrawTextW(hdc, L"ProcessNetMonitor - \u6D41\u91CF\u76D1\u63A7", -1, &title_rc,
-              DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    DrawTextW(hdc, L"ProcessNetMonitor", -1, &title_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
-    // Close button (X)
     int btn_size = 28;
     int btn_y = (TITLE_BAR_H - btn_size) / 2;
     m_rcClose = { w - btn_size - 4, btn_y, w - 4, btn_y + btn_size };
     SetTextColor(hdc, m_hovering_close ? RGB(255, 80, 80) : GetSecondaryTextColor());
-    RECT close_rc = m_rcClose;
-    DrawTextW(hdc, L"\u2715", -1, &close_rc, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+    DrawTextW(hdc, L"\u2715", -1, &m_rcClose, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
 
-    // Minimize button (-)
     m_rcMin = { w - btn_size * 2 - 4, btn_y, w - btn_size - 4, btn_y + btn_size };
     SetTextColor(hdc, m_hovering_min ? GetTextColor() : GetSecondaryTextColor());
-    RECT min_rc = m_rcMin;
-    DrawTextW(hdc, L"\u2013", -1, &min_rc, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+    DrawTextW(hdc, L"\u2013", -1, &m_rcMin, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
 
     SelectObject(hdc, hOldFont);
     DeleteObject(hFont);
@@ -636,14 +691,12 @@ void CDetailWindow::DrawTabs(HDC hdc, int w, int y) {
     HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
     SetBkMode(hdc, TRANSPARENT);
 
-    // Tab 0: 实时流量
     SIZE sz;
     const wchar_t* tab0 = L"\u5B9E\u65F6\u6D41\u91CF";
     GetTextExtentPoint32W(hdc, tab0, (int)wcslen(tab0), &sz);
     m_rcTab0 = { PADDING, y + 4, PADDING + sz.cx + 16, y + TAB_BAR_H - 4 };
     SetTextColor(hdc, m_active_tab == 0 ? GetAccentColor(false) : GetSecondaryTextColor());
-    RECT t0rc = m_rcTab0;
-    DrawTextW(hdc, tab0, -1, &t0rc, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+    DrawTextW(hdc, tab0, -1, &m_rcTab0, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
     if (m_active_tab == 0) {
         HPEN hPen = CreatePen(PS_SOLID, 2, GetAccentColor(false));
         HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
@@ -653,13 +706,11 @@ void CDetailWindow::DrawTabs(HDC hdc, int w, int y) {
         DeleteObject(hPen);
     }
 
-    // Tab 1: 历史流量
     const wchar_t* tab1 = L"\u5386\u53F2\u6D41\u91CF";
     GetTextExtentPoint32W(hdc, tab1, (int)wcslen(tab1), &sz);
     m_rcTab1 = { m_rcTab0.right + 12, y + 4, m_rcTab0.right + 12 + sz.cx + 16, y + TAB_BAR_H - 4 };
     SetTextColor(hdc, m_active_tab == 1 ? GetAccentColor(false) : GetSecondaryTextColor());
-    RECT t1rc = m_rcTab1;
-    DrawTextW(hdc, tab1, -1, &t1rc, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+    DrawTextW(hdc, tab1, -1, &m_rcTab1, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
     if (m_active_tab == 1) {
         HPEN hPen = CreatePen(PS_SOLID, 2, GetAccentColor(false));
         HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
@@ -667,6 +718,51 @@ void CDetailWindow::DrawTabs(HDC hdc, int w, int y) {
         LineTo(hdc, m_rcTab1.right - 2, y + TAB_BAR_H - 4);
         SelectObject(hdc, hOldPen);
         DeleteObject(hPen);
+    }
+
+    SelectObject(hdc, hOldFont);
+    DeleteObject(hFont);
+}
+
+void CDetailWindow::DrawTimeRangeButtons(HDC hdc, int w, int y) {
+    if (m_active_tab != 1) return;
+
+    RECT rc = { 0, y, w, y + TIME_RANGE_H };
+    HBRUSH hBrush = CreateSolidBrush(GetBgColor());
+    FillRect(hdc, &rc, hBrush);
+    DeleteObject(hBrush);
+
+    HFONT hFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                               CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
+    HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
+    SetBkMode(hdc, TRANSPARENT);
+
+    const wchar_t* labels[4] = { L"24\u5C0F\u65F6", L"3\u5929", L"7\u5929", L"30\u5929" };
+    int x = PADDING;
+    for (int i = 0; i < 4; i++) {
+        SIZE sz;
+        GetTextExtentPoint32W(hdc, labels[i], (int)wcslen(labels[i]), &sz);
+        int bw = sz.cx + 16;
+        m_rcTRButtons[i] = { x, y + 3, x + bw, y + TIME_RANGE_H - 3 };
+
+        // Draw button
+        bool selected = (m_time_range == (TimeRange)i);
+        HBRUSH hBtnBrush = CreateSolidBrush(selected ? GetAccentColor(false) : GetHeaderBgColor());
+        HPEN hBtnPen = CreatePen(PS_SOLID, 1, selected ? GetAccentColor(false) : GetBorderColor());
+        HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, hBtnBrush);
+        HPEN hOldPen = (HPEN)SelectObject(hdc, hBtnPen);
+        RoundRect(hdc, m_rcTRButtons[i].left, m_rcTRButtons[i].top,
+                  m_rcTRButtons[i].right, m_rcTRButtons[i].bottom, 4, 4);
+        SelectObject(hdc, hOldBrush);
+        SelectObject(hdc, hOldPen);
+        DeleteObject(hBtnBrush);
+        DeleteObject(hBtnPen);
+
+        SetTextColor(hdc, selected ? RGB(255, 255, 255) : GetTextColor());
+        DrawTextW(hdc, labels[i], -1, &m_rcTRButtons[i], DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+
+        x += bw + 6;
     }
 
     SelectObject(hdc, hOldFont);
@@ -689,31 +785,25 @@ void CDetailWindow::DrawSpeedSummary(HDC hdc, int w, int y) {
     FormatSpeed(m_total_down, down_str, 32);
     FormatSpeed(m_total_up, up_str, 32);
 
-    // Download total
     int x = PADDING;
     SetTextColor(hdc, GetSecondaryTextColor());
-    RECT label1 = { x, y, x + 80, y + SUMMARY_H };
-    DrawTextW(hdc, L"\u4E0B\u8F7D\u603B\u901F\u5EA6\uFF1A", -1, &label1, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    RECT l1 = { x, y, x + 80, y + SUMMARY_H };
+    DrawTextW(hdc, L"\u4E0B\u8F7D\u603B\u901F\u5EA6\uFF1A", -1, &l1, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
     x += 80;
-
     SetTextColor(hdc, GetAccentColor(false));
-    RECT val1 = { x, y, x + 100, y + SUMMARY_H };
-    wchar_t down_full[64];
-    swprintf_s(down_full, 64, L"\u2193 %s", down_str);
-    DrawTextW(hdc, down_full, -1, &val1, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    wchar_t d_full[64]; swprintf_s(d_full, 64, L"\u2193 %s", down_str);
+    RECT v1 = { x, y, x + 100, y + SUMMARY_H };
+    DrawTextW(hdc, d_full, -1, &v1, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
     x += 120;
 
-    // Upload total
     SetTextColor(hdc, GetSecondaryTextColor());
-    RECT label2 = { x, y, x + 80, y + SUMMARY_H };
-    DrawTextW(hdc, L"\u4E0A\u4F20\u603B\u901F\u5EA6\uFF1A", -1, &label2, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    RECT l2 = { x, y, x + 80, y + SUMMARY_H };
+    DrawTextW(hdc, L"\u4E0A\u4F20\u603B\u901F\u5EA6\uFF1A", -1, &l2, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
     x += 80;
-
     SetTextColor(hdc, GetAccentColor(true));
-    RECT val2 = { x, y, x + 100, y + SUMMARY_H };
-    wchar_t up_full[64];
-    swprintf_s(up_full, 64, L"\u2191 %s", up_str);
-    DrawTextW(hdc, up_full, -1, &val2, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    wchar_t u_full[64]; swprintf_s(u_full, 64, L"\u2191 %s", up_str);
+    RECT v2 = { x, y, x + 100, y + SUMMARY_H };
+    DrawTextW(hdc, u_full, -1, &v2, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
     SelectObject(hdc, hOldFont);
     DeleteObject(hFont);
@@ -740,19 +830,19 @@ void CDetailWindow::DrawTableHeader(HDC hdc, int w, int y) {
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, GetSecondaryTextColor());
 
+    Column* cols = GetActiveCols();
     int cx = PADDING;
-    for (int i = 0; i < 7; i++) {
-        RECT rc = { cx + 4, y, cx + m_columns[i].width - 4, y + TABLE_HEADER_H };
+    for (int i = 0; i < NUM_COLS; i++) {
+        RECT rc = { cx + 4, y, cx + cols[i].width - 4, y + TABLE_HEADER_H };
         UINT fmt = DT_SINGLELINE | DT_VCENTER;
-        switch (m_columns[i].align) {
+        switch (cols[i].align) {
         case Column::LEFT: fmt |= DT_LEFT; break;
         case Column::RIGHT: fmt |= DT_RIGHT; break;
         case Column::CENTER: fmt |= DT_CENTER; break;
         }
-        DrawTextW(hdc, m_columns[i].title, -1, &rc, fmt);
+        DrawTextW(hdc, cols[i].title, -1, &rc, fmt);
 
-        // Sort indicator
-        if (i == m_sort_col && i >= COL_NAME && i <= COL_CONN) {
+        if (i == m_sort_col && i >= 1) {
             SetTextColor(hdc, GetAccentColor(false));
             const wchar_t* arrow = m_sort_desc ? L" \u25BC" : L" \u25B2";
             RECT arrow_rc = { rc.right - 16, y, rc.right + 4, y + TABLE_HEADER_H };
@@ -760,7 +850,7 @@ void CDetailWindow::DrawTableHeader(HDC hdc, int w, int y) {
             SetTextColor(hdc, GetSecondaryTextColor());
         }
 
-        cx += m_columns[i].width;
+        cx += cols[i].width;
     }
 
     SelectObject(hdc, hOldFont);
@@ -781,6 +871,21 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
     SetBkMode(hdc, TRANSPARENT);
 
     int table_bottom = client_h - PADDING;
+    bool is_hist = (m_active_tab == 1);
+
+    // Empty state
+    if (m_rows.empty()) {
+        SetTextColor(hdc, GetSecondaryTextColor());
+        RECT rc = { PADDING, y, w - PADDING, y + 60 };
+        const wchar_t* msg = is_hist
+            ? L"\u6682\u65E0\u5386\u53F2\u6570\u636E\n\u4F7F\u7528\u4E00\u6BB5\u65F6\u95F4\u540E\u8FD9\u91CC\u5C06\u663E\u793A\u6D41\u91CF\u7EDF\u8BA1"
+            : L"\u65E0\u6D3B\u8DC3\u8FDB\u7A0B\n\u6B63\u5728\u76D1\u63A7\u7F51\u7EDC\u6D41\u91CF...";
+        DrawTextW(hdc, msg, -1, &rc, DT_CENTER | DT_VCENTER | DT_WORDBREAK);
+        SelectObject(hdc, hOldFont);
+        DeleteObject(hFont);
+        DeleteObject(hSmallFont);
+        return;
+    }
 
     for (int vi = 0; vi < visible && m_scroll_pos + vi < (int)m_rows.size(); vi++) {
         int ri = m_scroll_pos + vi;
@@ -804,127 +909,135 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
         DeleteObject(hPen);
 
         int cx = PADDING;
-        int text_y = ry;
 
-        // 0. Icon + expand arrow
-        {
-            // Expand arrow (if row has connections concept)
-            SelectObject(hdc, hSmallFont);
-            SetTextColor(hdc, GetSecondaryTextColor());
-            const wchar_t* arrow = row.expanded ? L"\u25BC" : L"\u25B6";
-            RECT arrow_rc = { cx, text_y, cx + 14, text_y + row_h };
-            DrawTextW(hdc, arrow, -1, &arrow_rc, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+        // Col 0: Icon + expand arrow
+        SelectObject(hdc, hSmallFont);
+        SetTextColor(hdc, GetSecondaryTextColor());
+        const wchar_t* arrow = row.expanded ? L"\u25BC" : L"\u25B6";
+        RECT arrow_rc = { cx, ry, cx + 14, ry + row_h };
+        DrawTextW(hdc, arrow, -1, &arrow_rc, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
 
-            // Process icon
-            HICON hIcon = GetProcessIcon(row.exe_path);
-            if (hIcon) {
-                DrawIconEx(hdc, cx + 16, text_y + (row_h - ICON_SIZE) / 2,
-                           hIcon, ICON_SIZE, ICON_SIZE, 0, NULL, DI_NORMAL);
-            }
-        }
-        cx += m_columns[0].width;
+        HICON hIcon = GetProcessIcon(row.exe_path);
+        if (hIcon) DrawIconEx(hdc, cx + 16, ry + (row_h - ICON_SIZE) / 2, hIcon, ICON_SIZE, ICON_SIZE, 0, NULL, DI_NORMAL);
+        cx += 32;
 
-        // 1. Name
+        // Col 1: Name
         SelectObject(hdc, hFont);
         SetTextColor(hdc, GetTextColor());
         {
             std::wstring display = row.name;
-            // Remove .exe
             if (display.size() > 4) {
                 std::wstring ext = display.substr(display.size() - 4);
                 if (ext == L".exe" || ext == L".EXE")
                     display = display.substr(0, display.size() - 4);
             }
-            // Truncate if needed
             SIZE sz;
-            int max_w = m_columns[1].width - 8;
+            int max_w = 180 - 8;
             GetTextExtentPoint32W(hdc, display.c_str(), (int)display.size(), &sz);
             while ((int)display.size() > 3 && sz.cx > max_w) {
                 display = display.substr(0, display.size() - 1);
                 display.back() = L'\u2026';
                 GetTextExtentPoint32W(hdc, display.c_str(), (int)display.size(), &sz);
             }
-            RECT name_rc = { cx + 4, text_y, cx + m_columns[1].width - 4, text_y + row_h };
+            RECT name_rc = { cx + 4, ry, cx + 180 - 4, ry + row_h };
             DrawTextW(hdc, display.c_str(), -1, &name_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
         }
-        cx += m_columns[1].width;
+        cx += 180;
 
-        // 2. Category
+        // Col 2: Category
         SetTextColor(hdc, GetSecondaryTextColor());
         {
-            RECT cat_rc = { cx + 4, text_y, cx + m_columns[2].width - 4, text_y + row_h };
+            RECT cat_rc = { cx + 4, ry, cx + 90 - 4, ry + row_h };
             DrawTextW(hdc, row.category.c_str(), -1, &cat_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
         }
-        cx += m_columns[2].width;
+        cx += 90;
 
-        // 3. Download speed
-        {
+        if (is_hist) {
+            // History: total_down, total_up, avg_down, avg_up
+            wchar_t buf[32];
+
+            FormatBytes(row.hist_recv, buf, 32);
+            SetTextColor(hdc, row.hist_recv > 0 ? GetAccentColor(false) : GetSecondaryTextColor());
+            RECT r3 = { cx + 4, ry, cx + 100 - 4, ry + row_h };
+            DrawTextW(hdc, buf, -1, &r3, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+            cx += 100;
+
+            FormatBytes(row.hist_sent, buf, 32);
+            SetTextColor(hdc, row.hist_sent > 0 ? GetAccentColor(true) : GetSecondaryTextColor());
+            RECT r4 = { cx + 4, ry, cx + 100 - 4, ry + row_h };
+            DrawTextW(hdc, buf, -1, &r4, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+            cx += 100;
+
+            FormatSpeed(row.hist_avg_down, buf, 32);
+            SetTextColor(hdc, row.hist_avg_down > 0.01 ? GetAccentColor(false) : GetSecondaryTextColor());
+            RECT r5 = { cx + 4, ry, cx + 100 - 4, ry + row_h };
+            DrawTextW(hdc, buf, -1, &r5, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+            cx += 100;
+
+            FormatSpeed(row.hist_avg_up, buf, 32);
+            SetTextColor(hdc, row.hist_avg_up > 0.01 ? GetAccentColor(true) : GetSecondaryTextColor());
+            RECT r6 = { cx + 4, ry, cx + 100 - 4, ry + row_h };
+            DrawTextW(hdc, buf, -1, &r6, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+        } else {
+            // Real-time: speed_down, speed_up, conn_count, action
             wchar_t spd[32];
+
             FormatSpeed(row.speed_down, spd, 32);
             SetTextColor(hdc, row.speed_down > 0.01 ? GetAccentColor(false) : GetSecondaryTextColor());
-            RECT spd_rc = { cx + 4, text_y, cx + m_columns[3].width - 4, text_y + row_h };
-            DrawTextW(hdc, spd, -1, &spd_rc, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
-        }
-        cx += m_columns[3].width;
+            RECT r3 = { cx + 4, ry, cx + 100 - 4, ry + row_h };
+            DrawTextW(hdc, spd, -1, &r3, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+            cx += 100;
 
-        // 4. Upload speed
-        {
-            wchar_t spd[32];
             FormatSpeed(row.speed_up, spd, 32);
             SetTextColor(hdc, row.speed_up > 0.01 ? GetAccentColor(true) : GetSecondaryTextColor());
-            RECT spd_rc = { cx + 4, text_y, cx + m_columns[4].width - 4, text_y + row_h };
-            DrawTextW(hdc, spd, -1, &spd_rc, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
-        }
-        cx += m_columns[4].width;
+            RECT r4 = { cx + 4, ry, cx + 100 - 4, ry + row_h };
+            DrawTextW(hdc, spd, -1, &r4, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+            cx += 100;
 
-        // 5. Connection count
-        {
-            wchar_t conn[16];
-            swprintf_s(conn, L"%d", row.conn_count);
+            wchar_t conn[16]; swprintf_s(conn, L"%d", row.conn_count);
             SetTextColor(hdc, row.conn_count > 0 ? GetAccentColor(true) : GetSecondaryTextColor());
-            RECT conn_rc = { cx + 4, text_y, cx + m_columns[5].width - 4, text_y + row_h };
-            DrawTextW(hdc, conn, -1, &conn_rc, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
-        }
-        cx += m_columns[5].width;
+            RECT r5 = { cx + 4, ry, cx + 60 - 4, ry + row_h };
+            DrawTextW(hdc, conn, -1, &r5, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+            cx += 60;
 
-        // 6. Action
-        {
             SetTextColor(hdc, m_dark_mode ? RGB(255, 165, 0) : RGB(230, 126, 34));
             SelectObject(hdc, hSmallFont);
-            RECT act_rc = { cx + 4, text_y, cx + m_columns[6].width - 4, text_y + row_h };
-            DrawTextW(hdc, L"\u67E5\u770B\u8FDE\u63A5", -1, &act_rc, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+            RECT r6 = { cx + 4, ry, cx + 80 - 4, ry + row_h };
+            DrawTextW(hdc, L"\u67E5\u770B\u8FDE\u63A5", -1, &r6, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
         }
 
-        // Draw expanded children
+        // Expanded children
         if (row.expanded) {
             int child_y = ry + row_h;
-            // Show PID info as first child
             SelectObject(hdc, hSmallFont);
             SetTextColor(hdc, GetSecondaryTextColor());
 
             // PID row
             RECT pid_rc = { PADDING + 28, child_y, w - PADDING, child_y + CHILD_ROW_H };
+            HBRUSH hCbg = CreateSolidBrush(m_dark_mode ? RGB(36, 36, 40) : RGB(247, 247, 247));
+            FillRect(hdc, &pid_rc, hCbg);
+            DeleteObject(hCbg);
             wchar_t pid_text[64];
-            swprintf_s(pid_text, 64, L"\u8FDB\u7A0BID: %u", row.pid);
-            FillRect(hdc, &pid_rc, CreateSolidBrush(m_dark_mode ? RGB(36, 36, 40) : RGB(247, 247, 247)));
+            if (row.pid > 0)
+                swprintf_s(pid_text, 64, L"\u8FDB\u7A0BID: %u", row.pid);
+            else
+                swprintf_s(pid_text, 64, L"\u5386\u53F2\u8BB0\u5F55");
             DrawTextW(hdc, pid_text, -1, &pid_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
-            // Separator
             HPEN hPen2 = CreatePen(PS_SOLID, 1, m_dark_mode ? RGB(42, 42, 46) : RGB(238, 238, 238));
             HPEN hOldPen2 = (HPEN)SelectObject(hdc, hPen2);
             MoveToEx(hdc, PADDING, child_y + CHILD_ROW_H - 1, NULL);
             LineTo(hdc, w - PADDING, child_y + CHILD_ROW_H - 1);
             SelectObject(hdc, hOldPen2);
             DeleteObject(hPen2);
-
             child_y += CHILD_ROW_H;
 
             // Path row
             if (!row.exe_path.empty()) {
                 RECT path_rc = { PADDING + 28, child_y, w - PADDING, child_y + CHILD_ROW_H };
-                HBRUSH hBg = CreateSolidBrush(m_dark_mode ? RGB(36, 36, 40) : RGB(247, 247, 247));
-                FillRect(hdc, &path_rc, hBg);
-                DeleteObject(hBg);
+                HBRUSH hPbg = CreateSolidBrush(m_dark_mode ? RGB(36, 36, 40) : RGB(247, 247, 247));
+                FillRect(hdc, &path_rc, hPbg);
+                DeleteObject(hPbg);
 
                 std::wstring path_display = row.exe_path;
                 SIZE sz;
@@ -942,21 +1055,8 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
                 LineTo(hdc, w - PADDING, child_y + CHILD_ROW_H - 1);
                 SelectObject(hdc, hOldPen3);
                 DeleteObject(hPen3);
-
-                child_y += CHILD_ROW_H;
             }
-
-            // Adjust: we need to skip extra rows in the visible count
-            // This is handled by checking row height dynamically - for now, simple approach
         }
-    }
-
-    // No data message
-    if (m_rows.empty()) {
-        SetTextColor(hdc, GetSecondaryTextColor());
-        RECT rc = { PADDING, y, w - PADDING, y + 60 };
-        DrawTextW(hdc, L"\u65E0\u7F51\u7EDC\u6D41\u91CF\u6570\u636E\n\u8BF7\u786E\u4FDD\u4EE5\u7BA1\u7406\u5458\u6743\u9650\u8FD0\u884C TrafficMonitor",
-                  -1, &rc, DT_CENTER | DT_VCENTER | DT_WORDBREAK);
     }
 
     SelectObject(hdc, hOldFont);
@@ -972,13 +1072,11 @@ void CDetailWindow::DrawScrollbar(HDC hdc, int w, int h) {
     int track_bottom = h - PADDING;
     int track_h = track_bottom - track_top;
 
-    // Track
     HBRUSH hTrack = CreateSolidBrush(m_dark_mode ? RGB(45, 45, 50) : RGB(230, 230, 230));
     RECT track_rc = { track_x, track_top, track_x + SCROLL_W, track_bottom };
     FillRect(hdc, &track_rc, hTrack);
     DeleteObject(hTrack);
 
-    // Thumb
     int total_rows = (int)m_rows.size();
     int visible_rows = GetVisibleRows(h);
     float ratio = (float)visible_rows / total_rows;
@@ -1001,41 +1099,34 @@ void CDetailWindow::OnPaint() {
     int w = client.right;
     int h = client.bottom;
 
-    // Double buffer
     HDC memDC = CreateCompatibleDC(hdc);
     HBITMAP memBmp = CreateCompatibleBitmap(hdc, w, h);
     HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, memBmp);
 
-    // Background
     HBRUSH hBg = CreateSolidBrush(GetBgColor());
     FillRect(memDC, &client, hBg);
     DeleteObject(hBg);
 
     int y = PADDING;
 
-    // Title bar
     DrawTitleBar(memDC, w);
     y += GetHeaderHeight();
 
-    // Tabs
     DrawTabs(memDC, w, y);
     y += GetTabsHeight();
 
-    // Speed summary
+    DrawTimeRangeButtons(memDC, w, y);
+    y += GetTimeRangeHeight();
+
     DrawSpeedSummary(memDC, w, y);
     y += GetSummaryHeight();
 
-    // Table header
     DrawTableHeader(memDC, w, y);
     y += GetTableHeaderHeight();
 
-    // Table rows
     DrawTableRows(memDC, w, y, h);
-
-    // Scrollbar
     DrawScrollbar(memDC, w, h);
 
-    // Blit
     BitBlt(hdc, 0, 0, w, h, memDC, 0, 0, SRCCOPY);
     SelectObject(memDC, oldBmp);
     DeleteObject(memBmp);
