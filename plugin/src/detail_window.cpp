@@ -181,31 +181,51 @@ void CDetailWindow::Hide() {
 
 void CDetailWindow::RecordHistory(const std::vector<ProcTraffic>& stats) {
     ULONGLONG now = GetTickCount64();
-
     for (auto& st : stats) {
         auto& hist = m_history[st.name];
-        if (hist.name.empty()) {
-            hist.name = st.name;
-            hist.exe_path = st.exe_path;
-        }
-        if (hist.exe_path.empty() && !st.exe_path.empty())
-            hist.exe_path = st.exe_path;
-
-        // Add snapshot
-        HistorySnapshot snap;
-        snap.tick = now;
-        snap.cum_recv = st.bytes_recv;
-        snap.cum_sent = st.bytes_sent;
-        hist.snapshots.push_back(snap);
-
-        // Cap at MAX_HISTORY_SNAPSHOTS
-        while ((int)hist.snapshots.size() > MAX_HISTORY_SNAPSHOTS)
-            hist.snapshots.pop_front();
+        if (hist.name.empty()) { hist.name = st.name; hist.exe_path = st.exe_path; }
+        if (hist.exe_path.empty() && !st.exe_path.empty()) hist.exe_path = st.exe_path;
+        HistorySnapshot snap = { now, st.bytes_recv, st.bytes_sent };
+        hist.raw.push_back(snap);
+        while ((int)hist.raw.size() > MAX_RAW) hist.raw.pop_front();
     }
+    static int compress_counter = 0;
+    if (++compress_counter >= 60) { compress_counter = 0; CompressHistory(); }
+}
+
+void CDetailWindow::CompressHistory() {
+    ULONGLONG now = GetTickCount64();
+    for (auto& [name, h] : m_history) {
+        ULONGLONG min_cutoff = now - 3600000ULL;
+        while (!h.raw.empty() && h.raw.front().tick < min_cutoff) {
+            h.min.push_back(h.raw.front()); h.raw.pop_front();
+        }
+        while ((int)h.min.size() > MAX_MIN) h.min.pop_front();
+        ULONGLONG hour_cutoff = now - 86400000ULL;
+        while (!h.min.empty() && h.min.front().tick < hour_cutoff) {
+            h.hour.push_back(h.min.front()); h.min.pop_front();
+        }
+        while ((int)h.hour.size() > MAX_HOUR) h.hour.pop_front();
+        ULONGLONG day_cutoff = now - 604800000ULL;
+        while (!h.hour.empty() && h.hour.front().tick < day_cutoff) {
+            h.day.push_back(h.hour.front()); h.hour.pop_front();
+        }
+        while ((int)h.day.size() > MAX_DAY) h.day.pop_front();
+    }
+}
+
+void CDetailWindow::GetMergedSnapshots(const ProcessHistory& h,
+    std::vector<const HistorySnapshot*>& out, ULONGLONG cutoff) const {
+    for (auto& s : h.day)  { if (s.tick >= cutoff) out.push_back(&s); }
+    for (auto& s : h.hour) { if (s.tick >= cutoff) out.push_back(&s); }
+    for (auto& s : h.min)  { if (s.tick >= cutoff) out.push_back(&s); }
+    for (auto& s : h.raw)  { if (s.tick >= cutoff) out.push_back(&s); }
 }
 
 void CDetailWindow::BuildHistoryRows() {
     m_rows.clear();
+    m_hist_total_recv = 0;
+    m_hist_total_sent = 0;
 
     ULONGLONG now = GetTickCount64();
     ULONGLONG range_ms = 0;
@@ -216,26 +236,22 @@ void CDetailWindow::BuildHistoryRows() {
     case TR_30D: range_ms = 30ULL * 24 * 3600 * 1000; break;
     }
     ULONGLONG cutoff = (now > range_ms) ? (now - range_ms) : 0;
-    // Don't go before plugin start
     if (cutoff < m_history_start_tick) cutoff = m_history_start_tick;
 
     for (auto& [name, hist] : m_history) {
-        if (hist.snapshots.empty()) continue;
+        std::vector<const HistorySnapshot*> snaps;
+        GetMergedSnapshots(hist, snaps, cutoff);
+        if (snaps.size() < 2) continue;
 
-        // Find first and last snapshot in range
-        const HistorySnapshot* first = nullptr;
-        const HistorySnapshot* last = nullptr;
-        for (auto& snap : hist.snapshots) {
-            if (snap.tick < cutoff) continue;
-            if (!first) first = &snap;
-            last = &snap;
-        }
-        if (!first || !last || first == last) continue;
-
+        const HistorySnapshot* first = snaps.front();
+        const HistorySnapshot* last = snaps.back();
         uint64_t recv_delta = last->cum_recv - first->cum_recv;
         uint64_t sent_delta = last->cum_sent - first->cum_sent;
         double elapsed_sec = (double)(last->tick - first->tick) / 1000.0;
         if (elapsed_sec < 1.0) elapsed_sec = 1.0;
+
+        m_hist_total_recv += recv_delta;
+        m_hist_total_sent += sent_delta;
 
         DisplayRow row;
         row.name = hist.name;
@@ -245,7 +261,6 @@ void CDetailWindow::BuildHistoryRows() {
         row.hist_avg_down = (double)recv_delta / elapsed_sec;
         row.hist_avg_up = (double)sent_delta / elapsed_sec;
 
-        // Category
         std::wstring lower = hist.name;
         for (auto& c : lower) c = towlower(c);
         if (lower.find(L"svchost") != std::wstring::npos ||
@@ -256,11 +271,9 @@ void CDetailWindow::BuildHistoryRows() {
         else
             row.category = L"\u7B2C\u4E09\u65B9\u7A0B\u5E8F";
 
-        // Restore expanded state
         for (auto& old : m_rows) {
             if (old.name == name && old.expanded) { row.expanded = true; break; }
         }
-
         m_rows.push_back(row);
     }
 }
@@ -269,45 +282,42 @@ void CDetailWindow::BuildHistoryRows() {
 // Persistence
 // ============================================================
 
+static void WriteDQ(FILE* f, const std::deque<CDetailWindow::HistorySnapshot>& dq) {
+    uint32_t n = (uint32_t)dq.size(); fwrite(&n, 4, 1, f);
+    for (auto& s : dq) {
+        fwrite(&s.tick, sizeof(ULONGLONG), 1, f);
+        fwrite(&s.cum_recv, sizeof(uint64_t), 1, f);
+        fwrite(&s.cum_sent, sizeof(uint64_t), 1, f);
+    }
+}
+static bool ReadDQ(FILE* f, std::deque<CDetailWindow::HistorySnapshot>& dq, int max_n, ULONGLONG max_age) {
+    uint32_t n; if (fread(&n, 4, 1, f) != 1 || n > (uint32_t)max_n + 100) return false;
+    ULONGLONG now = GetTickCount64();
+    for (uint32_t i = 0; i < n; i++) {
+        CDetailWindow::HistorySnapshot s;
+        if (fread(&s.tick, sizeof(ULONGLONG), 1, f) != 1) return false;
+        if (fread(&s.cum_recv, sizeof(uint64_t), 1, f) != 1) return false;
+        if (fread(&s.cum_sent, sizeof(uint64_t), 1, f) != 1) return false;
+        if (max_age > 0 && now - s.tick > max_age) continue;
+        dq.push_back(s);
+    }
+    return true;
+}
+
 void CDetailWindow::SaveHistory() {
     if (m_config_dir.empty()) return;
-
-    // Create directory if needed
     CreateDirectoryW(m_config_dir.c_str(), NULL);
-
     wchar_t path[MAX_PATH];
     swprintf_s(path, MAX_PATH, L"%s\\history.dat", m_config_dir.c_str());
-
     FILE* f = _wfopen(path, L"wb");
     if (!f) return;
 
-    // Header: magic + entry count
-    uint32_t magic = 0x504E4D48; // 'PNMH'
-    uint32_t version = 1;
-    uint32_t count = (uint32_t)m_history.size();
-    fwrite(&magic, 4, 1, f);
-    fwrite(&version, 4, 1, f);
-    fwrite(&count, 4, 1, f);
-
+    uint32_t magic = 0x504E4D48, version = 2, count = (uint32_t)m_history.size();
+    fwrite(&magic, 4, 1, f); fwrite(&version, 4, 1, f); fwrite(&count, 4, 1, f);
     for (auto& [name, hist] : m_history) {
-        // Write name (length-prefixed UTF-16)
-        uint32_t name_len = (uint32_t)name.size();
-        fwrite(&name_len, 4, 1, f);
-        fwrite(name.c_str(), sizeof(wchar_t), name_len, f);
-
-        // Write exe_path
-        uint32_t path_len = (uint32_t)hist.exe_path.size();
-        fwrite(&path_len, 4, 1, f);
-        fwrite(hist.exe_path.c_str(), sizeof(wchar_t), path_len, f);
-
-        // Write snapshots
-        uint32_t snap_count = (uint32_t)hist.snapshots.size();
-        fwrite(&snap_count, 4, 1, f);
-        for (auto& snap : hist.snapshots) {
-            fwrite(&snap.tick, sizeof(ULONGLONG), 1, f);
-            fwrite(&snap.cum_recv, sizeof(uint64_t), 1, f);
-            fwrite(&snap.cum_sent, sizeof(uint64_t), 1, f);
-        }
+        uint32_t nl = (uint32_t)name.size(); fwrite(&nl, 4, 1, f); fwrite(name.c_str(), sizeof(wchar_t), nl, f);
+        uint32_t pl = (uint32_t)hist.exe_path.size(); fwrite(&pl, 4, 1, f); fwrite(hist.exe_path.c_str(), sizeof(wchar_t), pl, f);
+        WriteDQ(f, hist.raw); WriteDQ(f, hist.min); WriteDQ(f, hist.hour); WriteDQ(f, hist.day);
     }
     fclose(f);
 }
@@ -316,47 +326,26 @@ void CDetailWindow::LoadHistory() {
     if (m_config_dir.empty()) return;
     wchar_t path[MAX_PATH];
     swprintf_s(path, MAX_PATH, L"%s\\history.dat", m_config_dir.c_str());
-
     FILE* f = _wfopen(path, L"rb");
     if (!f) return;
-
     uint32_t magic, version, count;
     if (fread(&magic, 4, 1, f) != 1 || magic != 0x504E4D48) { fclose(f); return; }
-    if (fread(&version, 4, 1, f) != 1 || version != 1) { fclose(f); return; }
+    if (fread(&version, 4, 1, f) != 1) { fclose(f); return; }
     if (fread(&count, 4, 1, f) != 1) { fclose(f); return; }
-
-    ULONGLONG now = GetTickCount64();
-
+    ULONGLONG max_age = 365ULL * 24 * 3600 * 1000;
     for (uint32_t i = 0; i < count; i++) {
-        uint32_t name_len;
-        if (fread(&name_len, 4, 1, f) != 1) break;
-        if (name_len > 512) break;
-        std::wstring name(name_len, L'\0');
-        if (fread(&name[0], sizeof(wchar_t), name_len, f) != name_len) break;
-
-        uint32_t path_len;
-        if (fread(&path_len, 4, 1, f) != 1) break;
-        if (path_len > MAX_PATH) break;
-        std::wstring exe_path(path_len, L'\0');
-        if (fread(&exe_path[0], sizeof(wchar_t), path_len, f) != path_len) break;
-
-        uint32_t snap_count;
-        if (fread(&snap_count, 4, 1, f) != 1) break;
-        if (snap_count > MAX_HISTORY_SNAPSHOTS + 100) break;
-
-        auto& hist = m_history[name];
-        hist.name = name;
-        hist.exe_path = exe_path;
-
-        for (uint32_t j = 0; j < snap_count; j++) {
-            HistorySnapshot snap;
-            if (fread(&snap.tick, sizeof(ULONGLONG), 1, f) != 1) break;
-            if (fread(&snap.cum_recv, sizeof(uint64_t), 1, f) != 1) break;
-            if (fread(&snap.cum_sent, sizeof(uint64_t), 1, f) != 1) break;
-
-            // Skip very old entries (>30 days)
-            if (now - snap.tick > 30ULL * 24 * 3600 * 1000) continue;
-            hist.snapshots.push_back(snap);
+        uint32_t nl; if (fread(&nl, 4, 1, f) != 1 || nl > 512) break;
+        std::wstring name(nl, L'\0'); if (fread(&name[0], sizeof(wchar_t), nl, f) != nl) break;
+        uint32_t pl; if (fread(&pl, 4, 1, f) != 1 || pl > MAX_PATH) break;
+        std::wstring exe_path(pl, L'\0'); if (fread(&exe_path[0], sizeof(wchar_t), pl, f) != pl) break;
+        auto& hist = m_history[name]; hist.name = name; hist.exe_path = exe_path;
+        if (version >= 2) {
+            if (!ReadDQ(f, hist.raw, MAX_RAW, max_age)) break;
+            if (!ReadDQ(f, hist.min, MAX_MIN, max_age)) break;
+            if (!ReadDQ(f, hist.hour, MAX_HOUR, max_age)) break;
+            if (!ReadDQ(f, hist.day, MAX_DAY, max_age)) break;
+        } else {
+            if (!ReadDQ(f, hist.raw, MAX_RAW, max_age)) break;
         }
     }
     fclose(f);
@@ -926,29 +915,55 @@ void CDetailWindow::DrawSpeedSummary(HDC hdc, int w, int y) {
     HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
     SetBkMode(hdc, TRANSPARENT);
 
-    wchar_t down_str[32], up_str[32];
-    FormatSpeed(m_total_down, down_str, 32);
-    FormatSpeed(m_total_up, up_str, 32);
-
     int x = PADDING;
-    SetTextColor(hdc, GetSecondaryTextColor());
-    RECT l1 = { x, y, x + 80, y + SUMMARY_H };
-    DrawTextW(hdc, L"\u4E0B\u8F7D\u603B\u901F\u5EA6\uFF1A", -1, &l1, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-    x += 80;
-    SetTextColor(hdc, GetAccentColor(false));
-    wchar_t d_full[64]; swprintf_s(d_full, 64, L"\u2193 %s", down_str);
-    RECT v1 = { x, y, x + 100, y + SUMMARY_H };
-    DrawTextW(hdc, d_full, -1, &v1, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-    x += 120;
 
-    SetTextColor(hdc, GetSecondaryTextColor());
-    RECT l2 = { x, y, x + 80, y + SUMMARY_H };
-    DrawTextW(hdc, L"\u4E0A\u4F20\u603B\u901F\u5EA6\uFF1A", -1, &l2, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-    x += 80;
-    SetTextColor(hdc, GetAccentColor(true));
-    wchar_t u_full[64]; swprintf_s(u_full, 64, L"\u2191 %s", up_str);
-    RECT v2 = { x, y, x + 100, y + SUMMARY_H };
-    DrawTextW(hdc, u_full, -1, &v2, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    if (m_active_tab == 1) {
+        // History: show total traffic for selected range
+        wchar_t recv_str[32], sent_str[32];
+        FormatBytes(m_hist_total_recv, recv_str, 32);
+        FormatBytes(m_hist_total_sent, sent_str, 32);
+
+        SetTextColor(hdc, GetSecondaryTextColor());
+        RECT l1 = { x, y, x + 80, y + SUMMARY_H };
+        DrawTextW(hdc, L"\u603B\u4E0B\u8F7D\uFF1A", -1, &l1, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        x += 55;
+        SetTextColor(hdc, GetAccentColor(false));
+        RECT v1 = { x, y, x + 100, y + SUMMARY_H };
+        DrawTextW(hdc, recv_str, -1, &v1, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        x += 110;
+
+        SetTextColor(hdc, GetSecondaryTextColor());
+        RECT l2 = { x, y, x + 80, y + SUMMARY_H };
+        DrawTextW(hdc, L"\u603B\u4E0A\u4F20\uFF1A", -1, &l2, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        x += 55;
+        SetTextColor(hdc, GetAccentColor(true));
+        RECT v2 = { x, y, x + 100, y + SUMMARY_H };
+        DrawTextW(hdc, sent_str, -1, &v2, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    } else {
+        // Real-time: show current speed
+        wchar_t down_str[32], up_str[32];
+        FormatSpeed(m_total_down, down_str, 32);
+        FormatSpeed(m_total_up, up_str, 32);
+
+        SetTextColor(hdc, GetSecondaryTextColor());
+        RECT l1 = { x, y, x + 80, y + SUMMARY_H };
+        DrawTextW(hdc, L"\u4E0B\u8F7D\u603B\u901F\u5EA6\uFF1A", -1, &l1, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        x += 80;
+        SetTextColor(hdc, GetAccentColor(false));
+        wchar_t d_full[64]; swprintf_s(d_full, 64, L"\u2193 %s", down_str);
+        RECT v1 = { x, y, x + 100, y + SUMMARY_H };
+        DrawTextW(hdc, d_full, -1, &v1, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        x += 120;
+
+        SetTextColor(hdc, GetSecondaryTextColor());
+        RECT l2 = { x, y, x + 80, y + SUMMARY_H };
+        DrawTextW(hdc, L"\u4E0A\u4F20\u603B\u901F\u5EA6\uFF1A", -1, &l2, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        x += 80;
+        SetTextColor(hdc, GetAccentColor(true));
+        wchar_t u_full[64]; swprintf_s(u_full, 64, L"\u2191 %s", up_str);
+        RECT v2 = { x, y, x + 100, y + SUMMARY_H };
+        DrawTextW(hdc, u_full, -1, &v2, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    }
 
     SelectObject(hdc, hOldFont);
     DeleteObject(hFont);

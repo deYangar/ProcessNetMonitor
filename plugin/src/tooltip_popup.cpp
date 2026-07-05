@@ -1,4 +1,5 @@
 ﻿#include "tooltip_popup.h"
+#include "plugin_main.h"
 #include <shellapi.h>
 #include <dwmapi.h>
 #include <algorithm>
@@ -159,6 +160,19 @@ LRESULT CTooltipPopup::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
             m_tracking = true;
         }
         m_hovering = true;
+        return 0;
+
+    case WM_LBUTTONDOWN:
+        // Open detail window when tooltip is clicked
+        {
+            auto& plugin = CProcessNetPlugin::Instance();
+            if (plugin.m_detail_created) {
+                if (plugin.m_detail.IsVisible())
+                    plugin.m_detail.Hide();
+                else
+                    plugin.m_detail.Show(m_hwnd);
+            }
+        }
         return 0;
 
     case WM_ERASEBKGND:

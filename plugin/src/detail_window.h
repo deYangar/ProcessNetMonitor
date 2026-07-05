@@ -38,6 +38,21 @@ public:
     // History time range
     enum TimeRange { TR_24H = 0, TR_3D, TR_7D, TR_30D };
 
+    // History data types (public for persistence helpers)
+    struct HistorySnapshot {
+        ULONGLONG tick;
+        uint64_t cum_recv;
+        uint64_t cum_sent;
+    };
+    struct ProcessHistory {
+        std::wstring name;
+        std::wstring exe_path;
+        std::deque<HistorySnapshot> raw;
+        std::deque<HistorySnapshot> min;
+        std::deque<HistorySnapshot> hour;
+        std::deque<HistorySnapshot> day;
+    };
+
 private:
     // Window
     static LRESULT CALLBACK StaticWndProc(HWND, UINT, WPARAM, LPARAM);
@@ -120,18 +135,10 @@ private:
         double hist_avg_up = 0;     // average upload speed
     };
 
-    // History snapshot per process
-    struct HistorySnapshot {
-        ULONGLONG tick;         // GetTickCount64
-        uint64_t cum_recv;      // cumulative bytes received
-        uint64_t cum_sent;      // cumulative bytes sent
-    };
-
-    struct ProcessHistory {
-        std::wstring name;
-        std::wstring exe_path;
-        std::deque<HistorySnapshot> snapshots;  // 1 per second, max 3600
-    };
+    void CompressHistory();
+    void GetMergedSnapshots(const ProcessHistory& h, std::vector<const HistorySnapshot*>& out, ULONGLONG cutoff) const;
+    uint64_t m_hist_total_recv = 0;  // summary for current time range
+    uint64_t m_hist_total_sent = 0;
 
     // State
     HWND m_hwnd = nullptr;
@@ -156,7 +163,11 @@ private:
     std::map<std::wstring, ProcessHistory> m_history;
     ULONGLONG m_history_start_tick = 0;  // when TM plugin started
     ULONGLONG m_last_save_tick = 0;
-    static const int MAX_HISTORY_SNAPSHOTS = 3600;  // 1 hour at 1/sec
+    // Tier limits
+    static const int MAX_RAW = 3600;      // ~1 hour at 1/sec
+    static const int MAX_MIN = 1440;      // ~24 hours at 1/min
+    static const int MAX_HOUR = 168;      // ~7 days at 1/hour
+    static const int MAX_DAY = 365;       // ~1 year at 1/day
 
     // Time range filter (history tab)
     TimeRange m_time_range = TR_24H;
@@ -186,12 +197,12 @@ private:
     // Columns - history
     Column m_hist_cols[NUM_COLS] = {
         { L"",            32,  32,  Column::CENTER },
-        { L"\u7A0B\u5E8F\u540D\u79F0",    180, 120, Column::LEFT   },
-        { L"\u7A0B\u5E8F\u7C7B\u522B",    90,  70,  Column::LEFT   },
-        { L"\u603B\u4E0B\u8F7D",          100, 80,  Column::RIGHT  },
-        { L"\u603B\u4E0A\u4F20",          100, 80,  Column::RIGHT  },
-        { L"\u5E73\u5747\u4E0B\u8F7D",    100, 80,  Column::RIGHT  },
-        { L"\u5E73\u5747\u4E0A\u4F20",    100, 80,  Column::RIGHT  },
+        { L"\u7A0B\u5E8F\u540D\u79F0",    160, 100, Column::LEFT   },
+        { L"\u7A0B\u5E8F\u7C7B\u522B",    80,  60,  Column::LEFT   },
+        { L"\u603B\u4E0B\u8F7D",          100, 70,  Column::RIGHT  },
+        { L"\u603B\u4E0A\u4F20",          100, 70,  Column::RIGHT  },
+        { L"\u5E73\u5747\u4E0B\u8F7D",    95,  70,  Column::RIGHT  },
+        { L"\u5E73\u5747\u4E0A\u4F20",    95,  70,  Column::RIGHT  },
     };
     Column* GetActiveCols() const { return (Column*)(m_active_tab == 0 ? m_rt_cols : m_hist_cols); }
 
@@ -207,7 +218,7 @@ private:
     static const int CORNER_RADIUS = 8;
     static const int ICON_SIZE = 20;
     static const int SCROLL_W = 8;
-    static const int MIN_WIDTH = 620;
+    static const int MIN_WIDTH = 680;
     static const int MIN_HEIGHT = 400;
 
     // Icon cache
