@@ -1,0 +1,84 @@
+# ProcessNetMonitor - TrafficMonitor 插件
+
+TrafficMonitor 的插件，显示每个进程的网络速度。
+
+## 功能
+
+- **任务栏**：两行显示，Upload 和 Download 各一行
+  ```
+  U:mihomo-alp. 5.6KB/s
+  D:mihomo-alp. 1.4KB/s
+  ```
+- **悬浮信息窗口**：鼠标悬停主悬浮窗时弹出带进程图标的详情窗口
+  - 进程图标 + 名称 + 上传/下载速度
+  - 深色/浅色主题跟随系统设置
+  - 上传/下载各显示 Top 5 进程
+  - 空闲进程按 EMA（指数移动平均）排序，展示近期活跃进程
+  - 圆角窗口，DWM 阴影
+- **Tooltip**：保留 TM 默认文本 tooltip 作为备用
+- **不显示系统速度**：系统速度由 TrafficMonitor 本身提供，插件只显示进程级信息
+
+## 编译环境
+
+- **编译器**：MSVC (Visual Studio 2022 BuildTools)
+- **SDK**：Windows SDK 10.0.26100.0
+- **C++ 标准**：C++17
+- **依赖库**：iphlpapi.lib, ws2_32.lib, gdi32.lib, user32.lib, shell32.lib, dwmapi.lib, advapi32.lib
+
+## 编译部署
+
+```bat
+build.bat
+```
+
+**注意**：编译前需先关闭 TrafficMonitor，否则 DLL 无法覆盖。build.bat 会自动尝试 `taskkill`，如果 TM 以管理员权限运行则需要手动退出。
+
+## 文件结构
+
+```
+ProcessNetMonitor/
+├── build.bat                    # 编译+部署脚本
+├── plugin/
+│   ├── src/
+│   │   ├── PluginInterface.h    # TM 插件接口定义
+│   │   ├── capture.h / .cpp     # 网络抓包（GetIfTable2）
+│   │   ├── plugin_main.h / .cpp # 插件主体（2个item：Up/Down）
+│   │   ├── tooltip_popup.h/.cpp # 富文本悬浮信息窗口
+│   ├── ProcessNetMonitor.dll    # 编译输出
+│   └── Makefile
+├── TrafficMonitor/
+│   ├── TrafficMonitor/          # TM 主程序
+│   │   ├── plugins/             # 插件DLL放这里
+│   │   └── skins/
+│   └── plugins/                 # 备份DLL位置
+└── README.md
+```
+
+## TM 配置
+
+1. 打开 TM → 右键 → 选项 → 插件
+2. 勾选 "Up" 和 "Down" 两个显示项目
+3. 在任务栏设置中将两项都添加到任务栏显示
+
+## 版本历史
+
+### v1.2.0 (2026-07-05)
+- 新增 Rich Tooltip Popup：鼠标悬停主悬浮窗时弹出带进程图标的详情窗口
+- 深色/浅色主题跟随系统设置
+- 上传/下载各显示 Top 5 进程（不够时用历史进程补位）
+- EMA 指数移动平均排序（alpha=0.3，~30 秒衰减窗口）
+- 进程图标缓存（SHGetFileInfo + ExtractAssociatedIcon）
+- 分层窗口 + DWM 圆角 + SetWindowRgn 裁黑角
+- 智能 hover 检测：GetAncestor(GA_ROOT) + 任务栏位置判断，区分主悬浮窗和任务栏窗口
+- 自适应高度（根据实际进程数调整）
+- hover 检测频率优化：显示时 80ms，隐藏时 300ms
+
+### v1.1.0 (2026-07-05)
+- 从单 item (CustomDraw) 改为双 item（Up/Down 独立显示）
+- 去掉任务栏系统速度（TM 自带）
+- 去掉任务栏标签文字
+- 恢复 tooltip 完整进程列表
+
+### v1.0.0
+- 初始版本，单 item CustomDraw 模式
+- 支持按进程统计网络速度（Upload/Download Top 5）

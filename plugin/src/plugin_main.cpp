@@ -1,0 +1,300 @@
+#include "plugin_main.h"
+#include <algorithm>
+#include <shellapi.h>
+
+CProcessNetPlugin CProcessNetPlugin::s_instance;
+wchar_t CProcessNetItem::s_value_buf[2][256] = { L"starting...", L"starting..." };
+
+static void FmtSpeed(double bps, wchar_t* buf, int n) {
+    if (bps < 0.01) wcsncpy_s(buf, n, L"0", _TRUNCATE);
+    else if (bps < 1024) swprintf_s(buf, n, L"%.0fB/s", bps);
+    else if (bps < 1048576) swprintf_s(buf, n, L"%.1fKB/s", bps/1024.0);
+    else swprintf_s(buf, n, L"%.2fMB/s", bps/1048576.0);
+}
+
+const wchar_t* CProcessNetItem::GetItemName() const {
+    return m_dir == DIR_UPLOAD ? L"Up" : L"Down";
+}
+const wchar_t* CProcessNetItem::GetItemId() const {
+    return m_dir == DIR_UPLOAD ? L"SpdUp01" : L"SpdDn01";
+}
+const wchar_t* CProcessNetItem::GetItemLableText() const {
+    return L"";
+}
+const wchar_t* CProcessNetItem::GetItemValueText() const {
+    return s_value_buf[m_dir];
+}
+const wchar_t* CProcessNetItem::GetItemValueSampleText() const {
+    return m_dir == DIR_UPLOAD ? L"U:chrome.exe 5.6KB/s" : L"D:mihomo 1.4KB/s";
+}
+
+void CProcessNetItem::Update(const std::vector<ProcTraffic>& stats, double sys_up, double sys_down) {
+    const double EMA_ALPHA = 0.3;
+
+    for (auto& [pid, rp] : m_recent) rp.idle_rounds++;
+    for (const auto& st : stats) {
+        auto& rp = m_recent[st.pid];
+        rp.name = st.name;
+        if (rp.idle_rounds == 0 || rp.ema_up == 0) {
+            rp.ema_up = st.speed_up;
+            rp.ema_down = st.speed_down;
+        } else {
+            rp.ema_up = EMA_ALPHA * st.speed_up + (1.0 - EMA_ALPHA) * rp.ema_up;
+            rp.ema_down = EMA_ALPHA * st.speed_down + (1.0 - EMA_ALPHA) * rp.ema_down;
+        }
+        rp.speed_up = st.speed_up;
+        rp.speed_down = st.speed_down;
+        rp.idle_rounds = 0;
+    }
+    for (auto& [pid, rp] : m_recent) {
+        if (rp.idle_rounds > 0) {
+            rp.ema_up *= (1.0 - EMA_ALPHA);
+            rp.ema_down *= (1.0 - EMA_ALPHA);
+        }
+    }
+    for (auto it = m_recent.begin(); it != m_recent.end(); ) {
+        if (it->second.idle_rounds > MAX_IDLE_ROUNDS) it = m_recent.erase(it); else ++it;
+    }
+
+    std::vector<RecentProc*> list;
+    for (auto& [pid, rp] : m_recent) {
+        list.push_back(&rp);
+    }
+    if (m_dir == DIR_UPLOAD)
+        std::sort(list.begin(), list.end(), [](auto* a, auto* b) {
+            double sa = (a->speed_up > 0.01) ? a->speed_up : a->ema_up * 0.5;
+            double sb = (b->speed_up > 0.01) ? b->speed_up : b->ema_up * 0.5;
+            return sa > sb;
+        });
+    else
+        std::sort(list.begin(), list.end(), [](auto* a, auto* b) {
+            double sa = (a->speed_down > 0.01) ? a->speed_down : a->ema_down * 0.5;
+            double sb = (b->speed_down > 0.01) ? b->speed_down : b->ema_down * 0.5;
+            return sa > sb;
+        });
+
+    double sys_spd = (m_dir == DIR_UPLOAD) ? sys_up : sys_down;
+    wchar_t sys_str[32];
+    FmtSpeed(sys_spd, sys_str, 32);
+
+    wchar_t proc_name[16] = L"-";
+    wchar_t proc_str[32];
+    if (!list.empty()) {
+        double spd = (m_dir == DIR_UPLOAD) ? list[0]->speed_up : list[0]->speed_down;
+        const auto& n = list[0]->name;
+        wcsncpy_s(proc_name, 16, n.c_str(), _TRUNCATE);
+        if (n.size() > 12) { proc_name[10] = L'.'; proc_name[11] = L'.'; proc_name[12] = 0; }
+        FmtSpeed(spd, proc_str, 32);
+    } else {
+        FmtSpeed(0, proc_str, 32);
+    }
+
+    wchar_t prefix = (m_dir == DIR_UPLOAD) ? L'U' : L'D';
+    swprintf_s(s_value_buf[m_dir], 256, L"%c:%s %s", prefix, proc_name, proc_str);
+}
+
+CProcessNetPlugin& CProcessNetPlugin::Instance() { return s_instance; }
+IPluginItem* CProcessNetPlugin::GetItem(int i) {
+    if (i == 0 || i == 1) return &m_items[i];
+    return nullptr;
+}
+
+void CProcessNetPlugin::DataRequired() {
+    if (!m_started) {
+        m_items[0].Init(CProcessNetItem::DIR_UPLOAD);
+        m_items[1].Init(CProcessNetItem::DIR_DOWNLOAD);
+        m_started = m_capture.Start();
+        m_last_time = GetTickCount64();
+        if (!m_started) {
+            swprintf_s(CProcessNetItem::s_value_buf[0], 256, L"ERR: %s", m_capture.GetLastError());
+            swprintf_s(CProcessNetItem::s_value_buf[1], 256, L"ERR: %s", m_capture.GetLastError());
+        }
+        return;
+    }
+
+    ULONGLONG now = GetTickCount64();
+    double dt = (double)(now - m_last_time) / 1000.0;
+    if (dt < 0.1) dt = 0.1;
+    m_last_time = now;
+
+    auto stats = m_capture.GetStats(dt);
+    double su = 0, sd = 0;
+    for (auto& s : stats) { su += s.speed_up; sd += s.speed_down; }
+
+    m_items[0].Update(stats, su, sd);
+    m_items[1].Update(stats, su, sd);
+
+    m_cached_stats = stats;
+    m_cached_up = su;
+    m_cached_down = sd;
+
+    // Build tooltip text (TM's default text tooltip, kept as fallback)
+    wchar_t line[256];
+    wcscpy_s(m_tooltip, L"Process Net Monitor\n");
+    swprintf_s(line, 256, L"Total: U:%.1fKB/s D:%.1fKB/s\n", su/1024.0, sd/1024.0);
+    wcscat_s(m_tooltip, line);
+
+    wcscat_s(m_tooltip, L"\n--- Upload ---\n");
+    std::vector<RecentProc*> up_list, down_list;
+    for (auto& [pid, rp] : m_items[0].m_recent) {
+        if (rp.speed_up > 0.01 || rp.idle_rounds == 0) up_list.push_back(&rp);
+    }
+    for (auto& [pid, rp] : m_items[1].m_recent) {
+        if (rp.speed_down > 0.01 || rp.idle_rounds == 0) down_list.push_back(&rp);
+    }
+    std::sort(up_list.begin(), up_list.end(), [](auto* a, auto* b) { return a->speed_up > b->speed_up; });
+    std::sort(down_list.begin(), down_list.end(), [](auto* a, auto* b) { return a->speed_down > b->speed_down; });
+
+    int count = 0;
+    for (auto* rp : up_list) {
+        if (count >= 5) break;
+        wchar_t spd[32]; FmtSpeed(rp->speed_up, spd, 32);
+        swprintf_s(line, 256, L"  %-14s %s\n", rp->name.c_str(), spd);
+        wcscat_s(m_tooltip, line); count++;
+    }
+    while (count < 5) { wcscat_s(m_tooltip, L"  -\n"); count++; }
+
+    wcscat_s(m_tooltip, L"\n--- Download ---\n");
+    count = 0;
+    for (auto* rp : down_list) {
+        if (count >= 5) break;
+        wchar_t spd[32]; FmtSpeed(rp->speed_down, spd, 32);
+        swprintf_s(line, 256, L"  %-14s %s\n", rp->name.c_str(), spd);
+        wcscat_s(m_tooltip, line); count++;
+    }
+    while (count < 5) { wcscat_s(m_tooltip, L"  -\n"); count++; }
+
+    CheckHoverAndShowPopup();
+}
+
+const wchar_t* CProcessNetPlugin::GetInfo(PluginInfoIndex i) {
+    switch (i) {
+    case TMI_NAME: return L"ProcessNetMonitor";
+    case TMI_DESCRIPTION: return L"Per-process network speed";
+    case TMI_AUTHOR: return L"Aemeath";
+    case TMI_COPYRIGHT: return L"MIT";
+    case TMI_VERSION: return L"1.2.0";
+    case TMI_URL: return L"https://github.com";
+    default: return L"";
+    }
+}
+
+const wchar_t* CProcessNetPlugin::GetTooltipInfo() { return m_tooltip; }
+
+void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
+    m_app = p;
+    HINSTANCE hInst = (HINSTANCE)GetModuleHandleW(NULL);
+    m_popup_created = m_popup.Initialize(hInst);
+}
+
+// ============================================================
+// Hover detection & popup management
+// ============================================================
+
+static bool IsTMMainWindow(HWND hwnd) {
+    if (!hwnd) return false;
+    wchar_t cls[64] = {};
+    GetClassNameW(hwnd, cls, 64);
+    if (wcsncmp(cls, L"TrafficMonitor", 14) != 0) return false;
+
+    RECT rc;
+    GetWindowRect(hwnd, &rc);
+
+    APPBARDATA abd = { sizeof(abd) };
+    UINT state = SHAppBarMessage(ABM_GETTASKBARPOS, &abd);
+    if (!state) return true;
+
+    RECT tb = abd.rc;
+    switch (abd.uEdge) {
+    case ABE_BOTTOM: return rc.top < tb.top;
+    case ABE_TOP:    return rc.bottom > tb.bottom;
+    case ABE_LEFT:   return rc.right > tb.right;
+    case ABE_RIGHT:  return rc.left < tb.left;
+    }
+    return true;
+}
+
+static HWND GetTMMainWindow(HWND hwnd) {
+    if (!hwnd) return nullptr;
+    HWND root = GetAncestor(hwnd, GA_ROOT);
+    if (!root) return nullptr;
+    wchar_t cls[64] = {};
+    GetClassNameW(root, cls, 64);
+    if (wcsncmp(cls, L"TrafficMonitor", 14) != 0) return nullptr;
+    if (IsTMMainWindow(root)) return root;
+    return nullptr;
+}
+
+void CProcessNetPlugin::GetProcessDisplayInfo(
+        std::vector<CTooltipPopup::ProcDisplayInfo>& out,
+        const std::vector<ProcTraffic>& stats) {
+    std::map<DWORD, CTooltipPopup::ProcDisplayInfo> merged;
+
+    for (auto& [pid, rp] : m_items[0].m_recent) {
+        auto& d = merged[pid];
+        d.name = rp.name;
+        d.speed_up = rp.speed_up;
+    }
+    for (auto& [pid, rp] : m_items[1].m_recent) {
+        auto& d = merged[pid];
+        d.name = rp.name;
+        d.speed_down = rp.speed_down;
+    }
+    for (auto& st : stats) {
+        auto it = merged.find(st.pid);
+        if (it != merged.end() && !st.exe_path.empty()) {
+            it->second.exe_path = st.exe_path;
+        }
+    }
+
+    out.clear();
+    for (auto& [pid, d] : merged) {
+        out.push_back(std::move(d));
+    }
+    std::sort(out.begin(), out.end(), [](auto& a, auto& b) {
+        double sa = (a.speed_up + a.speed_down > 0.01) ? (a.speed_up + a.speed_down) : 0;
+        double sb = (b.speed_up + b.speed_down > 0.01) ? (b.speed_up + b.speed_down) : 0;
+        return sa > sb;
+    });
+
+    if (out.size() > CTooltipPopup::MAX_SHOW)
+        out.resize(CTooltipPopup::MAX_SHOW);
+}
+
+void CProcessNetPlugin::CheckHoverAndShowPopup() {
+    if (!m_popup_created) return;
+
+    ULONGLONG now = GetTickCount64();
+    int interval = m_was_hovering ? 80 : 300;
+    if (now - m_last_hover_check < (ULONGLONG)interval) return;
+    m_last_hover_check = now;
+
+    POINT pt;
+    GetCursorPos(&pt);
+    HWND hover_wnd = WindowFromPoint(pt);
+
+    bool over_popup = (hover_wnd == m_popup.GetHwnd());
+    HWND tm_wnd = GetTMMainWindow(hover_wnd);
+
+    if (tm_wnd) {
+        RECT wnd_rect;
+        GetWindowRect(tm_wnd, &wnd_rect);
+        std::vector<CTooltipPopup::ProcDisplayInfo> procs;
+        GetProcessDisplayInfo(procs, m_cached_stats);
+        m_popup.UpdateAndShow(procs, m_cached_up, m_cached_down, wnd_rect, false);
+        m_was_hovering = true;
+    } else if (over_popup) {
+        m_was_hovering = true;
+    } else {
+        if (m_was_hovering) {
+            m_popup.Hide();
+            m_was_hovering = false;
+        }
+    }
+}
+
+extern "C" {
+    __declspec(dllexport) ITMPlugin* TMPluginGetInstance() {
+        return &CProcessNetPlugin::Instance();
+    }
+}

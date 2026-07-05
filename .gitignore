@@ -1,0 +1,18 @@
+# Build artifacts
+*.obj
+*.lib
+*.exp
+*.dll
+*.pdb
+*.ilk
+*.iobj
+*.ipdb
+
+# TrafficMonitor binary (too large for repo)
+TrafficMonitor/
+
+# Zip packages
+*.zip
+
+# Debug logs
+pnm_debug.txt
