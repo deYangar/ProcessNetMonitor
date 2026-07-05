@@ -1,6 +1,7 @@
 #include "plugin_main.h"
 #include <algorithm>
 #include <shellapi.h>
+#include <shlobj.h>
 
 // From tooltip_popup.cpp DllMain - DLL's HINSTANCE
 extern HINSTANCE s_dll_hinst;
@@ -210,14 +211,11 @@ void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
     m_popup_created = m_popup.Initialize(hInst);
     m_detail_created = m_detail.Initialize(hInst);
 
-    // Set config dir: use DLL directory + \\data
-    if (s_dll_hinst) {
-        wchar_t dll_path[MAX_PATH];
-        GetModuleFileNameW(s_dll_hinst, dll_path, MAX_PATH);
-        wchar_t* slash = wcsrchr(dll_path, L'\\');
-        if (slash) *slash = 0;
-        std::wstring data_dir = std::wstring(dll_path) + L"\\data";
-        m_detail.SetConfigDir(data_dir);
+    // Set config dir: %APPDATA%\TrafficMonitor\plugins\ProcessNetMonitor
+    wchar_t appdata[MAX_PATH];
+    if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, appdata) == S_OK) {
+        std::wstring cfg_dir = std::wstring(appdata) + L"\\TrafficMonitor\\plugins\\ProcessNetMonitor";
+        m_detail.SetConfigDir(cfg_dir);
     }
     m_detail.LoadHistory();
 }
