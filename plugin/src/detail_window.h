@@ -2,7 +2,7 @@
 #include <windows.h>
 #include <string>
 #include <vector>
-#include <map>
+#include <unordered_map>
 #include <deque>
 #include <set>
 #include <functional>
@@ -34,6 +34,8 @@ public:
     void SaveHistory();
     void LoadHistory();
     void SetConfigDir(const std::wstring& dir) { m_config_dir = dir; }
+    void RecordHistory(const std::vector<ProcTraffic>& stats);
+
 
     // History time range
     enum TimeRange { TR_24H = 0, TR_3D, TR_7D, TR_30D };
@@ -43,6 +45,7 @@ public:
         ULONGLONG tick;
         uint64_t cum_recv;
         uint64_t cum_sent;
+        bool loaded = false;  // true = loaded from disk (old session)
     };
     struct ProcessHistory {
         std::wstring name;
@@ -96,15 +99,12 @@ private:
     void ScrollTo(int pos);
 
     // History
-    void RecordHistory(const std::vector<ProcTraffic>& stats);
     void BuildHistoryRows();
 
     std::wstring m_config_dir;
 
     // Helpers
     bool IsDarkMode();
-    void FormatSpeed(double bps, wchar_t* buf, int n);
-    void FormatBytes(uint64_t bytes, wchar_t* buf, int n);
     HICON GetProcessIcon(const std::wstring& exe_path);
 
     // Colors
@@ -148,6 +148,7 @@ private:
     bool m_dark_mode = true;
     bool m_tracking_mouse = false;
     bool m_context_menu_open = false;
+    bool m_history_dirty = true;  // only rebuild history rows when new data arrives
     DWORD m_context_menu_pid = 0;
     std::wstring m_context_menu_path;
 
@@ -160,21 +161,29 @@ private:
     std::vector<ProcTraffic> m_cached_stats;
 
     // History: process name -> history
-    std::map<std::wstring, ProcessHistory> m_history;
-    ULONGLONG m_history_start_tick = 0;  // when TM plugin started
+    std::unordered_map<std::wstring, ProcessHistory> m_history;
+    // Last known cumulative bytes per process (for delta calculation in RecordHistory)
+    struct CumBytes { uint64_t recv; uint64_t sent; };
+    std::unordered_map<std::wstring, CumBytes> m_last_cum;
+    ULONGLONG m_session_start_tick = 0;  // GetTickCount64 when TM started
+    ULONGLONG m_history_start_tick = 0;  // wall-clock ms when plugin started
     ULONGLONG m_last_save_tick = 0;
-    // Tier limits
+    // Tier limits & time constants
     static const int MAX_RAW = 3600;      // ~1 hour at 1/sec
     static const int MAX_MIN = 1440;      // ~24 hours at 1/min
     static const int MAX_HOUR = 168;      // ~7 days at 1/hour
     static const int MAX_DAY = 365;       // ~1 year at 1/day
+    static constexpr ULONGLONG MS_PER_HOUR  = 3600000ULL;
+    static constexpr ULONGLONG MS_PER_DAY   = 86400000ULL;
+    static constexpr ULONGLONG MS_PER_WEEK  = 604800000ULL;
+    static constexpr ULONGLONG MS_PER_YEAR  = 365ULL * 24 * 3600 * 1000;
 
     // Time range filter (history tab)
     TimeRange m_time_range = TR_24H;
 
     // Table state (per-tab sort)
     int m_sort_col[2] = { 3, 3 };     // default sort by download/total_down
-    bool m_sort_desc[2] = { true, true };
+    bool m_sort_asc[2] = { false, false };  // false=descending(big first), true=ascending(small first)
     int m_scroll_pos = 0;
     int m_hovered_row = -1;
     int m_hovered_col = -1;
@@ -204,7 +213,8 @@ private:
         { L"\u5E73\u5747\u4E0B\u8F7D",    85,  60,  Column::RIGHT  },
         { L"\u5E73\u5747\u4E0A\u4F20",    85,  60,  Column::RIGHT  },
     };
-    Column* GetActiveCols() const { return (Column*)(m_active_tab == 0 ? m_rt_cols : m_hist_cols); }
+    Column* GetActiveCols() { return (m_active_tab == 0) ? m_rt_cols : m_hist_cols; }
+    const Column* GetActiveCols() const { return (m_active_tab == 0) ? m_rt_cols : m_hist_cols; }
 
     // Layout constants
     static const int TITLE_BAR_H = 36;
@@ -220,9 +230,26 @@ private:
     static const int SCROLL_W = 8;
     static const int MIN_WIDTH = 680;
     static const int MIN_HEIGHT = 400;
+    static const UINT_PTR TIMER_DEFER_REBUILD = 1;
 
     // Icon cache
-    std::map<std::wstring, HICON> m_icon_cache;
+    std::unordered_map<std::wstring, HICON> m_icon_cache;
+
+    // Cached GDI objects (created once, reused in OnPaint)
+    HFONT m_font_title = nullptr;     // Microsoft YaHei -14 semibold
+    HFONT m_font_row = nullptr;       // Microsoft YaHei -14 normal
+    HFONT m_font_header = nullptr;    // Microsoft YaHei -13 semibold
+    HFONT m_font_small = nullptr;     // Microsoft YaHei -11 normal (expand arrow)
+    HFONT m_font_time = nullptr;      // Microsoft YaHei -12 normal (time range buttons)
+    HPEN m_pen_border = nullptr;      // row bottom border
+    HPEN m_pen_border_exp = nullptr;  // expanded row border
+    HBRUSH m_br_row[2] = {};          // row bg: [0]=even, [1]=odd
+    HBRUSH m_br_hover = nullptr;      // hovered row bg
+    HBRUSH m_br_child = nullptr;      // expanded child row bg
+
+    // IsDarkMode cache
+    bool m_dark_mode_cached = true;
+    ULONGLONG m_dark_mode_tick = 0;
 
     // Title bar / UI rects
     RECT m_rcClose = {};

@@ -10,6 +10,7 @@
 #include <thread>
 #include <atomic>
 #include <cstdint>
+#include <functional>
 
 struct ProcTraffic {
     DWORD pid = 0;
@@ -33,6 +34,7 @@ public:
     bool IsRunning() const { return m_running; }
     const wchar_t* GetLastError() const { return m_error; }
     std::vector<ProcTraffic> GetStats(double interval_sec);
+    void SetOnStats(std::function<void(const std::vector<ProcTraffic>&)> cb) { m_on_stats = cb; }
 
 private:
     void CaptureLoop();
@@ -61,4 +63,5 @@ private:
     std::map<DWORD, std::wstring> m_name_cache;
     std::map<DWORD, std::wstring> m_path_cache;
     wchar_t m_error[128] = L"";
+    std::function<void(const std::vector<ProcTraffic>&)> m_on_stats;
 };

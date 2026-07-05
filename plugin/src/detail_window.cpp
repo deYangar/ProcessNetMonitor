@@ -1,9 +1,11 @@
-#include "detail_window.h"
+﻿#include "detail_window.h"
+#include "utils.h"
 #include <shellapi.h>
 #include <dwmapi.h>
 #include <algorithm>
 #include <cmath>
 #include <set>
+#include <ctime>
 
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "dwmapi.lib")
@@ -20,22 +22,43 @@ static LRESULT CALLBACK DetailStaticWndProc(HWND hwnd, UINT msg, WPARAM wp, LPAR
 // Construction / Destruction
 // ============================================================
 
+static ULONGLONG WallClockMs() { return (ULONGLONG)time(NULL) * 1000; }
+
 CDetailWindow::CDetailWindow() {
     s_instance = this;
     m_dark_mode = IsDarkMode();
-    m_history_start_tick = GetTickCount64();
+    m_dark_mode_tick = GetTickCount64();
+    m_session_start_tick = GetTickCount64();
+    m_history_start_tick = WallClockMs();
+    m_last_save_tick = GetTickCount64();  // prevent immediate overwrite on first UpdateData
 }
 
 CDetailWindow::~CDetailWindow() {
+    OutputDebugStringW(L"[PNM] ~CDetailWindow: calling SaveHistory");
     SaveHistory();
+    OutputDebugStringW(L"[PNM] ~CDetailWindow: SaveHistory done");
     if (m_hwnd) DestroyWindow(m_hwnd);
     for (auto& [path, icon] : m_icon_cache) {
         if (icon) DestroyIcon(icon);
     }
+    if (m_font_title) DeleteObject(m_font_title);
+    if (m_font_row) DeleteObject(m_font_row);
+    if (m_font_header) DeleteObject(m_font_header);
+    if (m_font_small) DeleteObject(m_font_small);
+    if (m_font_time) DeleteObject(m_font_time);
+    if (m_pen_border) DeleteObject(m_pen_border);
+    if (m_pen_border_exp) DeleteObject(m_pen_border_exp);
+    for (auto& b : m_br_row) { if (b) DeleteObject(b); }
+    if (m_br_hover) DeleteObject(m_br_hover);
+    if (m_br_child) DeleteObject(m_br_child);
     s_instance = nullptr;
 }
 
 bool CDetailWindow::IsDarkMode() {
+    ULONGLONG now = GetTickCount64();
+    if (now - m_dark_mode_tick < 5000) return m_dark_mode_cached;
+    m_dark_mode_tick = now;
+
     HKEY hKey;
     if (RegOpenKeyExW(HKEY_CURRENT_USER,
                       L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
@@ -43,9 +66,9 @@ bool CDetailWindow::IsDarkMode() {
         DWORD val = 1, size = sizeof(DWORD);
         RegQueryValueExW(hKey, L"AppsUseLightTheme", NULL, NULL, (BYTE*)&val, &size);
         RegCloseKey(hKey);
-        return val == 0;
+        m_dark_mode_cached = (val == 0);
     }
-    return true;
+    return m_dark_mode_cached;
 }
 
 HICON CDetailWindow::GetProcessIcon(const std::wstring& exe_path) {
@@ -100,20 +123,7 @@ COLORREF CDetailWindow::GetBorderColor() {
     return m_dark_mode ? RGB(55, 55, 60) : RGB(220, 220, 220);
 }
 
-void CDetailWindow::FormatSpeed(double bps, wchar_t* buf, int n) {
-    if (bps < 0.01) wcsncpy_s(buf, n, L"0 B/s", _TRUNCATE);
-    else if (bps < 1024) swprintf_s(buf, n, L"%.0f B/s", bps);
-    else if (bps < 1048576) swprintf_s(buf, n, L"%.1f KB/s", bps / 1024.0);
-    else swprintf_s(buf, n, L"%.2f MB/s", bps / 1048576.0);
-}
-
-void CDetailWindow::FormatBytes(uint64_t bytes, wchar_t* buf, int n) {
-    if (bytes == 0) wcsncpy_s(buf, n, L"0 B", _TRUNCATE);
-    else if (bytes < 1024ULL) swprintf_s(buf, n, L"%llu B", bytes);
-    else if (bytes < 1048576ULL) swprintf_s(buf, n, L"%.1f KB", bytes / 1024.0);
-    else if (bytes < 1073741824ULL) swprintf_s(buf, n, L"%.2f MB", bytes / 1048576.0);
-    else swprintf_s(buf, n, L"%.2f GB", bytes / 1073741824.0);
-}
+// FormatSpeed / FormatBytes delegated to shared utils.h
 
 // ============================================================
 // Window creation
@@ -148,12 +158,49 @@ bool CDetailWindow::Initialize(HINSTANCE hInst) {
     int corner_pref = 2;
     DwmSetWindowAttribute(m_hwnd, 33, &corner_pref, sizeof(corner_pref));
 
+    // Pre-create cached GDI objects
+    m_font_title = CreateFontW(-14, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
+    m_font_row = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                              DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                              CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
+    m_font_header = CreateFontW(-13, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
+    m_font_small = CreateFontW(-11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
+    m_font_time = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                               CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
+    m_pen_border = CreatePen(PS_SOLID, 1, m_dark_mode ? RGB(42, 42, 46) : RGB(238, 238, 238));
+    m_pen_border_exp = CreatePen(PS_SOLID, 1, m_dark_mode ? RGB(42, 42, 46) : RGB(238, 238, 238));
+    m_br_row[0] = CreateSolidBrush(GetBgColor());
+    m_br_row[1] = CreateSolidBrush(m_dark_mode ? RGB(35, 35, 39) : RGB(245, 245, 245));
+    m_br_hover = CreateSolidBrush(m_dark_mode ? RGB(48, 48, 54) : RGB(232, 232, 232));
+    m_br_child = CreateSolidBrush(m_dark_mode ? RGB(36, 36, 40) : RGB(247, 247, 247));
+
     return true;
 }
 
 void CDetailWindow::Show(HWND parent_wnd) {
     m_parent_wnd = parent_wnd;
+    bool old_dark = m_dark_mode;
     m_dark_mode = IsDarkMode();
+    if (m_dark_mode != old_dark) {
+        if (m_pen_border) DeleteObject(m_pen_border);
+        if (m_pen_border_exp) DeleteObject(m_pen_border_exp);
+        for (auto& b : m_br_row) { if (b) DeleteObject(b); }
+        if (m_br_hover) DeleteObject(m_br_hover);
+        if (m_br_child) DeleteObject(m_br_child);
+        m_pen_border = CreatePen(PS_SOLID, 1, m_dark_mode ? RGB(42, 42, 46) : RGB(238, 238, 238));
+        m_pen_border_exp = CreatePen(PS_SOLID, 1, m_dark_mode ? RGB(42, 42, 46) : RGB(238, 238, 238));
+        m_br_row[0] = CreateSolidBrush(GetBgColor());
+        m_br_row[1] = CreateSolidBrush(m_dark_mode ? RGB(35, 35, 39) : RGB(245, 245, 245));
+        m_br_hover = CreateSolidBrush(m_dark_mode ? RGB(48, 48, 54) : RGB(232, 232, 232));
+        m_br_child = CreateSolidBrush(m_dark_mode ? RGB(36, 36, 40) : RGB(247, 247, 247));
+    }
 
     int sw = GetSystemMetrics(SM_CXSCREEN);
     int sh = GetSystemMetrics(SM_CYSCREEN);
@@ -180,35 +227,90 @@ void CDetailWindow::Hide() {
 // ============================================================
 
 void CDetailWindow::RecordHistory(const std::vector<ProcTraffic>& stats) {
-    ULONGLONG now = GetTickCount64();
+    ULONGLONG now = WallClockMs();
+    bool added = false;
     for (auto& st : stats) {
         auto& hist = m_history[st.name];
-        if (hist.name.empty()) { hist.name = st.name; hist.exe_path = st.exe_path; }
+        if (hist.name.empty()) { hist.name = st.name; hist.exe_path = st.exe_path; added = true; }
         if (hist.exe_path.empty() && !st.exe_path.empty()) hist.exe_path = st.exe_path;
-        HistorySnapshot snap = { now, st.bytes_recv, st.bytes_sent };
+
+        // Store DELTA (bytes transferred since last snapshot), not cumulative.
+        // This survives TM restarts because deltas are always non-negative.
+        uint64_t delta_recv = 0, delta_sent = 0;
+        auto it = m_last_cum.find(st.name);
+        if (it != m_last_cum.end()) {
+            // Normal case: compute delta from last known cumulative
+            if (st.bytes_recv >= it->second.recv)
+                delta_recv = st.bytes_recv - it->second.recv;
+            else
+                delta_recv = st.bytes_recv;  // TM restarted, cum reset to 0
+            if (st.bytes_sent >= it->second.sent)
+                delta_sent = st.bytes_sent - it->second.sent;
+            else
+                delta_sent = st.bytes_sent;
+        } else {
+            // First time seeing this process in this session: count all bytes so far
+            delta_recv = st.bytes_recv;
+            delta_sent = st.bytes_sent;
+        }
+        m_last_cum[st.name] = { st.bytes_recv, st.bytes_sent };
+
+        HistorySnapshot snap = { now, delta_recv, delta_sent, false };
         hist.raw.push_back(snap);
         while ((int)hist.raw.size() > MAX_RAW) hist.raw.pop_front();
+        added = true;
     }
+    if (added) m_history_dirty = true;
     static int compress_counter = 0;
     if (++compress_counter >= 60) { compress_counter = 0; CompressHistory(); }
 }
 
 void CDetailWindow::CompressHistory() {
-    ULONGLONG now = GetTickCount64();
+    ULONGLONG now = WallClockMs();
     for (auto& [name, h] : m_history) {
-        ULONGLONG min_cutoff = now - 3600000ULL;
+        // raw → min: downsample to 1 entry per minute
+        // SUM deltas within each window (not last cumulative)
+        ULONGLONG min_cutoff = now - 120000;
         while (!h.raw.empty() && h.raw.front().tick < min_cutoff) {
-            h.min.push_back(h.raw.front()); h.raw.pop_front();
+            ULONGLONG win_end = h.raw.front().tick + 60000;
+            HistorySnapshot acc = { 0, 0, 0, false };
+            while (!h.raw.empty() && h.raw.front().tick < win_end && h.raw.front().tick < min_cutoff) {
+                acc.tick = h.raw.front().tick;
+                acc.cum_recv += h.raw.front().cum_recv;
+                acc.cum_sent += h.raw.front().cum_sent;
+                h.raw.pop_front();
+            }
+            h.min.push_back(acc);
         }
         while ((int)h.min.size() > MAX_MIN) h.min.pop_front();
-        ULONGLONG hour_cutoff = now - 86400000ULL;
+
+        // min → hour: SUM deltas within 1-hour windows
+        ULONGLONG hour_cutoff = now - 7200000;
         while (!h.min.empty() && h.min.front().tick < hour_cutoff) {
-            h.hour.push_back(h.min.front()); h.min.pop_front();
+            ULONGLONG win_end = h.min.front().tick + 3600000;
+            HistorySnapshot acc = { 0, 0, 0, false };
+            while (!h.min.empty() && h.min.front().tick < win_end && h.min.front().tick < hour_cutoff) {
+                acc.tick = h.min.front().tick;
+                acc.cum_recv += h.min.front().cum_recv;
+                acc.cum_sent += h.min.front().cum_sent;
+                h.min.pop_front();
+            }
+            h.hour.push_back(acc);
         }
         while ((int)h.hour.size() > MAX_HOUR) h.hour.pop_front();
-        ULONGLONG day_cutoff = now - 604800000ULL;
+
+        // hour → day: SUM deltas within 1-day windows
+        ULONGLONG day_cutoff = now - 172800000;
         while (!h.hour.empty() && h.hour.front().tick < day_cutoff) {
-            h.day.push_back(h.hour.front()); h.hour.pop_front();
+            ULONGLONG win_end = h.hour.front().tick + 86400000;
+            HistorySnapshot acc = { 0, 0, 0, false };
+            while (!h.hour.empty() && h.hour.front().tick < win_end && h.hour.front().tick < day_cutoff) {
+                acc.tick = h.hour.front().tick;
+                acc.cum_recv += h.hour.front().cum_recv;
+                acc.cum_sent += h.hour.front().cum_sent;
+                h.hour.pop_front();
+            }
+            h.day.push_back(acc);
         }
         while ((int)h.day.size() > MAX_DAY) h.day.pop_front();
     }
@@ -216,18 +318,29 @@ void CDetailWindow::CompressHistory() {
 
 void CDetailWindow::GetMergedSnapshots(const ProcessHistory& h,
     std::vector<const HistorySnapshot*>& out, ULONGLONG cutoff) const {
-    for (auto& s : h.day)  { if (s.tick >= cutoff) out.push_back(&s); }
-    for (auto& s : h.hour) { if (s.tick >= cutoff) out.push_back(&s); }
-    for (auto& s : h.min)  { if (s.tick >= cutoff) out.push_back(&s); }
-    for (auto& s : h.raw)  { if (s.tick >= cutoff) out.push_back(&s); }
+    // Binary search: deques are sorted by tick, skip entries before cutoff
+    auto collect = [&](const std::deque<HistorySnapshot>& dq) {
+        auto it = std::lower_bound(dq.begin(), dq.end(), cutoff,
+            [](const HistorySnapshot& s, ULONGLONG c) { return s.tick < c; });
+        for (; it != dq.end(); ++it) out.push_back(&(*it));
+    };
+    collect(h.day);
+    collect(h.hour);
+    collect(h.min);
+    collect(h.raw);
 }
 
 void CDetailWindow::BuildHistoryRows() {
+    // Save expanded state before clearing
+    std::set<std::wstring> expanded_names;
+    for (auto& r : m_rows) {
+        if (r.expanded) expanded_names.insert(r.name);
+    }
     m_rows.clear();
     m_hist_total_recv = 0;
     m_hist_total_sent = 0;
 
-    ULONGLONG now = GetTickCount64();
+    ULONGLONG now = WallClockMs();
     ULONGLONG range_ms = 0;
     switch (m_time_range) {
     case TR_24H: range_ms = 24ULL * 3600 * 1000; break;
@@ -241,25 +354,32 @@ void CDetailWindow::BuildHistoryRows() {
     for (auto& [name, hist] : m_history) {
         std::vector<const HistorySnapshot*> snaps;
         GetMergedSnapshots(hist, snaps, cutoff);
-        if (snaps.size() < 2) continue;
+        if (snaps.empty()) continue;
 
-        const HistorySnapshot* first = snaps.front();
-        const HistorySnapshot* last = snaps.back();
-        uint64_t recv_delta = last->cum_recv - first->cum_recv;
-        uint64_t sent_delta = last->cum_sent - first->cum_sent;
-        double elapsed_sec = (double)(last->tick - first->tick) / 1000.0;
+        // Data is stored as deltas (bytes per interval). Sum all deltas in range.
+        uint64_t total_recv = 0, total_sent = 0;
+        ULONGLONG first_tick = snaps[0]->tick;
+        ULONGLONG last_tick = snaps[0]->tick;
+        for (auto* s : snaps) {
+            total_recv += s->cum_recv;  // cum_recv is actually delta_recv
+            total_sent += s->cum_sent;  // cum_sent is actually delta_sent
+            if (s->tick < first_tick) first_tick = s->tick;
+            if (s->tick > last_tick) last_tick = s->tick;
+        }
+
+        double elapsed_sec = (double)(last_tick - first_tick) / 1000.0;
         if (elapsed_sec < 1.0) elapsed_sec = 1.0;
 
-        m_hist_total_recv += recv_delta;
-        m_hist_total_sent += sent_delta;
+        m_hist_total_recv += total_recv;
+        m_hist_total_sent += total_sent;
 
         DisplayRow row;
         row.name = hist.name;
         row.exe_path = hist.exe_path;
-        row.hist_recv = recv_delta;
-        row.hist_sent = sent_delta;
-        row.hist_avg_down = (double)recv_delta / elapsed_sec;
-        row.hist_avg_up = (double)sent_delta / elapsed_sec;
+        row.hist_recv = total_recv;
+        row.hist_sent = total_sent;
+        row.hist_avg_down = (double)total_recv / elapsed_sec;
+        row.hist_avg_up = (double)total_sent / elapsed_sec;
 
         std::wstring lower = hist.name;
         for (auto& c : lower) c = towlower(c);
@@ -271,9 +391,7 @@ void CDetailWindow::BuildHistoryRows() {
         else
             row.category = L"\u7B2C\u4E09\u65B9\u7A0B\u5E8F";
 
-        for (auto& old : m_rows) {
-            if (old.name == name && old.expanded) { row.expanded = true; break; }
-        }
+        if (expanded_names.count(name)) row.expanded = true;
         m_rows.push_back(row);
     }
 }
@@ -290,29 +408,29 @@ static void WriteDQ(FILE* f, const std::deque<CDetailWindow::HistorySnapshot>& d
         fwrite(&s.cum_sent, sizeof(uint64_t), 1, f);
     }
 }
-static bool ReadDQ(FILE* f, std::deque<CDetailWindow::HistorySnapshot>& dq, int max_n, ULONGLONG max_age) {
+static bool ReadDQ(FILE* f, std::deque<CDetailWindow::HistorySnapshot>& dq, int max_n, ULONGLONG max_age, ULONGLONG now) {
     uint32_t n; if (fread(&n, 4, 1, f) != 1 || n > (uint32_t)max_n + 100) return false;
-    ULONGLONG now = GetTickCount64();
     for (uint32_t i = 0; i < n; i++) {
         CDetailWindow::HistorySnapshot s;
+        s.loaded = true;  // data from disk (old session)
         if (fread(&s.tick, sizeof(ULONGLONG), 1, f) != 1) return false;
         if (fread(&s.cum_recv, sizeof(uint64_t), 1, f) != 1) return false;
         if (fread(&s.cum_sent, sizeof(uint64_t), 1, f) != 1) return false;
-        if (max_age > 0 && now - s.tick > max_age) continue;
+        if (max_age > 0 && now > s.tick && now - s.tick > max_age) continue;
         dq.push_back(s);
     }
     return true;
 }
 
 void CDetailWindow::SaveHistory() {
-    if (m_config_dir.empty()) return;
+    if (m_config_dir.empty()) { OutputDebugStringW(L"[PNM] SaveHistory: config_dir empty!"); return; }
     CreateDirectoryW(m_config_dir.c_str(), NULL);
     wchar_t path[MAX_PATH];
     swprintf_s(path, MAX_PATH, L"%s\\history.dat", m_config_dir.c_str());
     FILE* f = _wfopen(path, L"wb");
-    if (!f) return;
+    if (!f) { OutputDebugStringW(L"[PNM] SaveHistory: fopen failed!"); return; }
 
-    uint32_t magic = 0x504E4D48, version = 2, count = (uint32_t)m_history.size();
+    uint32_t magic = 0x504E4D48, version = 4, count = (uint32_t)m_history.size();
     fwrite(&magic, 4, 1, f); fwrite(&version, 4, 1, f); fwrite(&count, 4, 1, f);
     for (auto& [name, hist] : m_history) {
         uint32_t nl = (uint32_t)name.size(); fwrite(&nl, 4, 1, f); fwrite(name.c_str(), sizeof(wchar_t), nl, f);
@@ -323,16 +441,23 @@ void CDetailWindow::SaveHistory() {
 }
 
 void CDetailWindow::LoadHistory() {
-    if (m_config_dir.empty()) return;
+    if (m_config_dir.empty()) { OutputDebugStringW(L"[PNM] LoadHistory: config_dir empty!"); return; }
     wchar_t path[MAX_PATH];
     swprintf_s(path, MAX_PATH, L"%s\\history.dat", m_config_dir.c_str());
     FILE* f = _wfopen(path, L"rb");
-    if (!f) return;
+    if (!f) { OutputDebugStringW(L"[PNM] LoadHistory: file not found"); return; }
     uint32_t magic, version, count;
     if (fread(&magic, 4, 1, f) != 1 || magic != 0x504E4D48) { fclose(f); return; }
     if (fread(&version, 4, 1, f) != 1) { fclose(f); return; }
     if (fread(&count, 4, 1, f) != 1) { fclose(f); return; }
-    ULONGLONG max_age = 365ULL * 24 * 3600 * 1000;
+    ULONGLONG max_age = MS_PER_YEAR;
+    // Version 2 stored GetTickCount64() ticks (uptime); version 3 stores wall-clock ms.
+    // Convert old ticks to wall-clock using the offset at load time.
+    ULONGLONG uptime_now = GetTickCount64();
+    ULONGLONG wall_now = WallClockMs();
+    bool needs_tick_convert = (version < 3);   // uptime ticks → wall-clock
+    bool needs_delta_convert = (version < 4);  // cumulative → delta
+    ULONGLONG readq_now = needs_tick_convert ? uptime_now : wall_now;
     for (uint32_t i = 0; i < count; i++) {
         uint32_t nl; if (fread(&nl, 4, 1, f) != 1 || nl > 512) break;
         std::wstring name(nl, L'\0'); if (fread(&name[0], sizeof(wchar_t), nl, f) != nl) break;
@@ -340,15 +465,108 @@ void CDetailWindow::LoadHistory() {
         std::wstring exe_path(pl, L'\0'); if (fread(&exe_path[0], sizeof(wchar_t), pl, f) != pl) break;
         auto& hist = m_history[name]; hist.name = name; hist.exe_path = exe_path;
         if (version >= 2) {
-            if (!ReadDQ(f, hist.raw, MAX_RAW, max_age)) break;
-            if (!ReadDQ(f, hist.min, MAX_MIN, max_age)) break;
-            if (!ReadDQ(f, hist.hour, MAX_HOUR, max_age)) break;
-            if (!ReadDQ(f, hist.day, MAX_DAY, max_age)) break;
+            if (!ReadDQ(f, hist.raw, MAX_RAW, max_age, readq_now)) break;
+            if (!ReadDQ(f, hist.min, MAX_MIN, max_age, readq_now)) break;
+            if (!ReadDQ(f, hist.hour, MAX_HOUR, max_age, readq_now)) break;
+            if (!ReadDQ(f, hist.day, MAX_DAY, max_age, readq_now)) break;
         } else {
-            if (!ReadDQ(f, hist.raw, MAX_RAW, max_age)) break;
+            if (!ReadDQ(f, hist.raw, MAX_RAW, max_age, readq_now)) break;
+        }
+        // Convert old uptime ticks to wall-clock time
+        if (needs_tick_convert) {
+            auto convert = [&](std::deque<HistorySnapshot>& dq) {
+                for (auto& s : dq) {
+                    if (s.tick <= uptime_now)
+                        s.tick = wall_now - (uptime_now - s.tick);
+                    else
+                        s.tick = wall_now;
+                }
+            };
+            convert(hist.raw);
+            convert(hist.min);
+            convert(hist.hour);
+            convert(hist.day);
+        }
+        // Convert cumulative values to deltas (version < 4)
+        if (needs_delta_convert) {
+            auto to_delta = [](std::deque<HistorySnapshot>& dq) {
+                if (dq.size() < 2) return;
+                for (size_t i = dq.size() - 1; i > 0; i--) {
+                    uint64_t dr = (dq[i].cum_recv >= dq[i-1].cum_recv) ? (dq[i].cum_recv - dq[i-1].cum_recv) : dq[i].cum_recv;
+                    uint64_t ds = (dq[i].cum_sent >= dq[i-1].cum_sent) ? (dq[i].cum_sent - dq[i-1].cum_sent) : dq[i].cum_sent;
+                    dq[i].cum_recv = dr;
+                    dq[i].cum_sent = ds;
+                }
+                // First entry: treat as delta from 0
+                // (keep as-is, it's the first snapshot's cum which is reasonable as delta)
+            };
+            to_delta(hist.raw);
+            to_delta(hist.min);
+            to_delta(hist.hour);
+            to_delta(hist.day);
         }
     }
     fclose(f);
+
+    // Compress loaded data: SUM deltas within each time window
+    ULONGLONG now = WallClockMs();
+    for (auto& [name, h] : m_history) {
+        // raw → min: SUM deltas per minute
+        while (!h.raw.empty()) {
+            ULONGLONG win_end = h.raw.front().tick + 60000;
+            HistorySnapshot acc = { 0, 0, 0, false };
+            while (!h.raw.empty() && h.raw.front().tick < win_end) {
+                acc.tick = h.raw.front().tick;
+                acc.cum_recv += h.raw.front().cum_recv;
+                acc.cum_sent += h.raw.front().cum_sent;
+                h.raw.pop_front();
+            }
+            h.min.push_back(acc);
+        }
+        while ((int)h.min.size() > MAX_MIN) h.min.pop_front();
+
+        // min → hour: SUM deltas per hour
+        while (!h.min.empty()) {
+            ULONGLONG win_end = h.min.front().tick + 3600000;
+            HistorySnapshot acc = { 0, 0, 0, false };
+            while (!h.min.empty() && h.min.front().tick < win_end) {
+                acc.tick = h.min.front().tick;
+                acc.cum_recv += h.min.front().cum_recv;
+                acc.cum_sent += h.min.front().cum_sent;
+                h.min.pop_front();
+            }
+            h.hour.push_back(acc);
+        }
+        while ((int)h.hour.size() > MAX_HOUR) h.hour.pop_front();
+
+        // hour → day: SUM deltas per day
+        while (!h.hour.empty()) {
+            ULONGLONG win_end = h.hour.front().tick + 86400000;
+            HistorySnapshot acc = { 0, 0, 0, false };
+            while (!h.hour.empty() && h.hour.front().tick < win_end) {
+                acc.tick = h.hour.front().tick;
+                acc.cum_recv += h.hour.front().cum_recv;
+                acc.cum_sent += h.hour.front().cum_sent;
+                h.hour.pop_front();
+            }
+            h.day.push_back(acc);
+        }
+        while ((int)h.day.size() > MAX_DAY) h.day.pop_front();
+    }
+
+    // Adjust m_history_start_tick to earliest surviving data (wall-clock ms)
+    ULONGLONG earliest = ULLONG_MAX;
+    for (auto& [name, h] : m_history) {
+        if (!h.min.empty() && h.min.front().tick < earliest) earliest = h.min.front().tick;
+        if (!h.hour.empty() && h.hour.front().tick < earliest) earliest = h.hour.front().tick;
+        if (!h.day.empty() && h.day.front().tick < earliest) earliest = h.day.front().tick;
+    }
+    if (earliest < m_history_start_tick && earliest != ULLONG_MAX) {
+        m_history_start_tick = earliest;
+    }
+    wchar_t dbg[128];
+    swprintf_s(dbg, 128, L"[PNM] LoadHistory: loaded %u processes, earliest=%llu", (unsigned)m_history.size(), earliest);
+    OutputDebugStringW(dbg);
 }
 
 // ============================================================
@@ -362,9 +580,9 @@ void CDetailWindow::UpdateData(const std::vector<ProcTraffic>& stats, double tot
     // Always record history
     RecordHistory(stats);
 
-    // Auto-save every 60 seconds
+    // Auto-save every 30 seconds (was 60, reduced for safety on TM restart)
     ULONGLONG now = GetTickCount64();
-    if (now - m_last_save_tick > 60000) {
+    if (now - m_last_save_tick > 30000) {
         m_last_save_tick = now;
         SaveHistory();
     }
@@ -383,12 +601,27 @@ void CDetailWindow::RebuildRows() {
     auto& stats = m_cached_stats;
 
     if (m_active_tab == 1) {
-        // History tab
+        // History tab - only rebuild when new data arrives
+        if (!m_history_dirty) {
+            if (m_visible) {
+                RECT rc;
+                GetClientRect(m_hwnd, &rc);
+                rc.top = GetTableAreaTop();
+                InvalidateRect(m_hwnd, &rc, FALSE);
+            }
+            return;
+        }
+        m_history_dirty = false;
         BuildHistoryRows();
         ResortRows();
         int max_scroll = (int)m_rows.size() - 1;
         if (m_scroll_pos > max_scroll) m_scroll_pos = max(0, max_scroll);
-        if (m_visible) InvalidateRect(m_hwnd, NULL, FALSE);
+        if (m_visible) {
+            RECT rc = { PADDING, GetTableAreaTop(), 0, 0 };
+            GetClientRect(m_hwnd, &rc);
+            rc.top = GetTableAreaTop();
+            InvalidateRect(m_hwnd, &rc, FALSE);
+        }
         return;
     }
 
@@ -426,7 +659,12 @@ void CDetailWindow::RebuildRows() {
 
     int max_scroll = (int)m_rows.size() - 1;
     if (m_scroll_pos > max_scroll) m_scroll_pos = max(0, max_scroll);
-    if (m_visible) InvalidateRect(m_hwnd, NULL, FALSE);
+    if (m_visible) {
+        RECT rc;
+        GetClientRect(m_hwnd, &rc);
+        rc.top = GetTableAreaTop();
+        InvalidateRect(m_hwnd, &rc, FALSE);
+    }
 }
 
 // ============================================================
@@ -457,7 +695,7 @@ int CDetailWindow::GetVisibleRows(int client_h) const {
 void CDetailWindow::ResortRows() {
     bool is_hist = (m_active_tab == 1);
     int sc = m_sort_col[m_active_tab];
-    bool sd = m_sort_desc[m_active_tab];
+    bool sa = m_sort_asc[m_active_tab];
     std::sort(m_rows.begin(), m_rows.end(), [&](const DisplayRow& a, const DisplayRow& b) {
         int cmp = 0;
         if (is_hist) {
@@ -480,16 +718,23 @@ void CDetailWindow::ResortRows() {
             default: cmp = 0;
             }
         }
-        return sd ? (cmp > 0) : (cmp < 0);
+        // Stable tiebreaker: PID first, then name
+        if (cmp == 0) {
+            if (a.pid != 0 && b.pid != 0 && a.pid != b.pid)
+                cmp = (a.pid > b.pid) ? 1 : -1;
+            else
+                cmp = _wcsicmp(a.name.c_str(), b.name.c_str());
+        }
+        return sa ? (cmp < 0) : (cmp > 0);
     });
 }
 
 void CDetailWindow::SortByColumn(int col) {
     if (m_sort_col[m_active_tab] == col) {
-        m_sort_desc[m_active_tab] = !m_sort_desc[m_active_tab];
+        m_sort_asc[m_active_tab] = !m_sort_asc[m_active_tab];
     } else {
         m_sort_col[m_active_tab] = col;
-        m_sort_desc[m_active_tab] = true;
+        m_sort_asc[m_active_tab] = true;
     }
     ResortRows();
 }
@@ -555,6 +800,8 @@ void CDetailWindow::ShowContextMenu(int row, int x, int y) {
     AppendMenuW(hMenu, MF_STRING, 2, L"\u6587\u4EF6\u5C5E\u6027");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenu, MF_STRING, 3, L"\u7ED3\u675F\u8FDB\u7A0B");
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(hMenu, MF_STRING, 4, L"\u67E5\u770B\u8FDE\u63A5");
 
     int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y, 0, m_hwnd, NULL);
     DestroyMenu(hMenu);
@@ -591,6 +838,13 @@ void CDetailWindow::ShowContextMenu(int row, int x, int y) {
             }
         }
         break;
+    case 4: // \u67E5\u770B\u8FDE\u63A5
+        if (pid > 0) {
+            wchar_t cmd[256];
+            swprintf_s(cmd, 256, L"cmd /c netstat -ano | findstr %u & pause", pid);
+            ShellExecuteW(NULL, L"open", L"cmd.exe", cmd, NULL, SW_SHOWNORMAL);
+        }
+        break;
     }
 }
 
@@ -609,6 +863,9 @@ LRESULT CDetailWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSELEAVE: OnMouseLeave(); return 0;
     case WM_MOUSEWHEEL: OnMouseWheel(GET_WHEEL_DELTA_WPARAM(wp)); return 0;
     case WM_VSCROLL: OnVScroll(LOWORD(wp)); return 0;
+    case WM_DESTROY:
+        SaveHistory();
+        break;
     case WM_ERASEBKGND: return 1;
 
     case WM_NCHITTEST: {
@@ -630,6 +887,14 @@ LRESULT CDetailWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == VK_ESCAPE) { Hide(); return 0; }
         break;
 
+    case WM_TIMER:
+        if (wp == TIMER_DEFER_REBUILD) {
+            KillTimer(m_hwnd, TIMER_DEFER_REBUILD);
+            m_history_dirty = true;
+            RebuildRows();
+        }
+        return 0;
+
     default:
         return DefWindowProcW(m_hwnd, msg, wp, lp);
     }
@@ -646,11 +911,23 @@ void CDetailWindow::OnLButtonDown(int x, int y) {
 
     // Tabs
     if (PtInRect(&m_rcTab0, { x, y })) {
-        if (m_active_tab != 0) { m_active_tab = 0; m_scroll_pos = 0; RebuildRows(); }
+        if (m_active_tab != 0) {
+            m_active_tab = 0;
+            m_scroll_pos = 0;
+            m_rows.clear();
+            InvalidateRect(m_hwnd, NULL, FALSE);  // full redraw with empty table
+            SetTimer(m_hwnd, TIMER_DEFER_REBUILD, 10, NULL);  // rebuild after paint
+        }
         return;
     }
     if (PtInRect(&m_rcTab1, { x, y })) {
-        if (m_active_tab != 1) { m_active_tab = 1; m_scroll_pos = 0; RebuildRows(); }
+        if (m_active_tab != 1) {
+            m_active_tab = 1;
+            m_scroll_pos = 0;
+            m_rows.clear();
+            InvalidateRect(m_hwnd, NULL, FALSE);  // full redraw for tab switch
+            SetTimer(m_hwnd, TIMER_DEFER_REBUILD, 10, NULL);
+        }
         return;
     }
 
@@ -661,7 +938,9 @@ void CDetailWindow::OnLButtonDown(int x, int y) {
                 if (m_time_range != (TimeRange)i) {
                     m_time_range = (TimeRange)i;
                     m_scroll_pos = 0;
-                    RebuildRows();
+                    m_rows.clear();
+                    InvalidateRect(m_hwnd, NULL, FALSE);  // full redraw for time range change
+                    SetTimer(m_hwnd, TIMER_DEFER_REBUILD, 10, NULL);
                 }
                 return;
             }
@@ -793,10 +1072,7 @@ void CDetailWindow::DrawTitleBar(HDC hdc, int w) {
 
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, GetTextColor());
-    HFONT hFont = CreateFontW(-14, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                               CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
-    HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
+    HFONT hOldFont = (HFONT)SelectObject(hdc, m_font_title);
     RECT title_rc = { PADDING + 22, 0, w - 100, TITLE_BAR_H };
     DrawTextW(hdc, L"ProcessNetMonitor", -1, &title_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
@@ -811,7 +1087,6 @@ void CDetailWindow::DrawTitleBar(HDC hdc, int w) {
     DrawTextW(hdc, L"\u2013", -1, &m_rcMin, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
 
     SelectObject(hdc, hOldFont);
-    DeleteObject(hFont);
 }
 
 void CDetailWindow::DrawTabs(HDC hdc, int w, int y) {
@@ -820,10 +1095,7 @@ void CDetailWindow::DrawTabs(HDC hdc, int w, int y) {
     FillRect(hdc, &rc, hBrush);
     DeleteObject(hBrush);
 
-    HFONT hFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                               CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
-    HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
+    HFONT hOldFont = (HFONT)SelectObject(hdc, m_font_row);
     SetBkMode(hdc, TRANSPARENT);
 
     SIZE sz;
@@ -856,7 +1128,6 @@ void CDetailWindow::DrawTabs(HDC hdc, int w, int y) {
     }
 
     SelectObject(hdc, hOldFont);
-    DeleteObject(hFont);
 }
 
 void CDetailWindow::DrawTimeRangeButtons(HDC hdc, int w, int y) {
@@ -867,10 +1138,7 @@ void CDetailWindow::DrawTimeRangeButtons(HDC hdc, int w, int y) {
     FillRect(hdc, &rc, hBrush);
     DeleteObject(hBrush);
 
-    HFONT hFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                               CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
-    HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
+    HFONT hOldFont = (HFONT)SelectObject(hdc, m_font_time);
     SetBkMode(hdc, TRANSPARENT);
 
     const wchar_t* labels[4] = { L"24\u5C0F\u65F6", L"3\u5929", L"7\u5929", L"30\u5929" };
@@ -901,7 +1169,6 @@ void CDetailWindow::DrawTimeRangeButtons(HDC hdc, int w, int y) {
     }
 
     SelectObject(hdc, hOldFont);
-    DeleteObject(hFont);
 }
 
 void CDetailWindow::DrawSpeedSummary(HDC hdc, int w, int y) {
@@ -910,10 +1177,7 @@ void CDetailWindow::DrawSpeedSummary(HDC hdc, int w, int y) {
     FillRect(hdc, &rc, hBrush);
     DeleteObject(hBrush);
 
-    HFONT hFont = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                               CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
-    HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
+    HFONT hOldFont = (HFONT)SelectObject(hdc, m_font_header);
     SetBkMode(hdc, TRANSPARENT);
 
     int x = PADDING;
@@ -967,7 +1231,6 @@ void CDetailWindow::DrawSpeedSummary(HDC hdc, int w, int y) {
     }
 
     SelectObject(hdc, hOldFont);
-    DeleteObject(hFont);
 }
 
 void CDetailWindow::DrawTableHeader(HDC hdc, int w, int y) {
@@ -984,10 +1247,7 @@ void CDetailWindow::DrawTableHeader(HDC hdc, int w, int y) {
     DeleteObject(hBrush);
     DeleteObject(hPen);
 
-    HFONT hFont = CreateFontW(-13, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                               CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
-    HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
+    HFONT hOldFont = (HFONT)SelectObject(hdc, m_font_header);
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, GetSecondaryTextColor());
 
@@ -1005,7 +1265,7 @@ void CDetailWindow::DrawTableHeader(HDC hdc, int w, int y) {
 
         if (i == m_sort_col[m_active_tab] && i >= 1) {
             SetTextColor(hdc, GetAccentColor(false));
-            const wchar_t* arrow = m_sort_desc[m_active_tab] ? L" \u25BC" : L" \u25B2";
+            const wchar_t* arrow = m_sort_asc[m_active_tab] ? L" \u25B2" : L" \u25BC";
             RECT arrow_rc = { rc.right - 16, y, rc.right + 4, y + TABLE_HEADER_H };
             DrawTextW(hdc, arrow, -1, &arrow_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
             SetTextColor(hdc, GetSecondaryTextColor());
@@ -1015,19 +1275,12 @@ void CDetailWindow::DrawTableHeader(HDC hdc, int w, int y) {
     }
 
     SelectObject(hdc, hOldFont);
-    DeleteObject(hFont);
 }
 
 void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
     int row_h = GetRowHeight();
 
-    HFONT hFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                               CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
-    HFONT hSmallFont = CreateFontW(-11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                    CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
-    HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
+    HFONT hOldFont = (HFONT)SelectObject(hdc, m_font_row);
     SetBkMode(hdc, TRANSPARENT);
     Column* cols = GetActiveCols();
 
@@ -1043,8 +1296,6 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
             : L"\u65E0\u6D3B\u8DC3\u8FDB\u7A0B\n\u6B63\u5728\u76D1\u63A7\u7F51\u7EDC\u6D41\u91CF...";
         DrawTextW(hdc, msg, -1, &rc, DT_CENTER | DT_VCENTER | DT_WORDBREAK);
         SelectObject(hdc, hOldFont);
-        DeleteObject(hFont);
-        DeleteObject(hSmallFont);
         return;
     }
 
@@ -1071,23 +1322,19 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
 
         // Row background
         bool hovered = (ri == m_hovered_row);
-        HBRUSH hBrush = CreateSolidBrush(GetRowBgColor(ri, hovered));
         RECT row_rc = { PADDING, ry, w - PADDING, ry + row_h };
-        FillRect(hdc, &row_rc, hBrush);
-        DeleteObject(hBrush);
+        FillRect(hdc, &row_rc, hovered ? m_br_hover : m_br_row[ri % 2]);
 
         // Bottom border
-        HPEN hPen = CreatePen(PS_SOLID, 1, m_dark_mode ? RGB(42, 42, 46) : RGB(238, 238, 238));
-        HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
+        HPEN hOldPen = (HPEN)SelectObject(hdc, m_pen_border);
         MoveToEx(hdc, PADDING, ry + row_h - 1, NULL);
         LineTo(hdc, w - PADDING, ry + row_h - 1);
         SelectObject(hdc, hOldPen);
-        DeleteObject(hPen);
 
         int cx = PADDING;
 
         // Col 0: Icon + expand arrow
-        SelectObject(hdc, hSmallFont);
+        SelectObject(hdc, m_font_small);
         SetTextColor(hdc, GetSecondaryTextColor());
         const wchar_t* arrow = row.expanded ? L"\u25BC" : L"\u25B6";
         RECT arrow_rc = { cx, ry, cx + 14, ry + row_h };
@@ -1098,7 +1345,7 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
         cx += 32;
 
         // Col 1: Name
-        SelectObject(hdc, hFont);
+        SelectObject(hdc, m_font_row);
         SetTextColor(hdc, GetTextColor());
         {
             std::wstring display = row.name;
@@ -1177,7 +1424,7 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
             cx += cols[5].width;
 
             SetTextColor(hdc, m_dark_mode ? RGB(255, 165, 0) : RGB(230, 126, 34));
-            SelectObject(hdc, hSmallFont);
+            SelectObject(hdc, m_font_small);
             RECT r6 = { cx + 4, ry, cx + cols[6].width - 4, ry + row_h };
             DrawTextW(hdc, L"\u00B7\u00B7\u00B7", -1, &r6, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
         }
@@ -1185,14 +1432,12 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
         // Expanded children
         if (row.expanded) {
             int child_y = ry + row_h;
-            SelectObject(hdc, hSmallFont);
+            SelectObject(hdc, m_font_small);
             SetTextColor(hdc, GetSecondaryTextColor());
 
             // PID row
             RECT pid_rc = { PADDING + 28, child_y, w - PADDING, child_y + CHILD_ROW_H };
-            HBRUSH hCbg = CreateSolidBrush(m_dark_mode ? RGB(36, 36, 40) : RGB(247, 247, 247));
-            FillRect(hdc, &pid_rc, hCbg);
-            DeleteObject(hCbg);
+            FillRect(hdc, &pid_rc, m_br_child);
             wchar_t pid_text[64];
             if (row.pid > 0)
                 swprintf_s(pid_text, 64, L"\u8FDB\u7A0BID: %u", row.pid);
@@ -1200,20 +1445,16 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
                 swprintf_s(pid_text, 64, L"\u5386\u53F2\u8BB0\u5F55");
             DrawTextW(hdc, pid_text, -1, &pid_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
-            HPEN hPen2 = CreatePen(PS_SOLID, 1, m_dark_mode ? RGB(42, 42, 46) : RGB(238, 238, 238));
-            HPEN hOldPen2 = (HPEN)SelectObject(hdc, hPen2);
+            HPEN hOldPen2 = (HPEN)SelectObject(hdc, m_pen_border_exp);
             MoveToEx(hdc, PADDING, child_y + CHILD_ROW_H - 1, NULL);
             LineTo(hdc, w - PADDING, child_y + CHILD_ROW_H - 1);
             SelectObject(hdc, hOldPen2);
-            DeleteObject(hPen2);
             child_y += CHILD_ROW_H;
 
             // Path row
             if (!row.exe_path.empty()) {
                 RECT path_rc = { PADDING + 28, child_y, w - PADDING, child_y + CHILD_ROW_H };
-                HBRUSH hPbg = CreateSolidBrush(m_dark_mode ? RGB(36, 36, 40) : RGB(247, 247, 247));
-                FillRect(hdc, &path_rc, hPbg);
-                DeleteObject(hPbg);
+                FillRect(hdc, &path_rc, m_br_child);
 
                 std::wstring path_display = row.exe_path;
                 SIZE sz;
@@ -1225,12 +1466,10 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
                 }
                 DrawTextW(hdc, path_display.c_str(), -1, &path_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
-                HPEN hPen3 = CreatePen(PS_SOLID, 1, m_dark_mode ? RGB(42, 42, 46) : RGB(238, 238, 238));
-                HPEN hOldPen3 = (HPEN)SelectObject(hdc, hPen3);
+                HPEN hOldPen3 = (HPEN)SelectObject(hdc, m_pen_border_exp);
                 MoveToEx(hdc, PADDING, child_y + CHILD_ROW_H - 1, NULL);
                 LineTo(hdc, w - PADDING, child_y + CHILD_ROW_H - 1);
                 SelectObject(hdc, hOldPen3);
-                DeleteObject(hPen3);
             }
         }
 
@@ -1238,8 +1477,6 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
     }
 
     SelectObject(hdc, hOldFont);
-    DeleteObject(hFont);
-    DeleteObject(hSmallFont);
 }
 
 void CDetailWindow::DrawScrollbar(HDC hdc, int w, int h) {

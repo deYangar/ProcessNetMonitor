@@ -2,7 +2,7 @@
 #include <windows.h>
 #include <string>
 #include <vector>
-#include <map>
+#include <unordered_map>
 #include "capture.h"
 
 // Rich tooltip popup window - shows process icons + speed info
@@ -45,7 +45,6 @@ public:
 
 private:
     // Window
-    static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
     void OnPaint();
     void OnMouseLeave();
 
@@ -58,7 +57,6 @@ private:
 
     // Helpers
     bool IsDarkMode();
-    void FormatSpeed(double bps, wchar_t* buf, int n);
     COLORREF GetBgColor();
     COLORREF GetTextColor();
     COLORREF GetAccentColor(bool is_upload);
@@ -77,7 +75,16 @@ private:
     double m_total_down = 0;
 
     // Icon cache: exe_path -> HICON
-    std::map<std::wstring, HICON> m_icon_cache;
+    std::unordered_map<std::wstring, HICON> m_icon_cache;
+
+    // Cached GDI objects (created once, reused in OnPaint)
+    HFONT m_font_normal = nullptr;   // Segoe UI -15
+    HFONT m_font_small = nullptr;    // Microsoft YaHei -13 (section title + detail button)
+    HPEN m_pen_separator = nullptr;  // row separator
+
+    // IsDarkMode cache
+    bool m_dark_mode_cached = true;
+    ULONGLONG m_dark_mode_tick = 0;
 
     // Layout constants
     static const int PADDING = 12;
@@ -91,6 +98,9 @@ public:
 
     // Mouse tracking
     bool m_tracking = false;
+
+    // "查看详细" button rect (updated in OnPaint)
+    RECT m_rcDetailBtn = {};
 
     static CTooltipPopup* s_instance;
 };

@@ -1,7 +1,7 @@
 #include "plugin_main.h"
+#include "utils.h"
 #include <algorithm>
 #include <shellapi.h>
-#include <shlobj.h>
 
 // From tooltip_popup.cpp DllMain - DLL's HINSTANCE
 extern HINSTANCE s_dll_hinst;
@@ -10,10 +10,7 @@ CProcessNetPlugin CProcessNetPlugin::s_instance;
 wchar_t CProcessNetItem::s_value_buf[2][256] = { L"starting...", L"starting..." };
 
 static void FmtSpeed(double bps, wchar_t* buf, int n) {
-    if (bps < 0.01) wcsncpy_s(buf, n, L"0", _TRUNCATE);
-    else if (bps < 1024) swprintf_s(buf, n, L"%.0fB/s", bps);
-    else if (bps < 1048576) swprintf_s(buf, n, L"%.1fKB/s", bps/1024.0);
-    else swprintf_s(buf, n, L"%.2fMB/s", bps/1048576.0);
+    FormatSpeed(bps, buf, n);
 }
 
 const wchar_t* CProcessNetItem::GetItemName() const {
@@ -34,15 +31,8 @@ const wchar_t* CProcessNetItem::GetItemValueSampleText() const {
 
 int CProcessNetItem::OnMouseEvent(MouseEventType type, int x, int y, void* hWnd, int flag) {
     if (type == MT_LCLICKED || type == MT_DBCLICKED) {
-        auto& plugin = CProcessNetPlugin::Instance();
-        if (plugin.m_detail_created) {
-            if (plugin.m_detail.IsVisible()) {
-                plugin.m_detail.Hide();
-            } else {
-                plugin.m_detail.Show((HWND)hWnd);
-            }
-            return 1; // handled
-        }
+        CProcessNetPlugin::Instance().ToggleDetailWindow((HWND)hWnd);
+        return 1;
     }
     return 0;
 }
@@ -93,9 +83,6 @@ void CProcessNetItem::Update(const std::vector<ProcTraffic>& stats, double sys_u
         });
 
     double sys_spd = (m_dir == DIR_UPLOAD) ? sys_up : sys_down;
-    wchar_t sys_str[32];
-    FmtSpeed(sys_spd, sys_str, 32);
-
     wchar_t proc_name[16] = L"-";
     wchar_t proc_str[32];
     if (!list.empty()) {
@@ -211,13 +198,17 @@ void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
     m_popup_created = m_popup.Initialize(hInst);
     m_detail_created = m_detail.Initialize(hInst);
 
-    // Set config dir: %APPDATA%\TrafficMonitor\plugins\ProcessNetMonitor
-    wchar_t appdata[MAX_PATH];
-    if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, appdata) == S_OK) {
-        std::wstring cfg_dir = std::wstring(appdata) + L"\\TrafficMonitor\\plugins\\ProcessNetMonitor";
-        m_detail.SetConfigDir(cfg_dir);
+    // Use TM's plugin config dir + plugin name (GetPluginConfigDir returns the plugins/ folder)
+    const wchar_t* cfg_base = p->GetPluginConfigDir();
+    if (cfg_base && cfg_base[0]) {
+        std::wstring cfg_dir = std::wstring(cfg_base) + L"\\ProcessNetMonitor";
+        m_detail.SetConfigDir(cfg_dir.c_str());
     }
     m_detail.LoadHistory();
+    // Record history whenever GetStats is called (independent of detail panel)
+    m_capture.SetOnStats([this](const std::vector<ProcTraffic>& stats) {
+        m_detail.RecordHistory(stats);
+    });
 }
 
 // ============================================================
@@ -258,10 +249,18 @@ static HWND GetTMMainWindow(HWND hwnd) {
     return nullptr;
 }
 
+void CProcessNetPlugin::ToggleDetailWindow(HWND parent_wnd) {
+    if (!m_detail_created) return;
+    if (m_detail.IsVisible())
+        m_detail.Hide();
+    else
+        m_detail.Show(parent_wnd);
+}
+
 void CProcessNetPlugin::GetProcessDisplayInfo(
         std::vector<CTooltipPopup::ProcDisplayInfo>& out,
         const std::vector<ProcTraffic>& stats) {
-    std::map<DWORD, CTooltipPopup::ProcDisplayInfo> merged;
+    std::unordered_map<DWORD, CTooltipPopup::ProcDisplayInfo> merged;
 
     for (auto& [pid, rp] : m_items[0].m_recent) {
         auto& d = merged[pid];

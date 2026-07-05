@@ -1,5 +1,6 @@
 ﻿#include "tooltip_popup.h"
 #include "plugin_main.h"
+#include "utils.h"
 #include <shellapi.h>
 #include <dwmapi.h>
 #include <algorithm>
@@ -24,6 +25,11 @@ static LRESULT CALLBACK StaticWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         s_dll_hinst = (HINSTANCE)hModule;
+    } else if (reason == DLL_PROCESS_DETACH) {
+        // Save history on DLL unload (destructor may not run)
+        if (CDetailWindow::s_instance) {
+            CDetailWindow::s_instance->SaveHistory();
+        }
     }
     return TRUE;
 }
@@ -66,7 +72,7 @@ HICON CTooltipPopup::GetProcessIcon(const std::wstring& exe_path) {
 CTooltipPopup::CTooltipPopup() {
     s_instance = this;
     m_dark_mode = IsDarkMode();
-    // Defer window creation to Initialize() - constructor is too early
+    m_dark_mode_tick = GetTickCount64();
 }
 
 CTooltipPopup::~CTooltipPopup() {
@@ -74,11 +80,17 @@ CTooltipPopup::~CTooltipPopup() {
     for (auto& [path, icon] : m_icon_cache) {
         if (icon) DestroyIcon(icon);
     }
+    if (m_font_normal) DeleteObject(m_font_normal);
+    if (m_font_small) DeleteObject(m_font_small);
+    if (m_pen_separator) DeleteObject(m_pen_separator);
     s_instance = nullptr;
 }
 
 bool CTooltipPopup::IsDarkMode() {
-    // Check Windows apps dark mode setting
+    ULONGLONG now = GetTickCount64();
+    if (now - m_dark_mode_tick < 5000) return m_dark_mode_cached;
+    m_dark_mode_tick = now;
+
     HKEY hKey;
     if (RegOpenKeyExW(HKEY_CURRENT_USER,
                       L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
@@ -86,9 +98,9 @@ bool CTooltipPopup::IsDarkMode() {
         DWORD val = 1, size = sizeof(DWORD);
         RegQueryValueExW(hKey, L"AppsUseLightTheme", NULL, NULL, (BYTE*)&val, &size);
         RegCloseKey(hKey);
-        return val == 0; // 0 = dark, 1 = light
+        m_dark_mode_cached = (val == 0);
     }
-    return true; // default dark
+    return m_dark_mode_cached;
 }
 
 // ============================================================
@@ -135,12 +147,16 @@ bool CTooltipPopup::Initialize(HINSTANCE hInst) {
     HRGN rgn = CreateRoundRectRgn(0, 0, 300, 400, CORNER_RADIUS * 2, CORNER_RADIUS * 2);
     SetWindowRgn(m_hwnd, rgn, FALSE);
 
-    return true;
-}
+    // Pre-create cached GDI objects
+    m_font_normal = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    m_font_small = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
+    m_pen_separator = CreatePen(PS_SOLID, 1, m_dark_mode ? RGB(45, 45, 45) : RGB(235, 235, 235));
 
-LRESULT CALLBACK CTooltipPopup::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    if (s_instance) return s_instance->HandleMessage(msg, wp, lp);
-    return DefWindowProcW(hwnd, msg, wp, lp);
+    return true;
 }
 
 LRESULT CTooltipPopup::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
@@ -163,14 +179,11 @@ LRESULT CTooltipPopup::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
 
     case WM_LBUTTONDOWN:
-        // Open detail window when tooltip is clicked
+        // Only open detail window when clicking the "查看详细" button
         {
-            auto& plugin = CProcessNetPlugin::Instance();
-            if (plugin.m_detail_created) {
-                if (plugin.m_detail.IsVisible())
-                    plugin.m_detail.Hide();
-                else
-                    plugin.m_detail.Show(m_hwnd);
+            POINT pt = { (short)LOWORD(lp), (short)HIWORD(lp) };
+            if (PtInRect(&m_rcDetailBtn, pt)) {
+                CProcessNetPlugin::Instance().ToggleDetailWindow(m_hwnd);
             }
         }
         return 0;
@@ -213,22 +226,14 @@ COLORREF CTooltipPopup::GetSectionBgColor() {
     return m_dark_mode ? RGB(44, 44, 44) : RGB(238, 238, 238);
 }
 
-void CTooltipPopup::FormatSpeed(double bps, wchar_t* buf, int n) {
-    if (bps < 0.01) wcsncpy_s(buf, n, L"0 B/s", _TRUNCATE);
-    else if (bps < 1024) swprintf_s(buf, n, L"%.0f B/s", bps);
-    else if (bps < 1048576) swprintf_s(buf, n, L"%.1f KB/s", bps / 1024.0);
-    else swprintf_s(buf, n, L"%.2f MB/s", bps / 1048576.0);
-}
+// FormatSpeed delegated to shared utils.h
 
 // ============================================================
 // Layout calculation
 // ============================================================
 
 void CTooltipPopup::CalcLayout(HDC hdc, int& out_w, int& out_h, int& out_up_count, int& out_down_count) {
-    HFONT hFont = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                               CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-    HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
+    HFONT hOldFont = (HFONT)SelectObject(hdc, m_font_normal);
 
     int max_text_w = 0;
 
@@ -262,7 +267,6 @@ void CTooltipPopup::CalcLayout(HDC hdc, int& out_w, int& out_h, int& out_up_coun
     }
 
     SelectObject(hdc, hOldFont);
-    DeleteObject(hFont);
 
     int speed_area = 110;
     out_w = PADDING + ICON_SIZE + 8 + max_text_w + 12 + speed_area + PADDING;
@@ -271,9 +275,11 @@ void CTooltipPopup::CalcLayout(HDC hdc, int& out_w, int& out_h, int& out_up_coun
     int header_h = 36;
     int section_title_h = 26;
     int gap = 4;
+    int btn_area_h = 28;  // "查看详细" button
     out_h = PADDING + header_h
             + section_title_h + up_count * ROW_HEIGHT + gap
             + section_title_h + down_count * ROW_HEIGHT
+            + btn_area_h
             + PADDING;
 }
 
@@ -324,16 +330,12 @@ void CTooltipPopup::DrawSectionTitle(HDC hdc, int y, const wchar_t* title, bool 
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, GetAccentColor(is_upload));
 
-    HFONT hFont = CreateFontW(-13, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                               CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-    HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
+    HFONT hOldFont = (HFONT)SelectObject(hdc, m_font_small);
 
     RECT text_rc = { PADDING + 2, y, client.right - PADDING, y + 22 };
     DrawTextW(hdc, title, -1, &text_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
     SelectObject(hdc, hOldFont);
-    DeleteObject(hFont);
 }
 
 void CTooltipPopup::DrawProcRow(HDC hdc, int y, const ProcDisplayInfo& proc, bool is_upload) {
@@ -354,10 +356,7 @@ void CTooltipPopup::DrawProcRow(HDC hdc, int y, const ProcDisplayInfo& proc, boo
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, GetTextColor());
 
-    HFONT hFont = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                               CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-    HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
+    HFONT hOldFont = (HFONT)SelectObject(hdc, m_font_normal);
 
     // Truncate name if too long
     std::wstring display_name = proc.name;
@@ -394,15 +393,12 @@ void CTooltipPopup::DrawProcRow(HDC hdc, int y, const ProcDisplayInfo& proc, boo
     DrawTextW(hdc, spd_buf, -1, &spd_rc, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
 
     // 4. Subtle separator line
-    HPEN hPen = CreatePen(PS_SOLID, 1, m_dark_mode ? RGB(45, 45, 45) : RGB(235, 235, 235));
-    HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
+    HPEN hOldPen = (HPEN)SelectObject(hdc, m_pen_separator);
     MoveToEx(hdc, PADDING + ICON_SIZE + 6, y + ROW_HEIGHT - 1, NULL);
     LineTo(hdc, client.right - PADDING, y + ROW_HEIGHT - 1);
     SelectObject(hdc, hOldPen);
-    DeleteObject(hPen);
 
     SelectObject(hdc, hOldFont);
-    DeleteObject(hFont);
 }
 
 void CTooltipPopup::OnPaint() {
@@ -423,10 +419,7 @@ void CTooltipPopup::OnPaint() {
     DrawBackground(memDC, w, h);
 
     // Set up fonts
-    HFONT hFont = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                               CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-    HFONT hOldFont = (HFONT)SelectObject(memDC, hFont);
+    HFONT hOldFont = (HFONT)SelectObject(memDC, m_font_normal);
     SetBkMode(memDC, TRANSPARENT);
 
     int y = PADDING;
@@ -497,10 +490,27 @@ void CTooltipPopup::OnPaint() {
         DrawTextW(memDC, L"\u65E0\u4E0B\u8F7D\u6D41\u91CF", -1, &rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
         y += ROW_HEIGHT;
     }
+    y += 4;
+
+    // === "\u67E5\u770B\u8BE6\u7EC6" button ===
+    m_rcDetailBtn = { PADDING, y, w - PADDING, y + 24 };
+    HBRUSH hBtnBrush = CreateSolidBrush(m_dark_mode ? RGB(50, 50, 54) : RGB(235, 235, 235));
+    HPEN hBtnPen = CreatePen(PS_SOLID, 1, m_dark_mode ? RGB(70, 70, 74) : RGB(210, 210, 210));
+    HBRUSH hOldBtnBrush = (HBRUSH)SelectObject(memDC, hBtnBrush);
+    HPEN hOldBtnPen = (HPEN)SelectObject(memDC, hBtnPen);
+    RoundRect(memDC, m_rcDetailBtn.left, m_rcDetailBtn.top, m_rcDetailBtn.right, m_rcDetailBtn.bottom, 6, 6);
+    SelectObject(memDC, hOldBtnBrush);
+    SelectObject(memDC, hOldBtnPen);
+    DeleteObject(hBtnBrush);
+    DeleteObject(hBtnPen);
+
+    HFONT hOldBtnFont = (HFONT)SelectObject(memDC, m_font_small);
+    SetTextColor(memDC, m_dark_mode ? RGB(255, 165, 0) : RGB(230, 126, 34));
+    DrawTextW(memDC, L"\u67E5\u770B\u8BE6\u7EC6", -1, &m_rcDetailBtn, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+    SelectObject(memDC, hOldBtnFont);
 
     // Cleanup
     SelectObject(memDC, hOldFont);
-    DeleteObject(hFont);
 
     // Blit
     BitBlt(hdc, 0, 0, w, h, memDC, 0, 0, SRCCOPY);
@@ -597,7 +607,13 @@ void CTooltipPopup::UpdateAndShow(const std::vector<ProcDisplayInfo>& procs,
     m_total_down = total_down;
 
     // Re-check dark mode
+    bool old_dark = m_dark_mode;
     m_dark_mode = IsDarkMode();
+    if (m_dark_mode != old_dark) {
+        // Recreate separator pen for new theme
+        if (m_pen_separator) DeleteObject(m_pen_separator);
+        m_pen_separator = CreatePen(PS_SOLID, 1, m_dark_mode ? RGB(45, 45, 45) : RGB(235, 235, 235));
+    }
 
     // Resize and show
     HDC hdc = GetDC(m_hwnd);

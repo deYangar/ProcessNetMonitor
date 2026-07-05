@@ -318,6 +318,9 @@ std::vector<ProcTraffic> PacketCapture::GetStats(double dt) {
     }
     if (dbg) fclose(dbg);
 
+    // Notify listener (for history recording) before sorting
+    if (m_on_stats) m_on_stats(result);
+
     std::sort(result.begin(), result.end(), [](auto& a, auto& b) { return (a.speed_up + a.speed_down) > (b.speed_up + b.speed_down); });
     // Do NOT reset byte counters - just let them accumulate
     // prev_sent/prev_recv track the last snapshot for delta calculation

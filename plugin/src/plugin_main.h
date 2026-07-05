@@ -5,7 +5,7 @@
 #include "capture.h"
 #include "tooltip_popup.h"
 #include "detail_window.h"
-#include <map>
+#include <unordered_map>
 
 struct RecentProc {
     std::wstring name;
@@ -31,7 +31,7 @@ public:
     void Update(const std::vector<ProcTraffic>& stats, double sys_up, double sys_down);
 
     static wchar_t s_value_buf[2][256];
-    std::map<DWORD, RecentProc> m_recent;
+    std::unordered_map<DWORD, RecentProc> m_recent;
     static const int MAX_SHOW = 5;
     static const int MAX_IDLE_ROUNDS = 30;  // keep historical processes longer (~30 seconds)
 
@@ -61,14 +61,15 @@ private:
     CTooltipPopup m_popup;
     bool m_popup_created = false;
 
+    // Detail window access (for CProcessNetItem::OnMouseEvent)
 public:
-    // Detail window (Huorong-style)
+    void ToggleDetailWindow(HWND parent_wnd);
     CDetailWindow m_detail;
     bool m_detail_created = false;
+
 private:
     ULONGLONG m_last_hover_check = 0;
     bool m_was_hovering = false;
-    HWND m_taskbar_wnd = nullptr;
     void CheckHoverAndShowPopup();
     void GetProcessDisplayInfo(std::vector<CTooltipPopup::ProcDisplayInfo>& out,
                                const std::vector<ProcTraffic>& stats);
