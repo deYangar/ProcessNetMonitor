@@ -35,6 +35,11 @@ public:
     void LoadHistory();
     void SetConfigDir(const std::wstring& dir) { m_config_dir = dir; }
     void RecordHistory(const std::vector<ProcTraffic>& stats);
+    void SaveSettings();
+    void LoadSettings();
+    
+    // 设置 PacketCapture 指针（用于获取连接详情）
+    void SetCapture(PacketCapture* capture) { m_capture = capture; }
 
 
     // History time range
@@ -62,6 +67,7 @@ private:
     void OnPaint();
     void OnSize(int w, int h);
     void OnLButtonDown(int x, int y);
+    void OnLButtonUp(int x, int y);
     void OnRButtonDown(int x, int y);
     void OnMouseMove(int x, int y);
     void OnMouseLeave();
@@ -90,6 +96,8 @@ private:
 
     // Table interaction
     int HitTestRow(int y) const;
+    bool HitTestScrollbar(int x, int y) const;
+    void GetScrollbarThumbRect(RECT* rc, int w, int h) const;
     int HitTestColumn(int x) const;
     void SortByColumn(int col);
     void ResortRows();
@@ -118,21 +126,41 @@ private:
     COLORREF GetTitleBarColor();
 
     // Data row for display
-    struct DisplayRow {
+    struct SubProcess {
         DWORD pid = 0;
-        std::wstring name;          // exe name
-        std::wstring display_name;  // friendly name / description
-        std::wstring category;      // 程序类别
         std::wstring exe_path;
         double speed_up = 0;
         double speed_down = 0;
         int conn_count = 0;
+        std::vector<ConnDetail> connections;
+        bool connections_loaded = false;
+        bool conn_expanded = false;
+    };
+    struct DisplayRow {
+        DWORD pid = 0;              // first PID for icon
+        std::wstring name;          // exe name
+        std::wstring display_name;  // friendly name / description
+        std::wstring category;      // 程序类别
+        std::wstring exe_path;      // first process path for icon
+        double speed_up = 0;        // aggregated
+        double speed_down = 0;      // aggregated
+        int conn_count = 0;         // aggregated
         bool expanded = false;
         // History fields
-        uint64_t hist_recv = 0;     // total bytes received in time range
-        uint64_t hist_sent = 0;     // total bytes sent in time range
-        double hist_avg_down = 0;   // average download speed
-        double hist_avg_up = 0;     // average upload speed
+        uint64_t hist_recv = 0;
+        uint64_t hist_sent = 0;
+        double hist_avg_down = 0;
+        double hist_avg_up = 0;
+        
+        // For single-process rows (backward compat)
+        std::vector<ConnDetail> connections;
+        bool connections_loaded = false;
+        bool conn_expanded = false;
+        
+        // Multi-process support
+        std::vector<SubProcess> sub_processes;  // when multiple PIDs share same name
+        
+        bool IsMultiProcess() const { return sub_processes.size() > 1; }
     };
 
     void CompressHistory();
@@ -184,9 +212,16 @@ private:
     // Table state (per-tab sort)
     int m_sort_col[2] = { 3, 3 };     // default sort by download/total_down
     bool m_sort_asc[2] = { false, false };  // false=descending(big first), true=ascending(small first)
-    int m_scroll_pos = 0;
+    int m_scroll_pos = 0;  // pixel offset
+    bool m_dragging_scrollbar = false;
+    int m_drag_start_y = 0;
+    int m_drag_start_scroll = 0;
     int m_hovered_row = -1;
     int m_hovered_col = -1;
+    float m_dpi_scale = 1.0f;
+    void UpdateDpiScale(HWND hwnd = nullptr);
+    void CreateFonts();
+    void RecreateGdiObjects();
     bool m_hovering_close = false;
     bool m_hovering_min = false;
     int m_active_tab = 0;      // 0=实时流量, 1=历史流量
@@ -195,7 +230,7 @@ private:
     enum ColIndex { COL_ICON, COL_NAME, COL_CATEGORY, COL_DOWN, COL_UP, COL_CONN, COL_ACTION };
     static const int NUM_COLS = 7;
     Column m_rt_cols[NUM_COLS] = {
-        { L"",            32,  32,  Column::CENTER },
+        { L"",            42,  42,  Column::CENTER },
         { L"\u7A0B\u5E8F\u540D\u79F0",    180, 120, Column::LEFT   },
         { L"\u7A0B\u5E8F\u7C7B\u522B",    90,  70,  Column::LEFT   },
         { L"\u4E0B\u8F7D\u901F\u5EA6",    100, 80,  Column::RIGHT  },
@@ -205,7 +240,7 @@ private:
     };
     // Columns - history
     Column m_hist_cols[NUM_COLS] = {
-        { L"",            32,  32,  Column::CENTER },
+        { L"",            42,  42,  Column::CENTER },
         { L"\u7A0B\u5E8F\u540D\u79F0",    140, 80,  Column::LEFT   },
         { L"\u7A0B\u5E8F\u7C7B\u522B",    70,  50,  Column::LEFT   },
         { L"\u603B\u4E0B\u8F7D",          90,  60,  Column::RIGHT  },
@@ -216,24 +251,74 @@ private:
     Column* GetActiveCols() { return (m_active_tab == 0) ? m_rt_cols : m_hist_cols; }
     const Column* GetActiveCols() const { return (m_active_tab == 0) ? m_rt_cols : m_hist_cols; }
 
-    // Layout constants
-    static const int TITLE_BAR_H = 36;
-    static const int TAB_BAR_H = 32;
-    static const int TIME_RANGE_H = 30;  // only shown in history tab
-    static const int SUMMARY_H = 28;
-    static const int TABLE_HEADER_H = 28;
-    static const int ROW_H = 36;
-    static const int CHILD_ROW_H = 28;
-    static const int PADDING = 10;
-    static const int CORNER_RADIUS = 8;
-    static const int ICON_SIZE = 20;
-    static const int SCROLL_W = 8;
-    static const int MIN_WIDTH = 680;
-    static const int MIN_HEIGHT = 400;
+    // Layout constants (DPI-scaled at init)
+    int TITLE_BAR_H = 36;
+    int TAB_BAR_H = 32;
+    int TIME_RANGE_H = 30;
+    int SUMMARY_H = 28;
+    int TABLE_HEADER_H = 28;
+    int ROW_H = 36;
+    int CHILD_ROW_H = 28;
+    int PADDING = 10;
+    int CORNER_RADIUS = 8;
+    int ICON_SIZE = 20;
+    int SCROLL_W = 8;
+    int MIN_WIDTH = 680;
+    int MIN_HEIGHT = 400;
     static const UINT_PTR TIMER_DEFER_REBUILD = 1;
+    
+    // Connection table constants (DPI-scaled)
+    int CONN_HEADER_H = 24;
+    int CONN_ROW_H = 22;
+    static const int MAX_CONN_ROWS = 10;
+    int CONN_TABLE_PADDING = 12;
+    int SUBPROC_HEADER_H = 24;
+    int SUBPROC_INDENT = 20;
+    
+    // Base layout values (before DPI scaling)
+    static const int BASE_TITLE_BAR_H = 36;
+    static const int BASE_TAB_BAR_H = 32;
+    static const int BASE_TIME_RANGE_H = 30;
+    static const int BASE_SUMMARY_H = 28;
+    static const int BASE_TABLE_HEADER_H = 28;
+    static const int BASE_ROW_H = 36;
+    static const int BASE_CHILD_ROW_H = 28;
+    static const int BASE_PADDING = 10;
+    static const int BASE_CORNER_RADIUS = 8;
+    static const int BASE_ICON_SIZE = 20;
+    static const int BASE_SCROLL_W = 8;
+    static const int BASE_CONN_HEADER_H = 26;
+    static const int BASE_CONN_ROW_H = 26;
+    static const int BASE_CONN_TABLE_PADDING = 12;
+    static const int BASE_SUBPROC_HEADER_H = 24;
+    static const int BASE_SUBPROC_INDENT = 20;
+    static const int BASE_MIN_WIDTH = 680;
+    static const int BASE_MIN_HEIGHT = 400;
+    
+    // Connection table columns
+    struct ConnColumn {
+        const wchar_t* title;
+        int width;
+    };
+    static const int NUM_CONN_COLS = 4;
+    ConnColumn m_conn_cols[NUM_CONN_COLS] = {
+        { L"\u534F\u8BAE",    50  },
+        { L"\u672C\u5730\u5730\u5740", 180 },
+        { L"\u8FDC\u7A0B\u5730\u5740", 180 },
+        { L"\u72B6\u6001",    100 },
+    };
 
     // Icon cache
     std::unordered_map<std::wstring, HICON> m_icon_cache;
+    
+    // PacketCapture pointer for connection details
+    PacketCapture* m_capture = nullptr;
+    
+    // Get expanded row height
+    int GetExpandedRowHeight(const DisplayRow& row) const;
+    int GetTotalHeight() const;
+    int GetVisibleHeight() const;
+    int GetScrollMax() const;
 
     // Cached GDI objects (created once, reused in OnPaint)
     HFONT m_font_title = nullptr;     // Microsoft YaHei -14 semibold

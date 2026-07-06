@@ -47,6 +47,7 @@ public:
     const wchar_t* GetInfo(PluginInfoIndex index) override;
     const wchar_t* GetTooltipInfo() override;
     void OnInitialize(ITrafficMonitor* pApp) override;
+    void OnExtenedInfo(ExtendedInfoIndex index, const wchar_t* data) override;
 
 private:
     CProcessNetItem m_items[2];
@@ -56,6 +57,9 @@ private:
     bool m_started = false;
     wchar_t m_tooltip[2048] = L"";
     static CProcessNetPlugin s_instance;
+
+    // TM config directory (received via OnExtenedInfo)
+    std::wstring m_tm_config_dir;
 
     // Rich tooltip popup
     CTooltipPopup m_popup;

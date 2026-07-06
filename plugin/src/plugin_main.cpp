@@ -194,9 +194,13 @@ const wchar_t* CProcessNetPlugin::GetTooltipInfo() { return m_tooltip; }
 
 void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
     m_app = p;
-    HINSTANCE hInst = (HINSTANCE)GetModuleHandleW(NULL);
+    // Use DLL's HINSTANCE (not EXE's) so resource loading (icons, etc.) works
+    HINSTANCE hInst = s_dll_hinst ? s_dll_hinst : (HINSTANCE)GetModuleHandleW(NULL);
     m_popup_created = m_popup.Initialize(hInst);
     m_detail_created = m_detail.Initialize(hInst);
+    
+    // Set PacketCapture pointer for connection details
+    m_detail.SetCapture(&m_capture);
 
     // Use TM's plugin config dir + plugin name (GetPluginConfigDir returns the plugins/ folder)
     const wchar_t* cfg_base = p->GetPluginConfigDir();
@@ -205,10 +209,18 @@ void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
         m_detail.SetConfigDir(cfg_dir.c_str());
     }
     m_detail.LoadHistory();
+    m_detail.LoadSettings();
     // Record history whenever GetStats is called (independent of detail panel)
     m_capture.SetOnStats([this](const std::vector<ProcTraffic>& stats) {
         m_detail.RecordHistory(stats);
     });
+}
+
+void CProcessNetPlugin::OnExtenedInfo(ExtendedInfoIndex index, const wchar_t* data) {
+    if (index == EI_CONFIG_DIR && data && data[0]) {
+        m_tm_config_dir = data;
+        m_capture.SetTMConfigDir(m_tm_config_dir);
+    }
 }
 
 // ============================================================

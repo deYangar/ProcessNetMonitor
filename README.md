@@ -28,15 +28,36 @@ TrafficMonitor 的插件，显示每个进程的网络速度。
 - **详情窗口**（点击插件区域打开）：
   - 实时流量：可排序表格，显示进程名 / 类别 / 下载速度 / 上传速度 / 连接数
   - 历史流量：按时间段（24小时/3天/7天/30天）统计每进程总流量和平均速度
-  - 展开行：点击进程名展开显示 PID 和完整路径
-  - 右键菜单：定位文件 / 文件属性 / 结束进程 / 查看连接
+  - 展开行：火绒风格，点击进程名展开显示子进程 PID / 路径 / 连接详情表（协议/本地地址/远程地址/状态）
+  - 连接状态颜色编码：绿=ESTABLISHED, 蓝=LISTENING, 橙=TIME_WAIT, 深橙=CLOSE_WAIT
+  - 多进程合并：Chrome 等多进程软件按名称合并为一行，展开后显示各子进程
+  - 右键菜单：定位文件 / 文件属性 / 结束进程
   - 历史数据持久化：关闭重启后历史数据不丢失
-- **Tooltip**：保留 TM 默认文本 tooltip 作为备用
+  - 排序状态持久化：排序设置保存到文件，TM 重启后恢复
+- **高 DPI 支持**：适配 150%/175%/200% 等系统缩放，跟随显示器 DPI 变化自动调整
+- **自定义图标**：详情窗口标题栏显示插件专属图标
+- **可拖拽滚动条**：自绘滚动条支持鼠标拖拽、点击翻页、滚轮滚动
 - **不显示系统速度**：系统速度由 TrafficMonitor 本身提供，插件只显示进程级信息
+
+## 流量统计原理
+
+### TCP 流量
+使用 `GetPerTcpConnectionEStats` API 直接从 TCP 协议栈内核读取每条连接的 `DataBytesIn` / `DataBytesOut` 累计值，按 PID 聚合后计算 delta 得到速度。
+
+**优势**：
+- 不依赖网卡抓包，WLAN/以太网/VPN 均可正常工作
+- 双向流量均准确（解决了 raw socket 在 WLAN 上无法捕获入站包的问题）
+- 自动跳过 loopback 连接（127.0.0.1），避免代理软件流量双重计算
+
+### UDP 流量
+使用 raw socket（`SIO_RCVALL`）抓包，通过 UDP 端口到 PID 的映射表匹配进程。
+
+### 网卡选择
+跟随 TrafficMonitor 的网卡设置（自动选择/选择全部/指定网卡），每 5 秒检测配置变化并自动切换。
 
 ## 编译环境
 
-- **编译器**：MSVC (Visual Studio 2022 BuildTools)
+- **编译器**：MSVC 14.44.35207 (Visual Studio 2022 BuildTools)
 - **SDK**：Windows SDK 10.0.26100.0
 - **C++ 标准**：C++17
 - **依赖库**：iphlpapi.lib, ws2_32.lib, gdi32.lib, user32.lib, shell32.lib, dwmapi.lib, advapi32.lib
@@ -44,30 +65,39 @@ TrafficMonitor 的插件，显示每个进程的网络速度。
 ## 编译部署
 
 ```bat
-build.bat
+:: 编译 64 位（默认）
+build.bat x64
+
+:: 编译 32 位
+build.bat x86
+
+:: 编译两个架构
+build.bat all
 ```
 
-**注意**：编译前需先关闭 TrafficMonitor，否则 DLL 无法覆盖。build.bat 会自动尝试 `taskkill`，如果 TM 以管理员权限运行则需要手动退出。
+build.bat 会自动：编译 → 杀 TM → 复制 DLL → 启动 TM
+
+**注意**：如果 TM 以管理员权限运行，build.bat 用 WMI `Win32_Process.Terminate` 来杀进程，无需手动提权。
 
 ## 文件结构
 
 ```
 ProcessNetMonitor/
-├── build.bat                    # 编译+部署脚本
+├── build.bat                    # 编译+部署脚本（支持 x86/x64/all）
 ├── plugin/
 │   ├── src/
 │   │   ├── PluginInterface.h    # TM 插件接口定义
-│   │   ├── capture.h / .cpp     # 网络抓包（GetIfTable2）
+│   │   ├── capture.h / .cpp     # 流量采集（GetPerTcpConnectionEStats + raw socket）
 │   │   ├── plugin_main.h / .cpp # 插件主体（2个item：Up/Down）
 │   │   ├── tooltip_popup.h/.cpp # 富文本悬浮信息窗口
 │   │   ├── detail_window.h/.cpp # 火绒风格详情窗口
-│   ├── ProcessNetMonitor.dll    # 编译输出
-│   └── Makefile
+│   │   ├── resource.rc          # 资源文件（图标）
+│   │   ├── app.ico              # 插件图标
+│   ├── ProcessNetMonitor.dll    # 64 位编译输出
+│   ├── ProcessNetMonitor_x86.dll # 32 位编译输出
 ├── TrafficMonitor/
-│   ├── TrafficMonitor/          # TM 主程序
-│   │   ├── plugins/             # 插件DLL放这里
-│   │   └── skins/
-│   └── plugins/                 # 备份DLL位置
+│   └── TrafficMonitor/          # TM 主程序
+│       └── plugins/             # 插件DLL放这里
 └── README.md
 ```
 
@@ -79,7 +109,28 @@ ProcessNetMonitor/
 
 **推荐设置**：选项 → 主窗口设置 → 取消勾选「显示鼠标提示」，否则主悬浮窗鼠标悬停时会同时出现两个信息窗口（TM 自带的文本提示 + 本插件的富文本弹窗）
 
+## 数据存储
+
+- **历史流量**：`%APPDATA%\TrafficMonitor\plugins\ProcessNetMonitor\history.dat`（非 portable 模式）或 `<exe_dir>\plugins\ProcessNetMonitor\history.dat`（portable 模式）
+- **排序设置**：同目录下 `settings.dat`
+- 数据格式版本 v4，自动兼容 v2/v3 旧格式
+
 ## 版本历史
+
+### v1.5.0 (2026-07-06)
+- **TCP 流量统计改用 `GetPerTcpConnectionEStats` API**：直接从内核 TCP 协议栈读取每连接字节数，彻底解决 raw socket 在 WLAN 上无法捕获入站流量的问题
+- **跳过 loopback 连接**：避免代理软件（如 mihomo/clash）导致的流量双重计算
+- **展开行显示连接详情**（火绒风格）：协议/本地地址/远程地址/状态，带颜色编码
+- **多进程合并**：Chrome 等多进程软件按名称合并为一行，展开后显示各子进程
+- **高 DPI 适配**：支持 150%/175%/200% 等系统缩放，`WM_DPICHANGED` 自动响应
+- **自定义窗口图标**：详情窗口标题栏显示插件专属图标
+- **可拖拽滚动条**：自绘滚动条支持鼠标拖拽、点击翻页
+- **排序状态持久化**：保存到 `settings.dat`
+- **历史流量基线修复**：首次见到进程时 delta=0，不把已有累计值误记为新流量
+- **历史流量多进程聚合**：`RecordHistory` 先按名称聚合再算 delta，避免多 PID 虚高
+- **跟随 TM 网卡设置**：自动选择/选择全部/指定网卡，每 5 秒检测配置变化
+- **auto 模式跳过虚拟网卡**：TUN/TAP/mihomo/clash/vpn/wireguard 等自动跳过
+- **32 位和 64 位构建支持**：`build.bat x86` / `build.bat x64` / `build.bat all`
 
 ### v1.4.0 (2026-07-06)
 - 历史流量功能完善：数据持久化，关闭重启后不丢失

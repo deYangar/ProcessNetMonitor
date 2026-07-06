@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <set>
 
 struct ProcTraffic {
     DWORD pid = 0;
@@ -25,6 +26,15 @@ struct ProcTraffic {
     int conn_count = 0;    // active TCP connections
 };
 
+// 连接详情
+struct ConnDetail {
+    enum Protocol { TCP, UDP } protocol;
+    std::wstring local_addr;    // "192.168.1.100:51234"
+    std::wstring remote_addr;   // "142.250.80.46:443" or "*:*" for UDP
+    std::wstring state;         // "ESTABLISHED", "LISTENING", "TIME_WAIT", etc.
+    DWORD pid = 0;
+};
+
 class PacketCapture {
 public:
     PacketCapture();
@@ -35,6 +45,14 @@ public:
     const wchar_t* GetLastError() const { return m_error; }
     std::vector<ProcTraffic> GetStats(double interval_sec);
     void SetOnStats(std::function<void(const std::vector<ProcTraffic>&)> cb) { m_on_stats = cb; }
+    
+    // Check if TM config changed and rebind sockets if needed
+    void CheckConfigChanged();
+    // Set TM config directory
+    void SetTMConfigDir(const std::wstring& dir) { m_tm_config_dir = dir; }
+    
+    // 获取指定进程的连接详情
+    std::vector<ConnDetail> GetProcessConnections(DWORD pid);
 
 private:
     void CaptureLoop();
@@ -42,8 +60,11 @@ private:
     void ProcessPacket(const uint8_t* data, int len);
     std::wstring GetProcessName(DWORD pid);
     std::wstring GetProcessPath(DWORD pid);
+    
+    // 刷新连接详情缓存
+    void RefreshConnectionDetails();
 
-    SOCKET m_sock = INVALID_SOCKET;
+    std::vector<SOCKET> m_socks;  // multiple sockets for 'select all' mode
     std::atomic<bool> m_running{false};
     std::thread m_capture_thread;
     std::thread m_conn_thread;
@@ -64,4 +85,30 @@ private:
     std::map<DWORD, std::wstring> m_path_cache;
     wchar_t m_error[128] = L"";
     std::function<void(const std::vector<ProcTraffic>&)> m_on_stats;
+    
+    // 连接详情缓存
+    std::mutex m_conn_mutex;
+    std::map<DWORD, std::vector<ConnDetail>> m_conn_details_cache;
+    
+    // TM config directory and adapter rebind
+    std::wstring m_tm_config_dir;
+    std::string m_last_bind_key;  // hash of last adapter selection
+    time_t m_last_config_check = 0;
+    
+    // Read TM connection config and return adapter IPs to bind
+    std::vector<std::string> ReadTMAdapterConfig();
+    // Rebind sockets (called when config changes)
+    void RebindSockets(const std::vector<std::string>& new_ips);
+    
+    // Local adapter IPs (for packet direction detection)
+    std::vector<uint32_t> m_local_ips;  // in network byte order
+    
+    // TCP per-connection byte stats (from GetPerTcpConnectionEStats)
+    // Key: PID, Value: {DataBytesIn, DataBytesOut}
+    std::map<DWORD, std::pair<uint64_t, uint64_t>> m_tcp_cum;   // current cumulative
+    std::map<DWORD, std::pair<uint64_t, uint64_t>> m_tcp_prev;  // previous cumulative
+    std::set<uint64_t> m_tcp_stats_enabled;  // track enabled connections (hashed by local_port + remote_addr + remote_port)
+    
+    // Query TCP byte stats from the kernel
+    void QueryTcpStats();
 };

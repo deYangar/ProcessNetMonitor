@@ -9,6 +9,10 @@
 *.ipdb
 *.map
 
+# Resource compiler temp
+plugin/src/RC*
+*.res
+
 # TrafficMonitor binary (too large for repo)
 TrafficMonitor/
 
@@ -16,4 +20,6 @@ TrafficMonitor/
 *.zip
 
 # Debug logs
+procnet_*.txt
 pnm_debug.txt
+build_output.txt

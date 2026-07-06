@@ -35,6 +35,7 @@ CDetailWindow::CDetailWindow() {
 
 CDetailWindow::~CDetailWindow() {
     OutputDebugStringW(L"[PNM] ~CDetailWindow: calling SaveHistory");
+    SaveSettings();
     SaveHistory();
     OutputDebugStringW(L"[PNM] ~CDetailWindow: SaveHistory done");
     if (m_hwnd) DestroyWindow(m_hwnd);
@@ -132,6 +133,26 @@ COLORREF CDetailWindow::GetBorderColor() {
 bool CDetailWindow::Initialize(HINSTANCE hInst) {
     m_hinst = hInst;
 
+    // Declare per-monitor DPI awareness (v2 if available)
+    HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
+    if (hUser32) {
+        typedef BOOL (WINAPI *PFN_SetProcessDpiAwarenessContext)(HANDLE);
+        auto pfn = (PFN_SetProcessDpiAwarenessContext)GetProcAddress(hUser32, "SetProcessDpiAwarenessContext");
+        if (pfn) {
+            pfn((HANDLE)-4);  // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+        }
+    }
+
+    // Get DPI (use GetDpiForSystem as window doesn't exist yet)
+    int dpi = 96;
+    if (hUser32) {
+        typedef UINT (WINAPI *PFN_GetDpiForSystem)(void);
+        auto pfn = (PFN_GetDpiForSystem)GetProcAddress(hUser32, "GetDpiForSystem");
+        if (pfn) dpi = pfn();
+    }
+    m_dpi_scale = dpi / 96.0f;
+    UpdateDpiScale();  // will recalc after window creation
+
     wchar_t className[64];
     swprintf_s(className, 64, L"PNMDetail_%p", (void*)this);
 
@@ -141,6 +162,8 @@ bool CDetailWindow::Initialize(HINSTANCE hInst) {
     wc.lpfnWndProc = DefWindowProcW;
     wc.hInstance = m_hinst;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hIcon = (HICON)LoadImageW(m_hinst, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTSIZE);
+    wc.hIconSm = (HICON)LoadImageW(m_hinst, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTSIZE);
     wc.lpszClassName = className;
     RegisterClassExW(&wc);
 
@@ -153,27 +176,15 @@ bool CDetailWindow::Initialize(HINSTANCE hInst) {
 
     if (!m_hwnd) return false;
 
+    // Now that window exists, get accurate DPI for this monitor
+    UpdateDpiScale(m_hwnd);
+
     SetWindowLongPtrW(m_hwnd, GWLP_WNDPROC, (LONG_PTR)DetailStaticWndProc);
 
     int corner_pref = 2;
     DwmSetWindowAttribute(m_hwnd, 33, &corner_pref, sizeof(corner_pref));
 
-    // Pre-create cached GDI objects
-    m_font_title = CreateFontW(-14, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
-    m_font_row = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                              DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                              CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
-    m_font_header = CreateFontW(-13, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
-    m_font_small = CreateFontW(-11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
-    m_font_time = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                               CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
+    CreateFonts();
     m_pen_border = CreatePen(PS_SOLID, 1, m_dark_mode ? RGB(42, 42, 46) : RGB(238, 238, 238));
     m_pen_border_exp = CreatePen(PS_SOLID, 1, m_dark_mode ? RGB(42, 42, 46) : RGB(238, 238, 238));
     m_br_row[0] = CreateSolidBrush(GetBgColor());
@@ -182,6 +193,91 @@ bool CDetailWindow::Initialize(HINSTANCE hInst) {
     m_br_child = CreateSolidBrush(m_dark_mode ? RGB(36, 36, 40) : RGB(247, 247, 247));
 
     return true;
+}
+
+void CDetailWindow::UpdateDpiScale(HWND hwnd) {
+    if (hwnd == nullptr) hwnd = m_hwnd;
+    int dpi = 96;
+    // Prefer GetDpiForWindow (works even if process is not DPI-aware)
+    HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
+    if (hUser32 && hwnd) {
+        typedef UINT (WINAPI *PFN_GetDpiForWindow)(HWND);
+        auto pfn = (PFN_GetDpiForWindow)GetProcAddress(hUser32, "GetDpiForWindow");
+        if (pfn) dpi = pfn(hwnd);
+    }
+    if (dpi == 0) dpi = 96;
+    m_dpi_scale = dpi / 96.0f;
+    
+    TITLE_BAR_H      = (int)(BASE_TITLE_BAR_H * m_dpi_scale);
+    TAB_BAR_H        = (int)(BASE_TAB_BAR_H * m_dpi_scale);
+    TIME_RANGE_H     = (int)(BASE_TIME_RANGE_H * m_dpi_scale);
+    SUMMARY_H        = (int)(BASE_SUMMARY_H * m_dpi_scale);
+    TABLE_HEADER_H   = (int)(BASE_TABLE_HEADER_H * m_dpi_scale);
+    ROW_H            = (int)(BASE_ROW_H * m_dpi_scale);
+    CHILD_ROW_H      = (int)(BASE_CHILD_ROW_H * m_dpi_scale);
+    PADDING          = (int)(BASE_PADDING * m_dpi_scale);
+    CORNER_RADIUS    = (int)(BASE_CORNER_RADIUS * m_dpi_scale);
+    ICON_SIZE        = (int)(BASE_ICON_SIZE * m_dpi_scale);
+    SCROLL_W         = (int)(BASE_SCROLL_W * m_dpi_scale);
+    MIN_WIDTH        = (int)(BASE_MIN_WIDTH * m_dpi_scale);
+    MIN_HEIGHT       = (int)(BASE_MIN_HEIGHT * m_dpi_scale);
+    CONN_HEADER_H    = (int)(BASE_CONN_HEADER_H * m_dpi_scale);
+    CONN_ROW_H       = (int)(BASE_CONN_ROW_H * m_dpi_scale);
+    CONN_TABLE_PADDING = (int)(BASE_CONN_TABLE_PADDING * m_dpi_scale);
+    SUBPROC_HEADER_H = (int)(BASE_SUBPROC_HEADER_H * m_dpi_scale);
+    SUBPROC_INDENT   = (int)(BASE_SUBPROC_INDENT * m_dpi_scale);
+    
+    static const int BASE_RT_WIDTHS[NUM_COLS] = {42, 180, 90, 100, 100, 60, 80};
+    static const int BASE_HIST_WIDTHS[NUM_COLS] = {42, 140, 70, 90, 90, 85, 85};
+    static const int BASE_CONN_WIDTHS[NUM_CONN_COLS] = {50, 180, 180, 100};
+    for (int i = 0; i < NUM_COLS; i++) {
+        m_rt_cols[i].width = (int)(BASE_RT_WIDTHS[i] * m_dpi_scale);
+        m_hist_cols[i].width = (int)(BASE_HIST_WIDTHS[i] * m_dpi_scale);
+    }
+    for (int i = 0; i < NUM_CONN_COLS; i++) {
+        m_conn_cols[i].width = (int)(BASE_CONN_WIDTHS[i] * m_dpi_scale);
+    }
+}
+
+void CDetailWindow::CreateFonts() {
+    if (m_font_title) DeleteObject(m_font_title);
+    if (m_font_row) DeleteObject(m_font_row);
+    if (m_font_header) DeleteObject(m_font_header);
+    if (m_font_small) DeleteObject(m_font_small);
+    if (m_font_time) DeleteObject(m_font_time);
+    
+    int s = (int)m_dpi_scale;
+    m_font_title  = CreateFontW(-14*s, 0,0,0, FW_SEMIBOLD, FALSE,FALSE,FALSE,
+                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                CLEARTYPE_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Microsoft YaHei");
+    m_font_row    = CreateFontW(-14*s, 0,0,0, FW_NORMAL, FALSE,FALSE,FALSE,
+                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                CLEARTYPE_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Microsoft YaHei");
+    m_font_header = CreateFontW(-13*s, 0,0,0, FW_SEMIBOLD, FALSE,FALSE,FALSE,
+                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                CLEARTYPE_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Microsoft YaHei");
+    m_font_small  = CreateFontW(-11*s, 0,0,0, FW_NORMAL, FALSE,FALSE,FALSE,
+                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                CLEARTYPE_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Microsoft YaHei");
+    m_font_time   = CreateFontW(-12*s, 0,0,0, FW_NORMAL, FALSE,FALSE,FALSE,
+                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                CLEARTYPE_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Microsoft YaHei");
+}
+
+void CDetailWindow::RecreateGdiObjects() {
+    CreateFonts();
+    if (m_pen_border) DeleteObject(m_pen_border);
+    if (m_pen_border_exp) DeleteObject(m_pen_border_exp);
+    if (m_br_row[0]) DeleteObject(m_br_row[0]);
+    if (m_br_row[1]) DeleteObject(m_br_row[1]);
+    if (m_br_hover) DeleteObject(m_br_hover);
+    if (m_br_child) DeleteObject(m_br_child);
+    m_pen_border = CreatePen(PS_SOLID, 1, m_dark_mode ? RGB(42,42,46) : RGB(238,238,238));
+    m_pen_border_exp = CreatePen(PS_SOLID, 1, m_dark_mode ? RGB(42,42,46) : RGB(238,238,238));
+    m_br_row[0] = CreateSolidBrush(GetBgColor());
+    m_br_row[1] = CreateSolidBrush(m_dark_mode ? RGB(35,35,39) : RGB(245,245,245));
+    m_br_hover = CreateSolidBrush(m_dark_mode ? RGB(48,48,54) : RGB(232,232,232));
+    m_br_child = CreateSolidBrush(m_dark_mode ? RGB(36,36,40) : RGB(247,247,247));
 }
 
 void CDetailWindow::Show(HWND parent_wnd) {
@@ -204,8 +300,8 @@ void CDetailWindow::Show(HWND parent_wnd) {
 
     int sw = GetSystemMetrics(SM_CXSCREEN);
     int sh = GetSystemMetrics(SM_CYSCREEN);
-    int w = min(720, sw - 100);
-    int h = min(560, sh - 100);
+    int w = min((int)(720 * m_dpi_scale), sw - 100);
+    int h = min((int)(560 * m_dpi_scale), sh - 100);
     int x = (sw - w) / 2;
     int y = (sh - h) / 2;
 
@@ -229,31 +325,40 @@ void CDetailWindow::Hide() {
 void CDetailWindow::RecordHistory(const std::vector<ProcTraffic>& stats) {
     ULONGLONG now = WallClockMs();
     bool added = false;
+    
+    // Aggregate bytes by process name (multiple PIDs may share same name)
+    struct AggBytes { uint64_t recv = 0, sent = 0; std::wstring exe_path; };
+    std::map<std::wstring, AggBytes> agg;
     for (auto& st : stats) {
-        auto& hist = m_history[st.name];
-        if (hist.name.empty()) { hist.name = st.name; hist.exe_path = st.exe_path; added = true; }
-        if (hist.exe_path.empty() && !st.exe_path.empty()) hist.exe_path = st.exe_path;
+        auto& a = agg[st.name];
+        a.recv += st.bytes_recv;
+        a.sent += st.bytes_sent;
+        if (a.exe_path.empty() && !st.exe_path.empty()) a.exe_path = st.exe_path;
+    }
+    
+    for (auto& [name, a] : agg) {
+        auto& hist = m_history[name];
+        if (hist.name.empty()) { hist.name = name; hist.exe_path = a.exe_path; added = true; }
+        if (hist.exe_path.empty() && !a.exe_path.empty()) hist.exe_path = a.exe_path;
 
         // Store DELTA (bytes transferred since last snapshot), not cumulative.
-        // This survives TM restarts because deltas are always non-negative.
         uint64_t delta_recv = 0, delta_sent = 0;
-        auto it = m_last_cum.find(st.name);
+        auto it = m_last_cum.find(name);
         if (it != m_last_cum.end()) {
-            // Normal case: compute delta from last known cumulative
-            if (st.bytes_recv >= it->second.recv)
-                delta_recv = st.bytes_recv - it->second.recv;
+            if (a.recv >= it->second.recv)
+                delta_recv = a.recv - it->second.recv;
             else
-                delta_recv = st.bytes_recv;  // TM restarted, cum reset to 0
-            if (st.bytes_sent >= it->second.sent)
-                delta_sent = st.bytes_sent - it->second.sent;
+                delta_recv = a.recv;  // TM restarted, cum reset to 0
+            if (a.sent >= it->second.sent)
+                delta_sent = a.sent - it->second.sent;
             else
-                delta_sent = st.bytes_sent;
+                delta_sent = a.sent;
         } else {
-            // First time seeing this process in this session: count all bytes so far
-            delta_recv = st.bytes_recv;
-            delta_sent = st.bytes_sent;
+            // First time seeing this process - just set baseline, don't count existing cumulative bytes as new traffic
+            delta_recv = 0;
+            delta_sent = 0;
         }
-        m_last_cum[st.name] = { st.bytes_recv, st.bytes_sent };
+        m_last_cum[name] = { a.recv, a.sent };
 
         HistorySnapshot snap = { now, delta_recv, delta_sent, false };
         hist.raw.push_back(snap);
@@ -614,8 +719,8 @@ void CDetailWindow::RebuildRows() {
         m_history_dirty = false;
         BuildHistoryRows();
         ResortRows();
-        int max_scroll = (int)m_rows.size() - 1;
-        if (m_scroll_pos > max_scroll) m_scroll_pos = max(0, max_scroll);
+        // Clamp scroll to pixel max
+        m_scroll_pos = min(m_scroll_pos, GetScrollMax());
         if (m_visible) {
             RECT rc = { PADDING, GetTableAreaTop(), 0, 0 };
             GetClientRect(m_hwnd, &rc);
@@ -625,23 +730,42 @@ void CDetailWindow::RebuildRows() {
         return;
     }
 
-    // Tab 0: real-time - show ALL processes with connections or traffic
-    std::set<DWORD> expanded_pids;
+    // Tab 0: real-time - merge by process name
+    // Save expanded state (by name now, not PID)
+    std::set<std::wstring> expanded_names;
+    std::map<std::wstring, std::vector<SubProcess>> saved_subprocs;  // name -> subprocs with connections
     for (auto& r : m_rows) {
-        if (r.expanded) expanded_pids.insert(r.pid);
+        if (r.expanded) {
+            expanded_names.insert(r.name);
+            if (!r.sub_processes.empty()) {
+                saved_subprocs[r.name] = std::move(r.sub_processes);
+            }
+        }
     }
 
     m_rows.clear();
+
+    // Group stats by process name
+    std::map<std::wstring, std::vector<const ProcTraffic*>> name_groups;
     for (auto& st : stats) {
+        name_groups[st.name].push_back(&st);
+    }
+
+    for (auto& [name, group] : name_groups) {
         DisplayRow row;
-        row.pid = st.pid;
-        row.name = st.name;
-        row.exe_path = st.exe_path;
-        row.speed_up = st.speed_up;
-        row.speed_down = st.speed_down;
-        row.conn_count = st.conn_count;
+        row.name = name;
+        row.pid = group[0]->pid;
+        row.exe_path = group[0]->exe_path;
+
+        // Aggregate
+        for (auto* st : group) {
+            row.speed_up += st->speed_up;
+            row.speed_down += st->speed_down;
+            row.conn_count += st->conn_count;
+        }
+
         // Category
-        std::wstring lower = st.name;
+        std::wstring lower = name;
         for (auto& c : lower) c = towlower(c);
         if (lower.find(L"svchost") != std::wstring::npos ||
             lower.find(L"system") != std::wstring::npos ||
@@ -651,14 +775,38 @@ void CDetailWindow::RebuildRows() {
         else
             row.category = L"\u7B2C\u4E09\u65B9\u7A0B\u5E8F";
 
-        if (expanded_pids.count(st.pid)) row.expanded = true;
+        // Build sub-processes
+        for (auto* st : group) {
+            SubProcess sp;
+            sp.pid = st->pid;
+            sp.exe_path = st->exe_path;
+            sp.speed_up = st->speed_up;
+            sp.speed_down = st->speed_down;
+            sp.conn_count = st->conn_count;
+            row.sub_processes.push_back(sp);
+        }
+
+        // Restore expanded state
+        if (expanded_names.count(name)) {
+            row.expanded = true;
+            // Restore saved sub-process connection data
+            auto it = saved_subprocs.find(name);
+            if (it != saved_subprocs.end() && it->second.size() == row.sub_processes.size()) {
+                for (size_t i = 0; i < row.sub_processes.size(); i++) {
+                    row.sub_processes[i].connections = std::move(it->second[i].connections);
+                    row.sub_processes[i].connections_loaded = it->second[i].connections_loaded;
+                    row.sub_processes[i].conn_expanded = it->second[i].conn_expanded;
+                }
+            }
+        }
+
         m_rows.push_back(row);
     }
 
     ResortRows();
 
-    int max_scroll = (int)m_rows.size() - 1;
-    if (m_scroll_pos > max_scroll) m_scroll_pos = max(0, max_scroll);
+    // Clamp scroll to pixel max
+    m_scroll_pos = min(m_scroll_pos, GetScrollMax());
     if (m_visible) {
         RECT rc;
         GetClientRect(m_hwnd, &rc);
@@ -737,6 +885,41 @@ void CDetailWindow::SortByColumn(int col) {
         m_sort_asc[m_active_tab] = true;
     }
     ResortRows();
+    SaveSettings();
+}
+
+// ============================================================
+// Settings persistence
+// ============================================================
+
+void CDetailWindow::SaveSettings() {
+    if (m_config_dir.empty()) return;
+    CreateDirectoryW(m_config_dir.c_str(), NULL);
+    wchar_t path[MAX_PATH];
+    swprintf_s(path, MAX_PATH, L"%s\\settings.dat", m_config_dir.c_str());
+    FILE* f = _wfopen(path, L"wb");
+    if (!f) return;
+    uint32_t magic = 0x504E4D53;  // "PNMS"
+    uint32_t version = 1;
+    fwrite(&magic, 4, 1, f);
+    fwrite(&version, 4, 1, f);
+    fwrite(m_sort_col, sizeof(m_sort_col), 1, f);
+    fwrite(m_sort_asc, sizeof(m_sort_asc), 1, f);
+    fclose(f);
+}
+
+void CDetailWindow::LoadSettings() {
+    if (m_config_dir.empty()) return;
+    wchar_t path[MAX_PATH];
+    swprintf_s(path, MAX_PATH, L"%s\\settings.dat", m_config_dir.c_str());
+    FILE* f = _wfopen(path, L"rb");
+    if (!f) return;
+    uint32_t magic, version;
+    if (fread(&magic, 4, 1, f) != 1 || magic != 0x504E4D53) { fclose(f); return; }
+    if (fread(&version, 4, 1, f) != 1 || version != 1) { fclose(f); return; }
+    fread(m_sort_col, sizeof(m_sort_col), 1, f);
+    fread(m_sort_asc, sizeof(m_sort_asc), 1, f);
+    fclose(f);
 }
 
 // ============================================================
@@ -746,14 +929,9 @@ void CDetailWindow::SortByColumn(int col) {
 int CDetailWindow::HitTestRow(int y) const {
     int table_top = GetTableAreaTop();
     if (y < table_top) return -1;
-    int cur_y = table_top;
-    int row_h = GetRowHeight();
-    for (int i = m_scroll_pos; i < (int)m_rows.size(); i++) {
-        int this_h = row_h;
-        if (m_rows[i].expanded) {
-            this_h += CHILD_ROW_H;
-            if (!m_rows[i].exe_path.empty()) this_h += CHILD_ROW_H;
-        }
+    int cur_y = table_top - m_scroll_pos;
+    for (int i = 0; i < (int)m_rows.size(); i++) {
+        int this_h = GetExpandedRowHeight(m_rows[i]);
         if (y >= cur_y && y < cur_y + this_h) return i;
         cur_y += this_h;
     }
@@ -772,14 +950,70 @@ int CDetailWindow::HitTestColumn(int x) const {
 
 void CDetailWindow::ToggleExpand(int row) {
     if (row < 0 || row >= (int)m_rows.size()) return;
-    m_rows[row].expanded = !m_rows[row].expanded;
+
+    DisplayRow& r = m_rows[row];
+    r.expanded = !r.expanded;
+
+    // Load connection details for all sub-processes when expanding
+    if (r.expanded && m_capture) {
+        for (auto& sp : r.sub_processes) {
+            if (!sp.connections_loaded && sp.pid > 0) {
+                sp.connections = m_capture->GetProcessConnections(sp.pid);
+                sp.connections_loaded = true;
+            }
+        }
+    }
+
     InvalidateRect(m_hwnd, NULL, FALSE);
 }
 
 void CDetailWindow::ScrollTo(int pos) {
-    int max_pos = max(0, (int)m_rows.size() - 10);
-    m_scroll_pos = max(0, min(pos, max_pos));
+    m_scroll_pos = max(0, min(pos, GetScrollMax()));
     InvalidateRect(m_hwnd, NULL, FALSE);
+}
+
+int CDetailWindow::GetExpandedRowHeight(const DisplayRow& row) const {
+    int h = ROW_H;  // Main row
+
+    if (row.expanded) {
+        if (row.sub_processes.empty()) {
+            // Simple mode: single PID + path (history tab or single process)
+            h += CHILD_ROW_H;  // PID row
+            if (!row.exe_path.empty()) h += CHILD_ROW_H;  // Path row
+        } else {
+            // Multi-process mode: iterate sub-processes
+            for (auto& sp : row.sub_processes) {
+                h += SUBPROC_HEADER_H;
+                if (!sp.exe_path.empty()) h += CHILD_ROW_H;
+                if (!sp.connections.empty()) {
+                    h += CHILD_ROW_H + CONN_HEADER_H;
+                    int max_rows = sp.conn_expanded ? (int)sp.connections.size() : min((int)sp.connections.size(), MAX_CONN_ROWS);
+                    h += max_rows * CONN_ROW_H;
+                    if ((int)sp.connections.size() > MAX_CONN_ROWS && !sp.conn_expanded)
+                        h += CONN_ROW_H;
+                }
+            }
+        }
+    }
+
+    return h;
+}
+
+int CDetailWindow::GetTotalHeight() const {
+    int h = 0;
+    for (auto& r : m_rows)
+        h += GetExpandedRowHeight(r);
+    return h;
+}
+
+int CDetailWindow::GetVisibleHeight() const {
+    RECT rc;
+    GetClientRect(m_hwnd, &rc);
+    return rc.bottom - GetTableAreaTop() - PADDING;
+}
+
+int CDetailWindow::GetScrollMax() const {
+    return max(0, GetTotalHeight() - GetVisibleHeight());
 }
 
 // ============================================================
@@ -800,8 +1034,6 @@ void CDetailWindow::ShowContextMenu(int row, int x, int y) {
     AppendMenuW(hMenu, MF_STRING, 2, L"\u6587\u4EF6\u5C5E\u6027");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenu, MF_STRING, 3, L"\u7ED3\u675F\u8FDB\u7A0B");
-    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hMenu, MF_STRING, 4, L"\u67E5\u770B\u8FDE\u63A5");
 
     int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y, 0, m_hwnd, NULL);
     DestroyMenu(hMenu);
@@ -838,13 +1070,6 @@ void CDetailWindow::ShowContextMenu(int row, int x, int y) {
             }
         }
         break;
-    case 4: // \u67E5\u770B\u8FDE\u63A5
-        if (pid > 0) {
-            wchar_t cmd[256];
-            swprintf_s(cmd, 256, L"cmd /c netstat -ano | findstr %u & pause", pid);
-            ShellExecuteW(NULL, L"open", L"cmd.exe", cmd, NULL, SW_SHOWNORMAL);
-        }
-        break;
     }
 }
 
@@ -857,6 +1082,7 @@ LRESULT CDetailWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_PAINT: OnPaint(); return 0;
     case WM_SIZE: OnSize(LOWORD(lp), HIWORD(lp)); return 0;
     case WM_LBUTTONDOWN: OnLButtonDown((short)LOWORD(lp), (short)HIWORD(lp)); return 0;
+    case WM_LBUTTONUP: OnLButtonUp((short)LOWORD(lp), (short)HIWORD(lp)); return 0;
     case WM_LBUTTONDBLCLK: OnLButtonDblClk((short)LOWORD(lp), (short)HIWORD(lp)); return 0;
     case WM_RBUTTONDOWN: OnRButtonDown((short)LOWORD(lp), (short)HIWORD(lp)); return 0;
     case WM_MOUSEMOVE: OnMouseMove((short)LOWORD(lp), (short)HIWORD(lp)); return 0;
@@ -867,6 +1093,17 @@ LRESULT CDetailWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
         SaveHistory();
         break;
     case WM_ERASEBKGND: return 1;
+    case WM_DPICHANGED: {
+        UpdateDpiScale(m_hwnd);
+        RecreateGdiObjects();
+        // Apply suggested window rect from lParam
+        RECT* prc = (RECT*)lp;
+        SetWindowPos(m_hwnd, NULL, prc->left, prc->top,
+            prc->right - prc->left, prc->bottom - prc->top,
+            SWP_NOZORDER | SWP_NOACTIVATE);
+        InvalidateRect(m_hwnd, NULL, FALSE);
+        return 0;
+    }
 
     case WM_NCHITTEST: {
         POINT pt = { (short)LOWORD(lp), (short)HIWORD(lp) };
@@ -906,6 +1143,30 @@ void CDetailWindow::OnSize(int w, int h) {
 }
 
 void CDetailWindow::OnLButtonDown(int x, int y) {
+    // Check scrollbar thumb click
+    if (HitTestScrollbar(x, y)) {
+        m_dragging_scrollbar = true;
+        m_drag_start_y = y;
+        m_drag_start_scroll = m_scroll_pos;
+        ::SetCapture(m_hwnd);
+        return;
+    }
+    // Check scrollbar track click (page up/down)
+    int w = 0, h = 0;
+    RECT rc; GetClientRect(m_hwnd, &rc); w = rc.right; h = rc.bottom;
+    int total_h = GetTotalHeight();
+    int visible_h = GetVisibleHeight();
+    if (total_h > visible_h && x >= w - SCROLL_W - 2 && x <= w - 2) {
+        RECT thumb_rc;
+        GetScrollbarThumbRect(&thumb_rc, w, h);
+        if (y < thumb_rc.top) {
+            ScrollTo(m_scroll_pos - visible_h);  // page up
+        } else if (y >= thumb_rc.bottom) {
+            ScrollTo(m_scroll_pos + visible_h);  // page down
+        }
+        return;
+    }
+    
     if (PtInRect(&m_rcClose, { x, y })) { Hide(); return; }
     if (PtInRect(&m_rcMin, { x, y })) { ShowWindow(m_hwnd, SW_MINIMIZE); return; }
 
@@ -961,6 +1222,35 @@ void CDetailWindow::OnLButtonDown(int x, int y) {
     // Table row click
     int row = HitTestRow(y);
     if (row >= 0) {
+        // Check if click is on "... and N more connections" row for any sub-process
+        if (m_rows[row].expanded) {
+            int table_top = GetTableAreaTop();
+            int cur_y = table_top - m_scroll_pos;
+            for (int i = 0; i < row; i++)
+                cur_y += GetExpandedRowHeight(m_rows[i]);
+            cur_y += ROW_H;  // main row
+
+            // Walk through sub-processes to find which "more" row was clicked
+            for (auto& sp : m_rows[row].sub_processes) {
+                cur_y += SUBPROC_HEADER_H;
+                if (!sp.exe_path.empty()) cur_y += CHILD_ROW_H;
+                if (!sp.connections.empty()) {
+                    cur_y += CHILD_ROW_H + CONN_HEADER_H;  // title + header
+                    int conn_count = sp.conn_expanded ? (int)sp.connections.size() : min((int)sp.connections.size(), MAX_CONN_ROWS);
+                    cur_y += conn_count * CONN_ROW_H;
+                    if ((int)sp.connections.size() > MAX_CONN_ROWS && !sp.conn_expanded) {
+                        // This is the "more" row
+                        if (y >= cur_y && y < cur_y + CONN_ROW_H) {
+                            sp.conn_expanded = true;
+                            InvalidateRect(m_hwnd, NULL, FALSE);
+                            return;
+                        }
+                        cur_y += CONN_ROW_H;
+                    }
+                }
+            }
+        }
+
         int rel_x = x - PADDING;
         // Icon + name area (0~212px): toggle expand
         if (rel_x >= 0 && rel_x < 32 + 180) {
@@ -989,6 +1279,13 @@ void CDetailWindow::OnLButtonDown(int x, int y) {
     }
 }
 
+void CDetailWindow::OnLButtonUp(int x, int y) {
+    if (m_dragging_scrollbar) {
+        m_dragging_scrollbar = false;
+        ReleaseCapture();
+    }
+}
+
 void CDetailWindow::OnLButtonDblClk(int x, int y) {
     int row = HitTestRow(y);
     if (row >= 0) ToggleExpand(row);
@@ -1004,6 +1301,27 @@ void CDetailWindow::OnRButtonDown(int x, int y) {
 }
 
 void CDetailWindow::OnMouseMove(int x, int y) {
+    // Handle scrollbar dragging
+    if (m_dragging_scrollbar) {
+        RECT rc; GetClientRect(m_hwnd, &rc);
+        int w = rc.right, h = rc.bottom;
+        int total_h = GetTotalHeight();
+        int visible_h = GetVisibleHeight();
+        int track_top = GetTableAreaTop();
+        int track_bottom = h - PADDING;
+        int track_h = track_bottom - track_top;
+        float ratio = (float)visible_h / total_h;
+        int thumb_h = max(20, (int)(track_h * ratio));
+        int scrollable_pixels = total_h - visible_h;
+        int thumb_range = track_h - thumb_h;
+        if (thumb_range > 0) {
+            int dy = y - m_drag_start_y;
+            int new_scroll = m_drag_start_scroll + (int)((float)dy * scrollable_pixels / thumb_range);
+            ScrollTo(new_scroll);
+        }
+        return;
+    }
+
     if (!m_tracking_mouse) {
         TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, m_hwnd, 0 };
         TrackMouseEvent(&tme);
@@ -1024,6 +1342,8 @@ void CDetailWindow::OnMouseMove(int x, int y) {
 
     if (m_hovering_close || m_hovering_min) {
         SetCursor(LoadCursor(NULL, IDC_HAND));
+    } else if (HitTestScrollbar(x, y)) {
+        SetCursor(LoadCursor(NULL, IDC_HAND));
     } else {
         SetCursor(LoadCursor(NULL, IDC_ARROW));
     }
@@ -1038,16 +1358,51 @@ void CDetailWindow::OnMouseLeave() {
 }
 
 void CDetailWindow::OnMouseWheel(int delta) {
-    ScrollTo(m_scroll_pos - (delta > 0 ? 3 : -3));
+    ScrollTo(m_scroll_pos - (delta > 0 ? ROW_H * 3 : -ROW_H * 3));
 }
 
 void CDetailWindow::OnVScroll(int code) {
+    int page = GetVisibleHeight();
     switch (code) {
-    case SB_LINEUP: ScrollTo(m_scroll_pos - 1); break;
-    case SB_LINEDOWN: ScrollTo(m_scroll_pos + 1); break;
-    case SB_PAGEUP: ScrollTo(m_scroll_pos - 10); break;
-    case SB_PAGEDOWN: ScrollTo(m_scroll_pos + 10); break;
+    case SB_LINEUP: ScrollTo(m_scroll_pos - ROW_H); break;
+    case SB_LINEDOWN: ScrollTo(m_scroll_pos + ROW_H); break;
+    case SB_PAGEUP: ScrollTo(m_scroll_pos - page); break;
+    case SB_PAGEDOWN: ScrollTo(m_scroll_pos + page); break;
+    case SB_THUMBTRACK:
+    case SB_THUMBPOSITION: {
+        // For custom scrollbar, we handle dragging in OnMouseMove
+        break;
     }
+    }
+}
+
+bool CDetailWindow::HitTestScrollbar(int x, int y) const {
+    int total_h = GetTotalHeight();
+    int visible_h = GetVisibleHeight();
+    if (total_h <= visible_h) return false;
+    RECT rc; GetClientRect(m_hwnd, &rc);
+    int w = rc.right;
+    int h = rc.bottom;
+    RECT thumb_rc;
+    const_cast<CDetailWindow*>(this)->GetScrollbarThumbRect(&thumb_rc, w, h);
+    return (x >= thumb_rc.left && x < thumb_rc.right && y >= thumb_rc.top && y < thumb_rc.bottom);
+}
+
+void CDetailWindow::GetScrollbarThumbRect(RECT* rc, int w, int h) const {
+    int total_h = GetTotalHeight();
+    int visible_h = GetVisibleHeight();
+    int track_x = w - SCROLL_W - 2;
+    int track_top = GetTableAreaTop();
+    int track_bottom = h - PADDING;
+    int track_h = track_bottom - track_top;
+    float ratio = (float)visible_h / total_h;
+    int thumb_h = max(20, (int)(track_h * ratio));
+    float scroll_ratio = (float)m_scroll_pos / max(1, total_h - visible_h);
+    int thumb_y = track_top + (int)((track_h - thumb_h) * scroll_ratio);
+    rc->left = track_x + 1;
+    rc->top = thumb_y;
+    rc->right = track_x + SCROLL_W - 1;
+    rc->bottom = thumb_y + thumb_h;
 }
 
 // ============================================================
@@ -1067,13 +1422,16 @@ void CDetailWindow::DrawTitleBar(HDC hdc, int w) {
     SelectObject(hdc, hOldPen);
     DeleteObject(hPen);
 
-    HICON hIcon = (HICON)LoadImageW(NULL, IDI_APPLICATION, IMAGE_ICON, 16, 16, LR_SHARED);
-    if (hIcon) DrawIconEx(hdc, PADDING, (TITLE_BAR_H - 16) / 2, hIcon, 16, 16, 0, NULL, DI_NORMAL);
+    int title_icon_sz = (int)(16 * m_dpi_scale);
+    int icon_text_gap = (int)(8 * m_dpi_scale);  // gap between icon and title text
+    HICON hIcon = (HICON)LoadImageW(m_hinst, MAKEINTRESOURCEW(1), IMAGE_ICON, title_icon_sz, title_icon_sz, 0);
+    if (!hIcon) hIcon = (HICON)LoadImageW(NULL, IDI_APPLICATION, IMAGE_ICON, title_icon_sz, title_icon_sz, LR_SHARED);
+    if (hIcon) DrawIconEx(hdc, PADDING, (TITLE_BAR_H - title_icon_sz) / 2, hIcon, title_icon_sz, title_icon_sz, 0, NULL, DI_NORMAL);
 
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, GetTextColor());
     HFONT hOldFont = (HFONT)SelectObject(hdc, m_font_title);
-    RECT title_rc = { PADDING + 22, 0, w - 100, TITLE_BAR_H };
+    RECT title_rc = { PADDING + title_icon_sz + icon_text_gap, 0, w - 100, TITLE_BAR_H };
     DrawTextW(hdc, L"ProcessNetMonitor", -1, &title_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
     int btn_size = 28;
@@ -1300,25 +1658,34 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
     }
 
     // Draw rows with dynamic height (expanded rows take more space)
+    // Pixel-based scrolling: skip pixels, then draw from there
+    int pixels_to_skip = m_scroll_pos;
     int cur_y = y;
-    for (int ri = m_scroll_pos; ri < (int)m_rows.size(); ri++) {
-        if (cur_y >= table_bottom) break;
-
+    for (int ri = 0; ri < (int)m_rows.size(); ri++) {
         auto& row = m_rows[ri];
-        // Calculate this row's total height (parent + children if expanded)
-        int this_row_h = row_h;
-        if (row.expanded) {
-            this_row_h += CHILD_ROW_H; // PID row
-            if (!row.exe_path.empty()) this_row_h += CHILD_ROW_H; // path row
-        }
+        int this_row_h = GetExpandedRowHeight(row);
 
-        // Skip if this row is entirely above visible area
-        if (cur_y + this_row_h < y) {
-            cur_y += this_row_h;
+        // Skip rows entirely above visible area
+        if (pixels_to_skip >= this_row_h) {
+            pixels_to_skip -= this_row_h;
             continue;
         }
 
-        int ry = cur_y;
+        // This row is partially or fully visible
+        int row_offset = pixels_to_skip;  // pixels of this row that are scrolled above
+        pixels_to_skip = 0;
+
+        if (cur_y >= table_bottom) break;
+
+        int ry = cur_y - row_offset;  // Virtual Y position (may be above visible area)
+
+        // Clip drawing to visible area
+        int clip_top = max(ry, y);
+        int clip_bottom = min(ry + this_row_h, table_bottom);
+        if (clip_bottom <= clip_top) { cur_y += this_row_h - row_offset; continue; }
+
+        HRGN hClipRgn = CreateRectRgn(PADDING, clip_top, w - PADDING, clip_bottom);
+        SelectClipRgn(hdc, hClipRgn);
 
         // Row background
         bool hovered = (ri == m_hovered_row);
@@ -1337,12 +1704,15 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
         SelectObject(hdc, m_font_small);
         SetTextColor(hdc, GetSecondaryTextColor());
         const wchar_t* arrow = row.expanded ? L"\u25BC" : L"\u25B6";
-        RECT arrow_rc = { cx, ry, cx + 14, ry + row_h };
+        RECT arrow_rc = { cx, ry, cx + (int)(14 * m_dpi_scale), ry + row_h };
         DrawTextW(hdc, arrow, -1, &arrow_rc, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
 
         HICON hIcon = GetProcessIcon(row.exe_path);
-        if (hIcon) DrawIconEx(hdc, cx + 16, ry + (row_h - ICON_SIZE) / 2, hIcon, ICON_SIZE, ICON_SIZE, 0, NULL, DI_NORMAL);
-        cx += 32;
+        int arrow_w = (int)(14 * m_dpi_scale);
+        int icon_gap = (int)(4 * m_dpi_scale);
+        int icon_x = cx + arrow_w + icon_gap;
+        if (hIcon) DrawIconEx(hdc, icon_x, ry + (row_h - ICON_SIZE) / 2, hIcon, ICON_SIZE, ICON_SIZE, 0, NULL, DI_NORMAL);
+        cx += arrow_w + icon_gap + ICON_SIZE + (int)(4 * m_dpi_scale);  // advance past icon
 
         // Col 1: Name
         SelectObject(hdc, m_font_row);
@@ -1355,7 +1725,7 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
                     display = display.substr(0, display.size() - 4);
             }
             SIZE sz;
-            int max_w = 180 - 8;
+            int max_w = cols[1].width - 8;
             GetTextExtentPoint32W(hdc, display.c_str(), (int)display.size(), &sz);
             while ((int)display.size() > 3 && sz.cx > max_w) {
                 display = display.substr(0, display.size() - 1);
@@ -1432,55 +1802,181 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
         // Expanded children
         if (row.expanded) {
             int child_y = ry + row_h;
-            SelectObject(hdc, m_font_small);
+            SelectObject(hdc, m_font_row);
             SetTextColor(hdc, GetSecondaryTextColor());
-
-            // PID row
-            RECT pid_rc = { PADDING + 28, child_y, w - PADDING, child_y + CHILD_ROW_H };
-            FillRect(hdc, &pid_rc, m_br_child);
-            wchar_t pid_text[64];
-            if (row.pid > 0)
-                swprintf_s(pid_text, 64, L"\u8FDB\u7A0BID: %u", row.pid);
-            else
-                swprintf_s(pid_text, 64, L"\u5386\u53F2\u8BB0\u5F55");
-            DrawTextW(hdc, pid_text, -1, &pid_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-
-            HPEN hOldPen2 = (HPEN)SelectObject(hdc, m_pen_border_exp);
-            MoveToEx(hdc, PADDING, child_y + CHILD_ROW_H - 1, NULL);
-            LineTo(hdc, w - PADDING, child_y + CHILD_ROW_H - 1);
-            SelectObject(hdc, hOldPen2);
-            child_y += CHILD_ROW_H;
-
-            // Path row
-            if (!row.exe_path.empty()) {
-                RECT path_rc = { PADDING + 28, child_y, w - PADDING, child_y + CHILD_ROW_H };
-                FillRect(hdc, &path_rc, m_br_child);
-
-                std::wstring path_display = row.exe_path;
-                SIZE sz;
-                int max_path_w = w - PADDING - 28 - PADDING;
-                GetTextExtentPoint32W(hdc, path_display.c_str(), (int)path_display.size(), &sz);
-                while ((int)path_display.size() > 5 && sz.cx > max_path_w) {
-                    path_display = L"\u2026" + path_display.substr(4);
-                    GetTextExtentPoint32W(hdc, path_display.c_str(), (int)path_display.size(), &sz);
-                }
-                DrawTextW(hdc, path_display.c_str(), -1, &path_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-
-                HPEN hOldPen3 = (HPEN)SelectObject(hdc, m_pen_border_exp);
+            
+            if (row.sub_processes.empty()) {
+                // Simple mode: PID + path (history tab)
+                RECT pid_rc = { PADDING + (int)(32 * m_dpi_scale), child_y, w - PADDING, child_y + CHILD_ROW_H };
+                FillRect(hdc, &pid_rc, m_br_child);
+                wchar_t pid_text[64];
+                if (row.pid > 0)
+                    swprintf_s(pid_text, 64, L"\u8FDB\u7A0BID: %u", row.pid);
+                else
+                    swprintf_s(pid_text, 64, L"\u5386\u53F2\u8BB0\u5F55");
+                DrawTextW(hdc, pid_text, -1, &pid_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+                HPEN hOldPen2 = (HPEN)SelectObject(hdc, m_pen_border_exp);
                 MoveToEx(hdc, PADDING, child_y + CHILD_ROW_H - 1, NULL);
                 LineTo(hdc, w - PADDING, child_y + CHILD_ROW_H - 1);
-                SelectObject(hdc, hOldPen3);
-            }
-        }
+                SelectObject(hdc, hOldPen2);
+                child_y += CHILD_ROW_H;
+                
+                if (!row.exe_path.empty()) {
+                    RECT path_rc = { PADDING + (int)(32 * m_dpi_scale), child_y, w - PADDING, child_y + CHILD_ROW_H };
+                    FillRect(hdc, &path_rc, m_br_child);
+                    std::wstring path_display = row.exe_path;
+                    SIZE sz;
+                    int max_path_w = w - PADDING - 28 - PADDING;
+                    GetTextExtentPoint32W(hdc, path_display.c_str(), (int)path_display.size(), &sz);
+                    while ((int)path_display.size() > 5 && sz.cx > max_path_w) {
+                        path_display = L"\u2026" + path_display.substr(4);
+                        GetTextExtentPoint32W(hdc, path_display.c_str(), (int)path_display.size(), &sz);
+                    }
+                    DrawTextW(hdc, path_display.c_str(), -1, &path_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+                    HPEN hOldPen3 = (HPEN)SelectObject(hdc, m_pen_border_exp);
+                    MoveToEx(hdc, PADDING, child_y + CHILD_ROW_H - 1, NULL);
+                    LineTo(hdc, w - PADDING, child_y + CHILD_ROW_H - 1);
+                    SelectObject(hdc, hOldPen3);
+                }
+            } else {
+                // Multi-process mode: iterate sub-processes
+                int sp_idx = 0;
+                for (auto& sp : row.sub_processes) {
+                sp_idx++;
 
-        cur_y += this_row_h;
+                // Sub-process header: "进程N (PID: xxxx)"
+                RECT sp_rc = { PADDING + (int)(32 * m_dpi_scale), child_y, w - PADDING, child_y + SUBPROC_HEADER_H };
+                FillRect(hdc, &sp_rc, m_br_child);
+                wchar_t sp_text[128];
+                if (row.sub_processes.size() > 1)
+                    swprintf_s(sp_text, 128, L"\u8FDB\u7A0B%d (PID: %u)", sp_idx, sp.pid);
+                else
+                    swprintf_s(sp_text, 128, L"PID: %u", sp.pid);
+                SetTextColor(hdc, GetAccentColor(false));
+                DrawTextW(hdc, sp_text, -1, &sp_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+                HPEN hOldPenSP = (HPEN)SelectObject(hdc, m_pen_border_exp);
+                MoveToEx(hdc, PADDING, child_y + SUBPROC_HEADER_H - 1, NULL);
+                LineTo(hdc, w - PADDING, child_y + SUBPROC_HEADER_H - 1);
+                SelectObject(hdc, hOldPenSP);
+                child_y += SUBPROC_HEADER_H;
+
+                // Path row
+                if (!sp.exe_path.empty()) {
+                    RECT path_rc = { PADDING + (int)(32 * m_dpi_scale) + SUBPROC_INDENT, child_y, w - PADDING, child_y + CHILD_ROW_H };
+                    FillRect(hdc, &path_rc, m_br_child);
+
+                    std::wstring path_display = sp.exe_path;
+                    SIZE sz;
+                    int max_path_w = w - PADDING - 28 - SUBPROC_INDENT - PADDING;
+                    GetTextExtentPoint32W(hdc, path_display.c_str(), (int)path_display.size(), &sz);
+                    while ((int)path_display.size() > 5 && sz.cx > max_path_w) {
+                        path_display = L"\u2026" + path_display.substr(4);
+                        GetTextExtentPoint32W(hdc, path_display.c_str(), (int)path_display.size(), &sz);
+                    }
+                    SetTextColor(hdc, GetSecondaryTextColor());
+                    DrawTextW(hdc, path_display.c_str(), -1, &path_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+                    HPEN hOldPenP = (HPEN)SelectObject(hdc, m_pen_border_exp);
+                    MoveToEx(hdc, PADDING, child_y + CHILD_ROW_H - 1, NULL);
+                    LineTo(hdc, w - PADDING, child_y + CHILD_ROW_H - 1);
+                    SelectObject(hdc, hOldPenP);
+                    child_y += CHILD_ROW_H;
+                }
+
+                // Connection table for this sub-process
+                if (!sp.connections.empty()) {
+                    child_y += 4;
+
+                    // "连接列表:" title
+                    RECT title_rc = { PADDING + (int)(32 * m_dpi_scale) + SUBPROC_INDENT, child_y, w - PADDING, child_y + CHILD_ROW_H };
+                    FillRect(hdc, &title_rc, m_br_child);
+                    SetTextColor(hdc, GetSecondaryTextColor());
+                    DrawTextW(hdc, L"\u8FDE\u63A5\u5217\u8868:", -1, &title_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+                    child_y += CHILD_ROW_H;
+
+                    // Table header
+                    RECT header_rc = { PADDING + (int)(32 * m_dpi_scale) + SUBPROC_INDENT, child_y, w - PADDING - 20, child_y + CONN_HEADER_H };
+                    HBRUSH hHeaderBrush = CreateSolidBrush(GetHeaderBgColor());
+                    FillRect(hdc, &header_rc, hHeaderBrush);
+                    DeleteObject(hHeaderBrush);
+
+                    SelectObject(hdc, m_font_header);
+                    SetTextColor(hdc, GetSecondaryTextColor());
+                    int col_x = PADDING + (int)(32 * m_dpi_scale) + SUBPROC_INDENT + CONN_TABLE_PADDING;
+                    for (int ci = 0; ci < NUM_CONN_COLS; ci++) {
+                        RECT col_rc = { col_x, child_y, col_x + m_conn_cols[ci].width, child_y + CONN_HEADER_H };
+                        DrawTextW(hdc, m_conn_cols[ci].title, -1, &col_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+                        col_x += m_conn_cols[ci].width;
+                    }
+                    child_y += CONN_HEADER_H;
+
+                    // Connection rows
+                    int conn_count = sp.conn_expanded ? (int)sp.connections.size() : min((int)sp.connections.size(), MAX_CONN_ROWS);
+                    for (int ci = 0; ci < conn_count; ci++) {
+                        auto& conn = sp.connections[ci];
+
+                        RECT conn_rc = { PADDING + (int)(32 * m_dpi_scale) + SUBPROC_INDENT, child_y, w - PADDING - 20, child_y + CONN_ROW_H };
+                        FillRect(hdc, &conn_rc, m_br_row[ci % 2]);
+                        SelectObject(hdc, m_font_row);
+
+                        int col_x = PADDING + (int)(32 * m_dpi_scale) + SUBPROC_INDENT + CONN_TABLE_PADDING;
+
+                        // Protocol
+                        SetTextColor(hdc, conn.protocol == ConnDetail::TCP ? GetAccentColor(false) : GetAccentColor(true));
+                        RECT proto_rc = { col_x, child_y, col_x + m_conn_cols[0].width, child_y + CONN_ROW_H };
+                        DrawTextW(hdc, conn.protocol == ConnDetail::TCP ? L"TCP" : L"UDP", -1, &proto_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+                        col_x += m_conn_cols[0].width;
+
+                        // Local address
+                        SetTextColor(hdc, GetTextColor());
+                        RECT local_rc = { col_x, child_y, col_x + m_conn_cols[1].width, child_y + CONN_ROW_H };
+                        DrawTextW(hdc, conn.local_addr.c_str(), -1, &local_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+                        col_x += m_conn_cols[1].width;
+
+                        // Remote address
+                        RECT remote_rc = { col_x, child_y, col_x + m_conn_cols[2].width, child_y + CONN_ROW_H };
+                        DrawTextW(hdc, conn.remote_addr.c_str(), -1, &remote_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+                        col_x += m_conn_cols[2].width;
+
+                        // State
+                        COLORREF state_color = GetSecondaryTextColor();
+                        if (conn.state == L"ESTABLISHED") state_color = RGB(76, 175, 80);
+                        else if (conn.state == L"LISTENING") state_color = RGB(33, 150, 243);
+                        else if (conn.state == L"TIME_WAIT") state_color = RGB(255, 152, 0);
+                        else if (conn.state == L"CLOSE_WAIT") state_color = RGB(255, 87, 34);
+                        SetTextColor(hdc, state_color);
+                        RECT state_rc = { col_x, child_y, col_x + m_conn_cols[3].width, child_y + CONN_ROW_H };
+                        DrawTextW(hdc, conn.state.c_str(), -1, &state_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+                        child_y += CONN_ROW_H;
+                    }
+
+                    // "... and N more (click to expand)"
+                    if ((int)sp.connections.size() > MAX_CONN_ROWS && !sp.conn_expanded) {
+                        SetTextColor(hdc, GetAccentColor(true));
+                        RECT more_rc = { PADDING + (int)(32 * m_dpi_scale) + SUBPROC_INDENT, child_y, w - PADDING, child_y + CONN_ROW_H };
+                        wchar_t more_text[64];
+                        swprintf_s(more_text, L"... \u8FD8\u6709 %d \u4E2A\u8FDE\u63A5 (\u70B9\u51FB\u5C55\u5F00)", (int)sp.connections.size() - MAX_CONN_ROWS);
+                        DrawTextW(hdc, more_text, -1, &more_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+                    }
+                }
+                }  // close for
+            }  // close else
+        }  // close if expanded
+
+        SelectClipRgn(hdc, NULL);
+        DeleteObject(hClipRgn);
+        cur_y += this_row_h - row_offset;
     }
 
     SelectObject(hdc, hOldFont);
 }
 
 void CDetailWindow::DrawScrollbar(HDC hdc, int w, int h) {
-    if ((int)m_rows.size() <= GetVisibleRows(h)) return;
+    int total_h = GetTotalHeight();
+    int visible_h = GetVisibleHeight();
+    if (total_h <= visible_h) return;
 
     int track_x = w - SCROLL_W - 2;
     int track_top = GetTableAreaTop();
@@ -1492,11 +1988,9 @@ void CDetailWindow::DrawScrollbar(HDC hdc, int w, int h) {
     FillRect(hdc, &track_rc, hTrack);
     DeleteObject(hTrack);
 
-    int total_rows = (int)m_rows.size();
-    int visible_rows = GetVisibleRows(h);
-    float ratio = (float)visible_rows / total_rows;
+    float ratio = (float)visible_h / total_h;
     int thumb_h = max(20, (int)(track_h * ratio));
-    float scroll_ratio = (float)m_scroll_pos / max(1, total_rows - visible_rows);
+    float scroll_ratio = (float)m_scroll_pos / max(1, total_h - visible_h);
     int thumb_y = track_top + (int)((track_h - thumb_h) * scroll_ratio);
 
     HBRUSH hThumb = CreateSolidBrush(m_dark_mode ? RGB(80, 80, 90) : RGB(190, 190, 190));
