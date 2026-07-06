@@ -1,6 +1,6 @@
 # ProcessNetMonitor - TrafficMonitor 插件
 
-TrafficMonitor 的插件，显示每个进程的网络速度。
+[TrafficMonitor](https://github.com/zhongyang219/TrafficMonitor) 的插件，显示每个进程的网络速度。
 
 ## 效果预览
 
