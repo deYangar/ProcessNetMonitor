@@ -117,6 +117,10 @@ ProcessNetMonitor/
 
 ## 版本历史
 
+### v1.6.1 (2026-07-09)
+- **设置文件改为 JSON 格式**：`settings.dat` → `settings.json`，可读性好，方便手动编辑
+- **TUN 地址段可配置**：在 `settings.json` 中编辑 `tun_ranges` 数组即可自定义跳过的 TUN 网段，默认 `["198.18.0.0/15"]`，适配不同代理软件的 TUN 配置
+
 ### v1.6.0 (2026-07-09)
 - **修复 TUN 代理模式流量双重计算**：跳过 `198.18.0.0/15`（TUN fake IP 段）的 TCP 连接，避免 Edge/xray 等应用经 TUN 网卡的连接与 mihomo 出站连接被重复统计。TUN 模式下流量总量现在与网卡实际收发一致
 - **修复 UDP 流量丢失**：TCP 和 UDP 统计分离追踪（`m_udp_cum`/`m_udp_prev`），不再用 TCP 覆盖 UDP。DNS/QUIC/Hysteria 等 UDP 流量现在正确计入

@@ -184,7 +184,7 @@ const wchar_t* CProcessNetPlugin::GetInfo(PluginInfoIndex i) {
     case TMI_DESCRIPTION: return L"Per-process network speed";
     case TMI_AUTHOR: return L"Aemeath";
     case TMI_COPYRIGHT: return L"MIT";
-    case TMI_VERSION: return L"1.6.0";
+    case TMI_VERSION: return L"1.6.1";
     case TMI_URL: return L"https://github.com";
     default: return L"";
     }
@@ -210,6 +210,8 @@ void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
     }
     m_detail.LoadHistory();
     m_detail.LoadSettings();
+    // Pass TUN ranges from settings to capture
+    m_capture.SetTunRanges(m_detail.GetTunRanges());
     // Record history whenever GetStats is called (independent of detail panel)
     m_capture.SetOnStats([this](const std::vector<ProcTraffic>& stats) {
         m_detail.RecordHistory(stats);

@@ -37,6 +37,7 @@ public:
     void RecordHistory(const std::vector<ProcTraffic>& stats);
     void SaveSettings();
     void LoadSettings();
+    std::vector<std::wstring> GetTunRanges() const { return m_tun_ranges; }
     
     // 设置 PacketCapture 指针（用于获取连接详情）
     void SetCapture(PacketCapture* capture) { m_capture = capture; }
@@ -225,6 +226,9 @@ private:
     bool m_hovering_close = false;
     bool m_hovering_min = false;
     int m_active_tab = 0;      // 0=实时流量, 1=历史流量
+    
+    // TUN address ranges (user configurable)
+    std::vector<std::wstring> m_tun_ranges = { L"198.18.0.0/15" };
 
     // Columns - real-time
     enum ColIndex { COL_ICON, COL_NAME, COL_CATEGORY, COL_DOWN, COL_UP, COL_CONN, COL_ACTION };

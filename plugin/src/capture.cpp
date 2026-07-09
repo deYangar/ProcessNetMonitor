@@ -402,17 +402,21 @@ void PacketCapture::QueryTcpStats() {
         // Also skip ::1 (IPv6 loopback) - dwLocalAddr would be 0x0100007F in some representations
         if (row.dwLocalAddr == 0x0100007F || row.dwRemoteAddr == 0x0100007F) continue;
         
-        // Skip TUN adapter connections (198.18.0.0/15) to avoid double-counting in TUN proxy mode
+        // Skip TUN adapter connections to avoid double-counting in TUN proxy mode
         // In TUN mode: Edge -> 198.18.x.x (TUN) -> mihomo -> physical adapter -> remote
         // Both Edge's TUN connection and mihomo's physical connection carry the same data.
         // Skipping TUN-side connections ensures each byte is counted only once (via mihomo's outbound).
-        // 198.18.0.0/15 in network byte order: first byte = 198 (0xC6), mask 255.254.0.0
         uint32_t local_ip = ntohl(row.dwLocalAddr);
         uint32_t remote_ip = ntohl(row.dwRemoteAddr);
-        if ((local_ip & 0xFFFE0000) == 0xC6120000 ||   // 198.18.0.0/15 local
-            (remote_ip & 0xFFFE0000) == 0xC6120000) {  // 198.18.0.0/15 remote
-            continue;
+        bool is_tun = false;
+        for (auto& cidr : m_tun_cidrs) {
+            if ((local_ip & cidr.second) == (cidr.first & cidr.second) ||
+                (remote_ip & cidr.second) == (cidr.first & cidr.second)) {
+                is_tun = true;
+                break;
+            }
         }
+        if (is_tun) continue;
         
         // Build MIB_TCPROW for GetPerTcpConnectionEStats
         MIB_TCPROW tcpRow;
@@ -669,4 +673,21 @@ std::vector<ConnDetail> PacketCapture::GetProcessConnections(DWORD pid) {
         return it->second;
     }
     return {};
+}
+
+// Parse CIDR notation (e.g. "198.18.0.0/15") and store as {network, mask} in host byte order
+void PacketCapture::SetTunRanges(const std::vector<std::wstring>& ranges) {
+    m_tun_cidrs.clear();
+    for (auto& cidr : ranges) {
+        // Convert wstring to string
+        char str[64];
+        WideCharToMultiByte(CP_UTF8, 0, cidr.c_str(), -1, str, 64, NULL, NULL);
+        // Parse "a.b.c.d/prefix"
+        unsigned int a, b, c, d, prefix;
+        if (sscanf(str, "%u.%u.%u.%u/%u", &a, &b, &c, &d, &prefix) == 5 && prefix <= 32) {
+            uint32_t ip = (a << 24) | (b << 16) | (c << 8) | d;
+            uint32_t mask = prefix == 0 ? 0 : (0xFFFFFFFF << (32 - prefix));
+            m_tun_cidrs.push_back({ip, mask});
+        }
+    }
 }

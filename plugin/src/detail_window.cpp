@@ -896,30 +896,95 @@ void CDetailWindow::SaveSettings() {
     if (m_config_dir.empty()) return;
     CreateDirectoryW(m_config_dir.c_str(), NULL);
     wchar_t path[MAX_PATH];
-    swprintf_s(path, MAX_PATH, L"%s\\settings.dat", m_config_dir.c_str());
-    FILE* f = _wfopen(path, L"wb");
+    swprintf_s(path, MAX_PATH, L"%s\\settings.json", m_config_dir.c_str());
+    FILE* f = _wfopen(path, L"w");
     if (!f) return;
-    uint32_t magic = 0x504E4D53;  // "PNMS"
-    uint32_t version = 1;
-    fwrite(&magic, 4, 1, f);
-    fwrite(&version, 4, 1, f);
-    fwrite(m_sort_col, sizeof(m_sort_col), 1, f);
-    fwrite(m_sort_asc, sizeof(m_sort_asc), 1, f);
+    fprintf(f, "{\n");
+    fprintf(f, "  \"sort_col\": [%d, %d],\n", m_sort_col[0], m_sort_col[1]);
+    fprintf(f, "  \"sort_asc\": [%s, %s],\n", m_sort_asc[0] ? "true" : "false", m_sort_asc[1] ? "true" : "false");
+    fprintf(f, "  \"tun_ranges\": [");
+    for (size_t i = 0; i < m_tun_ranges.size(); i++) {
+        char range[64];
+        WideCharToMultiByte(CP_UTF8, 0, m_tun_ranges[i].c_str(), -1, range, 64, NULL, NULL);
+        fprintf(f, "%s\"%s\"", i > 0 ? ", " : "", range);
+    }
+    fprintf(f, "]\n");
+    fprintf(f, "}\n");
     fclose(f);
 }
 
 void CDetailWindow::LoadSettings() {
     if (m_config_dir.empty()) return;
     wchar_t path[MAX_PATH];
-    swprintf_s(path, MAX_PATH, L"%s\\settings.dat", m_config_dir.c_str());
-    FILE* f = _wfopen(path, L"rb");
+    swprintf_s(path, MAX_PATH, L"%s\\settings.json", m_config_dir.c_str());
+    FILE* f = _wfopen(path, L"r");
     if (!f) return;
-    uint32_t magic, version;
-    if (fread(&magic, 4, 1, f) != 1 || magic != 0x504E4D53) { fclose(f); return; }
-    if (fread(&version, 4, 1, f) != 1 || version != 1) { fclose(f); return; }
-    fread(m_sort_col, sizeof(m_sort_col), 1, f);
-    fread(m_sort_asc, sizeof(m_sort_asc), 1, f);
+    // Read entire file
+    char buf[4096];
+    size_t len = fread(buf, 1, sizeof(buf) - 1, f);
+    buf[len] = 0;
     fclose(f);
+    std::string json(buf, len);
+    
+    // Simple JSON parser for known fields
+    // Parse sort_col
+    {
+        size_t pos = json.find("\"sort_col\"");
+        if (pos != std::string::npos) {
+            pos = json.find('[', pos);
+            if (pos != std::string::npos) {
+                int v0 = 0, v1 = 0;
+                if (sscanf(json.c_str() + pos, "[%d, %d]", &v0, &v1) == 2 ||
+                    sscanf(json.c_str() + pos, "[%d,%d]", &v0, &v1) == 2) {
+                    m_sort_col[0] = v0; m_sort_col[1] = v1;
+                }
+            }
+        }
+    }
+    // Parse sort_asc
+    {
+        size_t pos = json.find("\"sort_asc\"");
+        if (pos != std::string::npos) {
+            pos = json.find('[', pos);
+            if (pos != std::string::npos) {
+                bool a0 = false, a1 = false;
+                std::string sub = json.substr(pos, 32);
+                if (sub.find("true") != std::string::npos) a0 = true;
+                size_t comma = sub.find(',');
+                if (comma != std::string::npos && sub.substr(comma).find("true") != std::string::npos) a1 = true;
+                m_sort_asc[0] = a0; m_sort_asc[1] = a1;
+            }
+        }
+    }
+    // Parse tun_ranges
+    {
+        m_tun_ranges.clear();
+        size_t pos = json.find("\"tun_ranges\"");
+        if (pos != std::string::npos) {
+            pos = json.find('[', pos);
+            if (pos != std::string::npos) {
+                size_t end = json.find(']', pos);
+                if (end != std::string::npos) {
+                    std::string arr = json.substr(pos + 1, end - pos - 1);
+                    size_t s = 0;
+                    while (s < arr.size()) {
+                        size_t q1 = arr.find('\"', s);
+                        if (q1 == std::string::npos) break;
+                        size_t q2 = arr.find('\"', q1 + 1);
+                        if (q2 == std::string::npos) break;
+                        std::string range = arr.substr(q1 + 1, q2 - q1 - 1);
+                        if (!range.empty()) {
+                            wchar_t wrange[64];
+                            MultiByteToWideChar(CP_UTF8, 0, range.c_str(), -1, wrange, 64);
+                            m_tun_ranges.push_back(wrange);
+                        }
+                        s = q2 + 1;
+                    }
+                }
+            }
+        }
+        if (m_tun_ranges.empty()) m_tun_ranges = { L"198.18.0.0/15" };
+    }
 }
 
 // ============================================================
