@@ -1,0 +1,74 @@
+
+// ============================================================
+// Debug logging (auto-injected by build_debug.bat)
+// ============================================================
+void PacketCapture::DumpDebugLog(const std::vector<ProcTraffic>& result, double dt) {
+    time_t now = time(NULL);
+    if (now - m_last_debug < 5) return;
+    m_last_debug = now;
+    
+    if (m_debug_path.empty()) {
+        wchar_t appdata[MAX_PATH];
+        if (GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH)) {
+            m_debug_path = std::wstring(appdata) + L"\\TrafficMonitor\\plugins\\ProcessNetMonitor\\debug.log";
+        } else return;
+    }
+    
+    FILE* f = _wfopen(m_debug_path.c_str(), L"a");
+    if (!f) return;
+    
+    MIB_IF_TABLE2* ifTable = nullptr;
+    uint64_t adapter_in = 0, adapter_out = 0;
+    if (GetIfTable2(&ifTable) == NO_ERROR) {
+        for (ULONG i = 0; i < ifTable->NumEntries; i++) {
+            auto& row = ifTable->Table[i];
+            if (row.Type == IF_TYPE_SOFTWARE_LOOPBACK) continue;
+            if (row.OperStatus != IfOperStatusUp) continue;
+            std::wstring name = row.Alias;
+            for (auto& c : name) c = towlower(c);
+            if (name.find(L"tun") != std::wstring::npos || name.find(L"tap") != std::wstring::npos ||
+                name.find(L"mihomo") != std::wstring::npos || name.find(L"clash") != std::wstring::npos)
+                continue;
+            adapter_in += row.InOctets;
+            adapter_out += row.OutOctets;
+        }
+        FreeMibTable(ifTable);
+    }
+    static uint64_t prev_adp_in = 0, prev_adp_out = 0;
+    uint64_t adp_d_in = (prev_adp_in && adapter_in >= prev_adp_in) ? adapter_in - prev_adp_in : 0;
+    uint64_t adp_d_out = (prev_adp_out && adapter_out >= prev_adp_out) ? adapter_out - prev_adp_out : 0;
+    prev_adp_in = adapter_in;
+    prev_adp_out = adapter_out;
+    
+    fprintf(f, "\n=== %lld dt=%.1fs ===\n", (long long)now, dt);
+    fprintf(f, "Adapter(real): in=%llu (%.1f MB/s) out=%llu (%.1f MB/s)\n",
+        (unsigned long long)adp_d_in, adp_d_in / dt / 1048576.0,
+        (unsigned long long)adp_d_out, adp_d_out / dt / 1048576.0);
+    
+    uint64_t total_tcp_in = 0, total_tcp_out = 0, total_udp_in = 0, total_udp_out = 0;
+    for (auto& st : result) {
+        uint64_t tcp_in = 0, tcp_out = 0, udp_in = 0, udp_out = 0;
+        auto tit = m_tcp_cum.find(st.pid);
+        if (tit != m_tcp_cum.end()) { tcp_in = tit->second.first; tcp_out = tit->second.second; }
+        auto uit = m_udp_cum.find(st.pid);
+        if (uit != m_udp_cum.end()) { udp_in = uit->second.first; udp_out = uit->second.second; }
+        total_tcp_in += tcp_in; total_tcp_out += tcp_out;
+        total_udp_in += udp_in; total_udp_out += udp_out;
+        if (st.speed_up + st.speed_down < 1.0) continue;
+        
+        char name[64];
+        WideCharToMultiByte(CP_UTF8, 0, st.name.c_str(), -1, name, 64, NULL, NULL);
+        fprintf(f, "  %-20s pid=%-6lu TCP[in=%llu out=%llu] UDP[in=%llu out=%llu] spd[%.1f %.1f MB/s] conn=%d\n",
+            name, st.pid,
+            (unsigned long long)tcp_in, (unsigned long long)tcp_out,
+            (unsigned long long)udp_in, (unsigned long long)udp_out,
+            st.speed_down / 1048576.0, st.speed_up / 1048576.0, st.conn_count);
+    }
+    
+    fprintf(f, "TCP cumulative: in=%llu out=%llu  UDP cumulative: in=%llu out=%llu\n",
+        (unsigned long long)total_tcp_in, (unsigned long long)total_tcp_out,
+        (unsigned long long)total_udp_in, (unsigned long long)total_udp_out);
+    
+    fflush(f);
+    fclose(f);
+}
