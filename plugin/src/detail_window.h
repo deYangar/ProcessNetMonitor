@@ -38,6 +38,7 @@ public:
     void SaveSettings();
     void LoadSettings();
     std::vector<std::wstring> GetTunRanges() const { return m_tun_ranges; }
+    void SetTunRanges(const std::vector<std::wstring>& r) { m_tun_ranges = r; }
     
     // 设置 PacketCapture 指针（用于获取连接详情）
     void SetCapture(PacketCapture* capture) { m_capture = capture; }

@@ -48,10 +48,10 @@ public:
     const wchar_t* GetTooltipInfo() override;
     void OnInitialize(ITrafficMonitor* pApp) override;
     void OnExtenedInfo(ExtendedInfoIndex index, const wchar_t* data) override;
+    OptionReturn ShowOptionsDialog(void* hParent) override;
 
 private:
     CProcessNetItem m_items[2];
-    PacketCapture m_capture;
     ITrafficMonitor* m_app = nullptr;
     ULONGLONG m_last_time = 0;
     bool m_started = false;
@@ -69,6 +69,7 @@ private:
 public:
     void ToggleDetailWindow(HWND parent_wnd);
     CDetailWindow m_detail;
+    PacketCapture m_capture;
     bool m_detail_created = false;
 
 private:

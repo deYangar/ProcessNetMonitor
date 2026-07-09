@@ -184,7 +184,7 @@ const wchar_t* CProcessNetPlugin::GetInfo(PluginInfoIndex i) {
     case TMI_DESCRIPTION: return L"Per-process network speed";
     case TMI_AUTHOR: return L"Aemeath";
     case TMI_COPYRIGHT: return L"MIT";
-    case TMI_VERSION: return L"1.6.1";
+    case TMI_VERSION: return L"1.6.2";
     case TMI_URL: return L"https://github.com";
     default: return L"";
     }
@@ -337,6 +337,134 @@ void CProcessNetPlugin::CheckHoverAndShowPopup() {
             m_was_hovering = false;
         }
     }
+}
+
+// ============================================================
+// Options dialog - TUN address range settings
+// ============================================================
+
+static std::vector<std::wstring> g_new_ranges;  // temp storage for dialog result
+static bool g_option_changed = false;
+
+static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_CREATE: {
+        // Label
+        CreateWindowW(L"STATIC", L"TUN \x5730\x5740\x6BB5\xFF08\x6BCF\x884C\x4E00\x4E2A CIDR\xFF09:",
+            WS_CHILD | WS_VISIBLE, 10, 10, 360, 20, hwnd, (HMENU)1000, nullptr, nullptr);
+        // Edit (multiline)
+        CreateWindowW(L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL,
+            10, 35, 360, 100, hwnd, (HMENU)1001, nullptr, nullptr);
+        // OK button
+        CreateWindowW(L"BUTTON", L"OK",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 230, 150, 65, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
+        // Cancel button
+        CreateWindowW(L"BUTTON", L"Cancel",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 305, 150, 65, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
+        
+        // Fill edit with current ranges
+        auto ranges = CProcessNetPlugin::Instance().m_detail.GetTunRanges();
+        std::wstring text;
+        for (size_t i = 0; i < ranges.size(); i++) {
+            if (i > 0) text += L"\r\n";
+            text += ranges[i];
+        }
+        SetDlgItemTextW(hwnd, 1001, text.c_str());
+        return 0;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDOK) {
+            wchar_t buf[2048] = {};
+            GetDlgItemTextW(hwnd, 1001, buf, 2048);
+            std::vector<std::wstring> new_ranges;
+            wchar_t* ctx = nullptr;
+            wchar_t* line = wcstok_s(buf, L"\r\n", &ctx);
+            while (line) {
+                std::wstring trimmed = line;
+                while (!trimmed.empty() && iswspace(trimmed.front())) trimmed.erase(0, 1);
+                while (!trimmed.empty() && iswspace(trimmed.back())) trimmed.pop_back();
+                if (!trimmed.empty()) new_ranges.push_back(trimmed);
+                line = wcstok_s(nullptr, L"\r\n", &ctx);
+            }
+            auto& plugin = CProcessNetPlugin::Instance();
+            plugin.m_detail.SetTunRanges(new_ranges);
+            plugin.m_detail.SaveSettings();
+            plugin.m_capture.SetTunRanges(new_ranges);
+            g_option_changed = true;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        if (LOWORD(wp) == IDCANCEL) {
+            g_option_changed = false;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+ITMPlugin::OptionReturn CProcessNetPlugin::ShowOptionsDialog(void* hParent) {
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSW wc = {};
+        wc.lpfnWndProc = OptionsWndProc;
+        wc.hInstance = GetModuleHandleW(NULL);
+        wc.lpszClassName = L"ProcessNetMonitorOptionsDlg";
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        RegisterClassW(&wc);
+        registered = true;
+    }
+    
+    g_option_changed = false;
+    
+    HWND hwnd = CreateWindowExW(
+        WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
+        L"ProcessNetMonitorOptionsDlg",
+        L"TUN \x8BBE\x7F6E",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU,
+        0, 0, 395, 230,
+        (HWND)hParent, nullptr, GetModuleHandleW(NULL), nullptr
+    );
+    
+    if (!hwnd) return OR_OPTION_NOT_PROVIDED;
+    
+    // Center on parent
+    if (hParent) {
+        RECT rcParent, rcDlg;
+        GetWindowRect((HWND)hParent, &rcParent);
+        GetWindowRect(hwnd, &rcDlg);
+        int x = rcParent.left + ((rcParent.right - rcParent.left) - (rcDlg.right - rcDlg.left)) / 2;
+        int y = rcParent.top + ((rcParent.bottom - rcParent.top) - (rcDlg.bottom - rcDlg.top)) / 2;
+        SetWindowPos(hwnd, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+    } else {
+        // Center on screen
+        int sw = GetSystemMetrics(SM_CXSCREEN);
+        int sh = GetSystemMetrics(SM_CYSCREEN);
+        RECT rc;
+        GetWindowRect(hwnd, &rc);
+        SetWindowPos(hwnd, nullptr, (sw - (rc.right - rc.left)) / 2, (sh - (rc.bottom - rc.top)) / 2, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+    }
+    
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
+    
+    // Modal loop
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0)) {
+        if (!IsWindow(hwnd)) break;
+        if (!IsDialogMessageW(hwnd, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    
+    return g_option_changed ? OR_OPTION_CHANGED : OR_OPTION_UNCHANGED;
 }
 
 extern "C" {
