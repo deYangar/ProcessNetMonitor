@@ -117,6 +117,12 @@ ProcessNetMonitor/
 
 ## 版本历史
 
+### v1.6.0 (2026-07-09)
+- **修复 TUN 代理模式流量双重计算**：跳过 `198.18.0.0/15`（TUN fake IP 段）的 TCP 连接，避免 Edge/xray 等应用经 TUN 网卡的连接与 mihomo 出站连接被重复统计。TUN 模式下流量总量现在与网卡实际收发一致
+- **修复 UDP 流量丢失**：TCP 和 UDP 统计分离追踪（`m_udp_cum`/`m_udp_prev`），不再用 TCP 覆盖 UDP。DNS/QUIC/Hysteria 等 UDP 流量现在正确计入
+- **修复历史流量虚高 Bug**：当 TCP 连接关闭导致累计值下降时，错误地将剩余连接的全部累计字节记为新流量。现修正为 clamp 到 0
+- **修正插件版本号**：v1.5.0 时漏更 `TMI_VERSION`，之前一直显示 1.3.0
+
 ### v1.5.0 (2026-07-06)
 - **TCP 流量统计改用 `GetPerTcpConnectionEStats` API**：直接从内核 TCP 协议栈读取每连接字节数，彻底解决 raw socket 在 WLAN 上无法捕获入站流量的问题
 - **跳过 loopback 连接**：避免代理软件（如 mihomo/clash）导致的流量双重计算

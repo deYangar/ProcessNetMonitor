@@ -184,7 +184,7 @@ const wchar_t* CProcessNetPlugin::GetInfo(PluginInfoIndex i) {
     case TMI_DESCRIPTION: return L"Per-process network speed";
     case TMI_AUTHOR: return L"Aemeath";
     case TMI_COPYRIGHT: return L"MIT";
-    case TMI_VERSION: return L"1.3.0";
+    case TMI_VERSION: return L"1.6.0";
     case TMI_URL: return L"https://github.com";
     default: return L"";
     }

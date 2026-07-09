@@ -348,11 +348,11 @@ void CDetailWindow::RecordHistory(const std::vector<ProcTraffic>& stats) {
             if (a.recv >= it->second.recv)
                 delta_recv = a.recv - it->second.recv;
             else
-                delta_recv = a.recv;  // TM restarted, cum reset to 0
+                delta_recv = 0;  // connection(s) closed, cumulative dropped - clamp to 0
             if (a.sent >= it->second.sent)
                 delta_sent = a.sent - it->second.sent;
             else
-                delta_sent = a.sent;
+                delta_sent = 0;
         } else {
             // First time seeing this process - just set baseline, don't count existing cumulative bytes as new traffic
             delta_recv = 0;

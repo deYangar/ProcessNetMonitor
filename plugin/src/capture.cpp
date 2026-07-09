@@ -360,22 +360,16 @@ void PacketCapture::ProcessPacket(const uint8_t* data, int len) {
 
     if (pid > 0) {
         std::lock_guard<std::mutex> lk(m_mutex);
+        // Ensure process exists in m_stats for name/path lookup
         auto& st = m_stats[pid];
         if (st.pid == 0) {
-            // First time seeing this process - initialize to avoid bogus speed
             st.pid = pid;
             st.name = GetProcessName(pid);
             st.exe_path = GetProcessPath(pid);
-            st.bytes_sent = total_len;
-            st.bytes_recv = 0;
-            st.prev_sent = total_len;
-            st.prev_recv = 0;
-        } else {
-            st.pid = pid;
-            if (st.name.empty()) st.name = GetProcessName(pid);
-            if (st.exe_path.empty()) st.exe_path = GetProcessPath(pid);
-            if (is_out) st.bytes_sent += total_len; else st.bytes_recv += total_len;
         }
+        // Track UDP bytes separately (TCP is tracked via GetPerTcpConnectionEStats)
+        if (is_out) m_udp_cum[pid].second += total_len;
+        else        m_udp_cum[pid].first += total_len;
     }
 }
 
@@ -407,6 +401,18 @@ void PacketCapture::QueryTcpStats() {
         if (row.dwLocalAddr == loopback || row.dwRemoteAddr == loopback) continue;
         // Also skip ::1 (IPv6 loopback) - dwLocalAddr would be 0x0100007F in some representations
         if (row.dwLocalAddr == 0x0100007F || row.dwRemoteAddr == 0x0100007F) continue;
+        
+        // Skip TUN adapter connections (198.18.0.0/15) to avoid double-counting in TUN proxy mode
+        // In TUN mode: Edge -> 198.18.x.x (TUN) -> mihomo -> physical adapter -> remote
+        // Both Edge's TUN connection and mihomo's physical connection carry the same data.
+        // Skipping TUN-side connections ensures each byte is counted only once (via mihomo's outbound).
+        // 198.18.0.0/15 in network byte order: first byte = 198 (0xC6), mask 255.254.0.0
+        uint32_t local_ip = ntohl(row.dwLocalAddr);
+        uint32_t remote_ip = ntohl(row.dwRemoteAddr);
+        if ((local_ip & 0xFFFE0000) == 0xC6120000 ||   // 198.18.0.0/15 local
+            (remote_ip & 0xFFFE0000) == 0xC6120000) {  // 198.18.0.0/15 remote
+            continue;
+        }
         
         // Build MIB_TCPROW for GetPerTcpConnectionEStats
         MIB_TCPROW tcpRow;
@@ -482,36 +488,56 @@ std::vector<ProcTraffic> PacketCapture::GetStats(double dt) {
             m_stats[pid] = st;
         }
     }
+    // Also add PIDs that only have UDP traffic
+    for (auto& [pid, vals] : m_udp_cum) {
+        if (m_stats.find(pid) == m_stats.end()) {
+            ProcTraffic st;
+            st.pid = pid;
+            st.name = GetProcessName(pid);
+            st.exe_path = GetProcessPath(pid);
+            m_stats[pid] = st;
+        }
+    }
 
     for (auto& [pid, st] : m_stats) {
-        // Use TCP kernel stats for both sent and recv (more accurate than raw socket)
+        // TCP bytes from kernel
         auto tcp_it = m_tcp_cum.find(pid);
+        uint64_t tcp_in = 0, tcp_out = 0;
         if (tcp_it != m_tcp_cum.end()) {
-            // TCP bytes from kernel
-            uint64_t tcp_in = tcp_it->second.first;
-            uint64_t tcp_out = tcp_it->second.second;
-            
-            // Total = TCP (from kernel) + UDP (from raw socket)
-            // Raw socket stats include both TCP and UDP, but TCP is unreliable
-            // So we use: sent = tcp_out, recv = tcp_in (overwriting raw socket TCP)
-            // For UDP, we'd need separate tracking, but for now TCP dominates
-            st.bytes_sent = tcp_out;
-            st.bytes_recv = tcp_in;
+            tcp_in = tcp_it->second.first;
+            tcp_out = tcp_it->second.second;
         }
         
-        // Calculate speed
+        // UDP bytes from raw socket
+        auto udp_it = m_udp_cum.find(pid);
+        uint64_t udp_in = 0, udp_out = 0;
+        if (udp_it != m_udp_cum.end()) {
+            udp_in = udp_it->second.first;
+            udp_out = udp_it->second.second;
+        }
+        
+        // Total = TCP + UDP
+        st.bytes_recv = tcp_in + udp_in;
+        st.bytes_sent = tcp_out + udp_out;
+        
+        // Calculate speed (delta from previous snapshot)
         auto prev_it = m_tcp_prev.find(pid);
-        if (prev_it != m_tcp_prev.end()) {
-            int64_t d_in = (int64_t)st.bytes_recv - (int64_t)prev_it->second.first;
-            int64_t d_out = (int64_t)st.bytes_sent - (int64_t)prev_it->second.second;
-            // Clamp negative deltas to 0 (happens when connections close)
+        auto uprev_it = m_udp_prev.find(pid);
+        uint64_t prev_in = 0, prev_out = 0;
+        if (prev_it != m_tcp_prev.end()) { prev_in += prev_it->second.first; prev_out += prev_it->second.second; }
+        if (uprev_it != m_udp_prev.end()) { prev_in += uprev_it->second.first; prev_out += uprev_it->second.second; }
+        
+        if (prev_it != m_tcp_prev.end() || uprev_it != m_udp_prev.end()) {
+            int64_t d_in = (int64_t)st.bytes_recv - (int64_t)prev_in;
+            int64_t d_out = (int64_t)st.bytes_sent - (int64_t)prev_out;
             st.speed_up = (d_out > 0) ? (double)d_out / dt : 0;
             st.speed_down = (d_in > 0) ? (double)d_in / dt : 0;
         } else {
             st.speed_up = 0;
             st.speed_down = 0;
         }
-        m_tcp_prev[pid] = {st.bytes_recv, st.bytes_sent};
+        m_tcp_prev[pid] = {tcp_in, tcp_out};
+        m_udp_prev[pid] = {udp_in, udp_out};
         
         if (st.name.empty() || st.name[0] == L'[') st.name = GetProcessName(pid);
         if (st.exe_path.empty()) st.exe_path = GetProcessPath(pid);
@@ -522,6 +548,9 @@ std::vector<ProcTraffic> PacketCapture::GetStats(double dt) {
 
     // Notify listener (for history recording) before sorting
     if (m_on_stats) m_on_stats(result);
+    
+    // Debug log disabled for release
+    // DumpDebugLog(result, dt);
 
     std::sort(result.begin(), result.end(), [](auto& a, auto& b) { return (a.speed_up + a.speed_down) > (b.speed_up + b.speed_down); });
     // Do NOT reset byte counters - just let them accumulate

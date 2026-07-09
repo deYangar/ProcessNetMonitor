@@ -108,7 +108,16 @@ private:
     std::map<DWORD, std::pair<uint64_t, uint64_t>> m_tcp_cum;   // current cumulative
     std::map<DWORD, std::pair<uint64_t, uint64_t>> m_tcp_prev;  // previous cumulative
     std::set<uint64_t> m_tcp_stats_enabled;  // track enabled connections (hashed by local_port + remote_addr + remote_port)
+
+    // UDP per-process byte stats (from raw socket)
+    std::map<DWORD, std::pair<uint64_t, uint64_t>> m_udp_cum;   // pid -> {bytes_recv, bytes_sent}
+    std::map<DWORD, std::pair<uint64_t, uint64_t>> m_udp_prev;  // for delta calc
     
     // Query TCP byte stats from the kernel
     void QueryTcpStats();
+    
+    // Debug log (disabled for release)
+    // void DumpDebugLog(const std::vector<ProcTraffic>& result, double dt);
+    // std::wstring m_debug_path;
+    // time_t m_last_debug = 0;
 };
