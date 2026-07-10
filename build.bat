@@ -73,6 +73,14 @@ if %ERRORLEVEL% NEQ 0 (
     echo WARNING: x64 DLL copy failed! Close TrafficMonitor first.
     exit /b 1
 )
+:: Start TM as user Yang (must use working directory for TM to find its config)
+echo @echo off > "%TEMP%\launch_tm.bat"
+echo cd /d "C:\Users\Yang\.openclaw\workspace\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor" >> "%TEMP%\launch_tm.bat"
+echo start "" TrafficMonitor.exe >> "%TEMP%\launch_tm.bat"
+schtasks /create /tn "LaunchTM" /tr "%TEMP%\launch_tm.bat" /sc once /st 00:00 /ru Yang /f >nul 2>&1
+schtasks /run /tn "LaunchTM" >nul 2>&1
+timeout /t 3 /nobreak >nul
+schtasks /delete /tn "LaunchTM" /f >nul 2>&1
 echo DEPLOYED OK (x64)
 goto :eof
 
@@ -86,4 +94,12 @@ if %ERRORLEVEL% NEQ 0 (
     echo WARNING: DLL copy failed! Close TrafficMonitor first.
     exit /b 1
 )
+:: Start TM as user Yang
+echo @echo off > "%TEMP%\launch_tm.bat"
+echo cd /d "C:\Users\Yang\.openclaw\workspace\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor" >> "%TEMP%\launch_tm.bat"
+echo start "" TrafficMonitor.exe >> "%TEMP%\launch_tm.bat"
+schtasks /create /tn "LaunchTM" /tr "%TEMP%\launch_tm.bat" /sc once /st 00:00 /ru Yang /f >nul 2>&1
+schtasks /run /tn "LaunchTM" >nul 2>&1
+timeout /t 3 /nobreak >nul
+schtasks /delete /tn "LaunchTM" /f >nul 2>&1
 echo DEPLOYED OK (x86 + x64)

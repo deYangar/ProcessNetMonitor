@@ -30,8 +30,25 @@ const wchar_t* CProcessNetItem::GetItemValueSampleText() const {
 }
 
 int CProcessNetItem::OnMouseEvent(MouseEventType type, int x, int y, void* hWnd, int flag) {
-    if (type == MT_LCLICKED || type == MT_DBCLICKED) {
-        CProcessNetPlugin::Instance().ToggleDetailWindow((HWND)hWnd);
+    auto& plugin = CProcessNetPlugin::Instance();
+    bool is_taskbar = (flag & MF_TASKBAR_WND) != 0;
+
+    if (type == MT_LCLICKED) {
+        if (is_taskbar) {
+            // Taskbar click: toggle tooltip popup at click position
+            POINT pt = { x, y };
+            ClientToScreen((HWND)hWnd, &pt);
+            plugin.m_popup.ToggleAtPosition(pt.x, pt.y, plugin.m_cached_up, plugin.m_cached_down);
+            plugin.SetPopupClickTime(GetTickCount64());
+        } else {
+            // Main window click: toggle detail window
+            plugin.ToggleDetailWindow((HWND)hWnd);
+        }
+        return 1;
+    }
+    if (type == MT_DBCLICKED) {
+        // Double-click always opens detail window
+        plugin.ToggleDetailWindow((HWND)hWnd);
         return 1;
     }
     return 0;
@@ -184,7 +201,7 @@ const wchar_t* CProcessNetPlugin::GetInfo(PluginInfoIndex i) {
     case TMI_DESCRIPTION: return L"Per-process network speed";
     case TMI_AUTHOR: return L"Aemeath";
     case TMI_COPYRIGHT: return L"MIT";
-    case TMI_VERSION: return L"1.6.2";
+    case TMI_VERSION: return L"1.7.0";
     case TMI_URL: return L"https://github.com";
     default: return L"";
     }
@@ -229,6 +246,7 @@ void CProcessNetPlugin::OnExtenedInfo(ExtendedInfoIndex index, const wchar_t* da
 // Hover detection & popup management
 // ============================================================
 
+// Check if a TrafficMonitor window is the floating main window (not on taskbar)
 static bool IsTMMainWindow(HWND hwnd) {
     if (!hwnd) return false;
     wchar_t cls[64] = {};
@@ -252,14 +270,81 @@ static bool IsTMMainWindow(HWND hwnd) {
     return true;
 }
 
+// Check if a TrafficMonitor window is embedded in the taskbar
+static bool IsTMTaskbarWindow(HWND hwnd) {
+    if (!hwnd) return false;
+    wchar_t cls[64] = {};
+    GetClassNameW(hwnd, cls, 64);
+    if (wcsncmp(cls, L"TrafficMonitor", 14) != 0) return false;
+
+    RECT rc;
+    GetWindowRect(hwnd, &rc);
+
+    APPBARDATA abd = { sizeof(abd) };
+    UINT state = SHAppBarMessage(ABM_GETTASKBARPOS, &abd);
+    if (!state) return false;  // can't determine taskbar position
+
+    // Check if window overlaps with taskbar
+    RECT tb = abd.rc;
+    RECT inter;
+    return IntersectRect(&inter, &rc, &tb) != 0;
+}
+
+// Walk the parent chain to find a TrafficMonitor window
+static HWND FindTMWindowInChain(HWND hwnd) {
+    for (HWND cur = hwnd; cur; cur = GetParent(cur)) {
+        wchar_t cls[64] = {};
+        GetClassNameW(cur, cls, 64);
+        if (wcsncmp(cls, L"TrafficMonitor", 14) == 0)
+            return cur;
+    }
+    return nullptr;
+}
+
+// EnumWindows callback to find all TM windows
+struct FindTMWindowsCtx {
+    HWND main_wnd = nullptr;   // floating
+    HWND taskbar_wnd = nullptr; // in taskbar
+};
+static BOOL CALLBACK FindTMWindowsProc(HWND hwnd, LPARAM lp) {
+    wchar_t cls[64] = {};
+    GetClassNameW(hwnd, cls, 64);
+    if (wcsncmp(cls, L"TrafficMonitor", 14) != 0) return TRUE;
+    auto* ctx = reinterpret_cast<FindTMWindowsCtx*>(lp);
+    if (IsTMMainWindow(hwnd)) ctx->main_wnd = hwnd;
+    else if (IsTMTaskbarWindow(hwnd)) ctx->taskbar_wnd = hwnd;
+    return TRUE;
+}
+
+// Get the TM floating window (not on taskbar)
+// Note: the hovered window itself must also be outside the taskbar,
+// because TM creates #32770 dialog windows in the taskbar area
+// whose parent is the main TM window.
 static HWND GetTMMainWindow(HWND hwnd) {
     if (!hwnd) return nullptr;
-    HWND root = GetAncestor(hwnd, GA_ROOT);
-    if (!root) return nullptr;
-    wchar_t cls[64] = {};
-    GetClassNameW(root, cls, 64);
-    if (wcsncmp(cls, L"TrafficMonitor", 14) != 0) return nullptr;
-    if (IsTMMainWindow(root)) return root;
+    // Check if the hovered window is in the taskbar
+    RECT rc;
+    GetWindowRect(hwnd, &rc);
+    APPBARDATA abd = { sizeof(abd) };
+    UINT state = SHAppBarMessage(ABM_GETTASKBARPOS, &abd);
+    if (state) {
+        RECT inter;
+        if (IntersectRect(&inter, &rc, &abd.rc))
+            return nullptr;  // hovered window is in taskbar area
+    }
+    HWND tm = FindTMWindowInChain(hwnd);
+    if (tm && IsTMMainWindow(tm)) return tm;
+    return nullptr;
+}
+
+// Get the TM taskbar window by checking if mouse is within its rect
+static HWND GetTMTaskbarByPoint(const POINT& pt) {
+    FindTMWindowsCtx ctx;
+    EnumWindows(FindTMWindowsProc, reinterpret_cast<LPARAM>(&ctx));
+    if (!ctx.taskbar_wnd) return nullptr;
+    RECT rc;
+    GetWindowRect(ctx.taskbar_wnd, &rc);
+    if (PtInRect(&rc, pt)) return ctx.taskbar_wnd;
     return nullptr;
 }
 
@@ -320,7 +405,33 @@ void CProcessNetPlugin::CheckHoverAndShowPopup() {
     HWND hover_wnd = WindowFromPoint(pt);
 
     bool over_popup = (hover_wnd == m_popup.GetHwnd());
+
+    // Only detect hover on the main floating window
+    // (taskbar uses click-based popup via OnMouseEvent instead)
     HWND tm_wnd = GetTMMainWindow(hover_wnd);
+
+    // Debug logging
+    static FILE* s_dbg2 = nullptr;
+    if (!s_dbg2) s_dbg2 = _wfopen(L"C:\\Users\\Public\\Temp\\pnm_hover2.log", L"w");
+    if (s_dbg2) {
+        wchar_t cls[64] = {};
+        GetClassNameW(hover_wnd, cls, 64);
+        RECT rc; GetWindowRect(hover_wnd, &rc);
+        wchar_t tm_cls[64] = {};
+        if (tm_wnd) GetClassNameW(tm_wnd, tm_cls, 64);
+        fwprintf(s_dbg2, L"hover=%p cls=%s rect=(%d,%d,%d,%d) tm_wnd=%p tm_cls=%s over_popup=%d\n",
+            hover_wnd, cls, rc.left, rc.top, rc.right, rc.bottom,
+            tm_wnd, tm_cls, over_popup);
+        fflush(s_dbg2);
+    }
+
+    // Check if mouse is over the taskbar area
+    bool over_taskbar = false;
+    {
+        APPBARDATA abd = { sizeof(abd) };
+        UINT state = SHAppBarMessage(ABM_GETTASKBARPOS, &abd);
+        if (state) over_taskbar = PtInRect(&abd.rc, pt) != 0;
+    }
 
     if (tm_wnd) {
         RECT wnd_rect;
@@ -331,8 +442,13 @@ void CProcessNetPlugin::CheckHoverAndShowPopup() {
         m_was_hovering = true;
     } else if (over_popup) {
         m_was_hovering = true;
+    } else if (over_taskbar && m_popup.IsVisible()) {
+        // Click-shown popup: keep visible while mouse is on the taskbar
+        m_was_hovering = true;
     } else {
-        if (m_was_hovering) {
+        // Mouse left both popup and taskbar — hide
+        bool click_grace = (now - m_popup_click_time < 800);
+        if ((m_was_hovering || m_popup.IsVisible()) && !click_grace) {
             m_popup.Hide();
             m_was_hovering = false;
         }

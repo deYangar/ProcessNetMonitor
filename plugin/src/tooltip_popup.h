@@ -102,5 +102,8 @@ public:
     // "查看详细" button rect (updated in OnPaint)
     RECT m_rcDetailBtn = {};
 
+    // Toggle popup at a specific screen position (for taskbar click)
+    void ToggleAtPosition(int screen_x, int screen_y, double total_up, double total_down);
+
     static CTooltipPopup* s_instance;
 };

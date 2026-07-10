@@ -61,25 +61,28 @@ private:
     // TM config directory (received via OnExtenedInfo)
     std::wstring m_tm_config_dir;
 
-    // Rich tooltip popup
-    CTooltipPopup m_popup;
-    bool m_popup_created = false;
-
     // Detail window access (for CProcessNetItem::OnMouseEvent)
 public:
     void ToggleDetailWindow(HWND parent_wnd);
+    CTooltipPopup m_popup;
+    bool m_popup_created = false;
     CDetailWindow m_detail;
     PacketCapture m_capture;
     bool m_detail_created = false;
 
-private:
-    ULONGLONG m_last_hover_check = 0;
-    bool m_was_hovering = false;
-    void CheckHoverAndShowPopup();
-    void GetProcessDisplayInfo(std::vector<CTooltipPopup::ProcDisplayInfo>& out,
-                               const std::vector<ProcTraffic>& stats);
     // Cached stats for popup (updated each DataRequired cycle)
     std::vector<ProcTraffic> m_cached_stats;
     double m_cached_up = 0;
     double m_cached_down = 0;
+    std::vector<CTooltipPopup::ProcDisplayInfo> GetCachedProcDisplayInfo();
+
+private:
+    ULONGLONG m_last_hover_check = 0;
+    bool m_was_hovering = false;
+    ULONGLONG m_popup_click_time = 0;  // when popup was shown by click (for hide delay)
+public:
+    void SetPopupClickTime(ULONGLONG t) { m_popup_click_time = t; }
+    void CheckHoverAndShowPopup();
+    void GetProcessDisplayInfo(std::vector<CTooltipPopup::ProcDisplayInfo>& out,
+                               const std::vector<ProcTraffic>& stats);
 };

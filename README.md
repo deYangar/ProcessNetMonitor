@@ -93,8 +93,9 @@ ProcessNetMonitor/
 │   │   ├── detail_window.h/.cpp # 火绒风格详情窗口
 │   │   ├── resource.rc          # 资源文件（图标）
 │   │   ├── app.ico              # 插件图标
-│   ├── ProcessNetMonitor.dll    # 64 位编译输出
-│   ├── ProcessNetMonitor_x86.dll # 32 位编译输出
+│   ├── ProcessNetMonitor.dll         # 64 位编译输出
+│   ├── ProcessNetMonitor_x86.dll     # 32 位编译输出
+│   ├── ProcessNetMonitor_debug.dll   # 64 位调试版（含日志输出）
 ├── TrafficMonitor/
 │   └── TrafficMonitor/          # TM 主程序
 │       └── plugins/             # 插件DLL放这里
@@ -116,6 +117,11 @@ ProcessNetMonitor/
 - 数据格式版本 v4，自动兼容 v2/v3 旧格式
 
 ## 版本历史
+
+### v1.7.0 (2026-07-10)
+- **修复任务栏悬浮窗误弹**：鼠标悬停任务栏 TM 区域时，不再在主窗口误弹悬浮信息窗口（修复 `#32770` 对话框 parent chain 误判问题）
+- **任务栏点击悬浮窗持久化**：点击任务栏弹出的悬浮窗，鼠标在悬浮窗或任务栏上均保持显示，离开两者后才消失
+- **新增 debug 版本**：Release 附带 `ProcessNetMonitor_debug.dll`，内置调试日志输出，遇到问题时替换即可采集日志
 
 ### v1.6.2 (2026-07-09)
 - **新增 TUN 设置界面**：在 TM 插件管理中点击"选项"即可弹出设置窗口，可视化编辑 TUN 地址段，无需手动改 JSON 文件

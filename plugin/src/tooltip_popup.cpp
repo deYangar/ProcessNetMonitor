@@ -636,6 +636,32 @@ void CTooltipPopup::Hide() {
     }
 }
 
+void CTooltipPopup::ToggleAtPosition(int screen_x, int screen_y, double total_up, double total_down) {
+    if (m_visible) {
+        Hide();
+        return;
+    }
+    m_procs = CProcessNetPlugin::Instance().GetCachedProcDisplayInfo();
+    m_total_up = total_up;
+    m_total_down = total_down;
+
+    m_dark_mode = IsDarkMode();
+    if (m_pen_separator) DeleteObject(m_pen_separator);
+    m_pen_separator = CreatePen(PS_SOLID, 1, m_dark_mode ? RGB(45, 45, 45) : RGB(235, 235, 235));
+
+    // Create a small anchor rect centered on the click point
+    RECT anchor = { screen_x - 80, screen_y - 80, screen_x + 80, screen_y };
+    PositionWindow(anchor);
+    InvalidateRect(m_hwnd, NULL, FALSE);
+}
+
+// Public helper to get cached proc display info
+std::vector<CTooltipPopup::ProcDisplayInfo> CProcessNetPlugin::GetCachedProcDisplayInfo() {
+    std::vector<CTooltipPopup::ProcDisplayInfo> out;
+    GetProcessDisplayInfo(out, m_cached_stats);
+    return out;
+}
+
 bool CTooltipPopup::TickCheck(HWND taskbar_wnd) {
     // Refresh dark mode periodically
     m_dark_mode = IsDarkMode();
