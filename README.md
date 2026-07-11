@@ -42,6 +42,7 @@
 - **自定义图标**：详情窗口标题栏显示插件专属图标
 - **可拖拽滚动条**：自绘滚动条支持鼠标拖拽、点击翻页、滚轮滚动
 - **不显示系统速度**：系统速度由 TrafficMonitor 本身提供，插件只显示进程级信息
+- **右键隐藏**：任务栏插件区域右键即可隐藏悬浮信息窗口
 
 ## 流量统计原理
 
@@ -92,7 +93,7 @@ ProcessNetMonitor/
 │   ├── src/
 │   │   ├── PluginInterface.h    # TM 插件接口定义
 │   │   ├── capture.h / .cpp     # 流量采集（GetPerTcpConnectionEStats + raw socket）
-│   │   ├── plugin_main.h / .cpp # 插件主体（2个item：Up/Down）
+│   │   ├── plugin_main.h / .cpp # 插件主体（3个item：Up/Down/透明区域）
 │   │   ├── tooltip_popup.h/.cpp # 富文本悬浮信息窗口
 │   │   ├── detail_window.h/.cpp # 火绒风格详情窗口
 │   │   ├── resource.rc          # 资源文件（图标）
@@ -109,15 +110,15 @@ ProcessNetMonitor/
 ## TM 配置
 
 1. 打开 TM → 右键 → 选项 → 插件
-2. 勾选 "Up" 和 "Down" 两个显示项目
-3. 在任务栏设置中将两项都添加到任务栏显示
+2. 勾选 "Up"、"Down" 和 "透明区域"（可选）显示项目
+3. 在任务栏设置中将需要的项目添加到任务栏显示
 
 **推荐设置**：选项 → 主窗口设置 → 取消勾选「显示鼠标提示」，否则主悬浮窗鼠标悬停时会同时出现两个信息窗口（TM 自带的文本提示 + 本插件的富文本弹窗）
 
 ## 数据存储
 
 - **历史流量**：`%APPDATA%\TrafficMonitor\plugins\ProcessNetMonitor\history.dat`（非 portable 模式）或 `<exe_dir>\plugins\ProcessNetMonitor\history.dat`（portable 模式）
-- **排序设置**：同目录下 `settings.dat`
+- **排序设置**：同目录下 `settings.json`
 - 数据格式版本 v4，自动兼容 v2/v3 旧格式
 
 ## 版本历史
@@ -128,7 +129,7 @@ ProcessNetMonitor/
   - 默认宽度 100px，在插件「选项」中可自定义（0~500px），实时生效
   - Up/Down 项目保持正常显示，不受影响
 - **历史流量一键清除**：历史流量 tab 时间范围按钮右侧新增红色「清除数据」按钮，点击确认后清除所有历史流量数据并删除 history.dat 文件
-- **右键隐藏**：任务栏或主悬浮窗上右键即可隐藏悬浮信息窗口/详情窗口
+- **右键隐藏**：任务栏上右键即可隐藏悬浮信息窗口
 
 ### v1.7.0 (2026-07-10)
 - **任务栏点击弹出悬浮信息窗口**：点击任务栏插件区域即可弹出与主窗口悬停相同的进程详情悬浮窗
