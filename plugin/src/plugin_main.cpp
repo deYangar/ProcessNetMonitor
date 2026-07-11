@@ -51,6 +51,16 @@ int CProcessNetItem::OnMouseEvent(MouseEventType type, int x, int y, void* hWnd,
         }
         return 1;
     }
+    if (type == MT_RCLICKED) {
+        // Right-click: hide popup / detail window
+        if (is_taskbar) {
+            plugin.m_popup.Hide();
+        } else {
+            if (plugin.m_detail.IsVisible())
+                plugin.m_detail.Hide();
+        }
+        return 1;
+    }
     if (type == MT_DBCLICKED) {
         // Double-click always opens detail window
         plugin.ToggleDetailWindow((HWND)hWnd);
