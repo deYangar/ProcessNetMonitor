@@ -39,6 +39,8 @@ public:
     void LoadSettings();
     std::vector<std::wstring> GetTunRanges() const { return m_tun_ranges; }
     void SetTunRanges(const std::vector<std::wstring>& r) { m_tun_ranges = r; }
+    int GetTransparentWidth() const { return m_transparent_width; }
+    void SetTransparentWidth(int w) { m_transparent_width = w; }
     
     // 设置 PacketCapture 指针（用于获取连接详情）
     void SetCapture(PacketCapture* capture) { m_capture = capture; }
@@ -110,6 +112,7 @@ private:
 
     // History
     void BuildHistoryRows();
+    void ClearHistory();
 
     std::wstring m_config_dir;
 
@@ -230,6 +233,7 @@ private:
     
     // TUN address ranges (user configurable)
     std::vector<std::wstring> m_tun_ranges = { L"198.18.0.0/15" };
+    int m_transparent_width = 100;  // transparent area width in pixels
 
     // Columns - real-time
     enum ColIndex { COL_ICON, COL_NAME, COL_CATEGORY, COL_DOWN, COL_UP, COL_CONN, COL_ACTION };
@@ -347,6 +351,7 @@ private:
     RECT m_rcTab0 = {};
     RECT m_rcTab1 = {};
     RECT m_rcTRButtons[4] = {};  // time range buttons
+    RECT m_rcClearBtn = {};       // clear history button
     RECT m_rcTableHeader = {};
     RECT m_rcScrollbar = {};
 

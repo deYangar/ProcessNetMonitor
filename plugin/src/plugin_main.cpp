@@ -8,24 +8,29 @@ extern HINSTANCE s_dll_hinst;
 
 CProcessNetPlugin CProcessNetPlugin::s_instance;
 wchar_t CProcessNetItem::s_value_buf[2][256] = { L"starting...", L"starting..." };
+int CProcessNetItem::s_transparent_width = 100;  // default 100px
 
 static void FmtSpeed(double bps, wchar_t* buf, int n) {
     FormatSpeed(bps, buf, n);
 }
 
 const wchar_t* CProcessNetItem::GetItemName() const {
+    if (m_dir == DIR_TRANSPARENT) return L"\u900F\u660E\u533A\u57DF";
     return m_dir == DIR_UPLOAD ? L"Up" : L"Down";
 }
 const wchar_t* CProcessNetItem::GetItemId() const {
+    if (m_dir == DIR_TRANSPARENT) return L"TransparentArea";
     return m_dir == DIR_UPLOAD ? L"SpdUp01" : L"SpdDn01";
 }
 const wchar_t* CProcessNetItem::GetItemLableText() const {
     return L"";
 }
 const wchar_t* CProcessNetItem::GetItemValueText() const {
+    if (m_dir == DIR_TRANSPARENT) return L"";
     return s_value_buf[m_dir];
 }
 const wchar_t* CProcessNetItem::GetItemValueSampleText() const {
+    if (m_dir == DIR_TRANSPARENT) return L"\u900F\u660E\u533A\u57DF";
     return m_dir == DIR_UPLOAD ? L"U:chrome.exe 5.6KB/s" : L"D:mihomo 1.4KB/s";
 }
 
@@ -118,7 +123,7 @@ void CProcessNetItem::Update(const std::vector<ProcTraffic>& stats, double sys_u
 
 CProcessNetPlugin& CProcessNetPlugin::Instance() { return s_instance; }
 IPluginItem* CProcessNetPlugin::GetItem(int i) {
-    if (i == 0 || i == 1) return &m_items[i];
+    if (i >= 0 && i <= 2) return &m_items[i];
     return nullptr;
 }
 
@@ -126,6 +131,7 @@ void CProcessNetPlugin::DataRequired() {
     if (!m_started) {
         m_items[0].Init(CProcessNetItem::DIR_UPLOAD);
         m_items[1].Init(CProcessNetItem::DIR_DOWNLOAD);
+        m_items[2].Init(CProcessNetItem::DIR_TRANSPARENT);
         m_started = m_capture.Start();
         m_last_time = GetTickCount64();
         if (!m_started) {
@@ -201,7 +207,7 @@ const wchar_t* CProcessNetPlugin::GetInfo(PluginInfoIndex i) {
     case TMI_DESCRIPTION: return L"Per-process network speed";
     case TMI_AUTHOR: return L"Aemeath";
     case TMI_COPYRIGHT: return L"MIT";
-    case TMI_VERSION: return L"1.7.0";
+    case TMI_VERSION: return L"1.8.0";
     case TMI_URL: return L"https://github.com";
     default: return L"";
     }
@@ -227,6 +233,8 @@ void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
     }
     m_detail.LoadHistory();
     m_detail.LoadSettings();
+    // Sync transparent width from settings to static member
+    CProcessNetItem::s_transparent_width = m_detail.GetTransparentWidth();
     // Pass TUN ranges from settings to capture
     m_capture.SetTunRanges(m_detail.GetTunRanges());
     // Record history whenever GetStats is called (independent of detail panel)
@@ -465,19 +473,30 @@ static bool g_option_changed = false;
 static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE: {
-        // Label
+        // TUN label
         CreateWindowW(L"STATIC", L"TUN \x5730\x5740\x6BB5\xFF08\x6BCF\x884C\x4E00\x4E2A CIDR\xFF09:",
             WS_CHILD | WS_VISIBLE, 10, 10, 360, 20, hwnd, (HMENU)1000, nullptr, nullptr);
-        // Edit (multiline)
+        // TUN edit (multiline)
         CreateWindowW(L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL,
-            10, 35, 360, 100, hwnd, (HMENU)1001, nullptr, nullptr);
+            10, 35, 360, 80, hwnd, (HMENU)1001, nullptr, nullptr);
+
+        // Transparent area width label
+        CreateWindowW(L"STATIC", L"\x900F\x660E\x533A\x57DF\x5BBD\x5EA6\xFF08px\xFF0C\x4EFB\x52A1\x680F\x663E\x793A\x533A\x57DF\xFF09:",
+            WS_CHILD | WS_VISIBLE, 10, 125, 250, 20, hwnd, (HMENU)1002, nullptr, nullptr);
+        // Width edit
+        wchar_t width_buf[16];
+        swprintf_s(width_buf, L"%d", CProcessNetItem::s_transparent_width);
+        CreateWindowW(L"EDIT", width_buf,
+            WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
+            260, 123, 110, 24, hwnd, (HMENU)1003, nullptr, nullptr);
+
         // OK button
         CreateWindowW(L"BUTTON", L"OK",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 230, 150, 65, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 230, 165, 65, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
         // Cancel button
         CreateWindowW(L"BUTTON", L"Cancel",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 305, 150, 65, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 305, 165, 65, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
         
         // Fill edit with current ranges
         auto ranges = CProcessNetPlugin::Instance().m_detail.GetTunRanges();
@@ -491,6 +510,7 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
     }
     case WM_COMMAND:
         if (LOWORD(wp) == IDOK) {
+            // Save TUN ranges
             wchar_t buf[2048] = {};
             GetDlgItemTextW(hwnd, 1001, buf, 2048);
             std::vector<std::wstring> new_ranges;
@@ -503,8 +523,17 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
                 if (!trimmed.empty()) new_ranges.push_back(trimmed);
                 line = wcstok_s(nullptr, L"\r\n", &ctx);
             }
+            // Save transparent width
+            wchar_t wbuf[16] = {};
+            GetDlgItemTextW(hwnd, 1003, wbuf, 16);
+            int new_width = _wtoi(wbuf);
+            if (new_width < 0) new_width = 0;
+            if (new_width > 500) new_width = 500;
+            CProcessNetItem::s_transparent_width = new_width;
+
             auto& plugin = CProcessNetPlugin::Instance();
             plugin.m_detail.SetTunRanges(new_ranges);
+            plugin.m_detail.SetTransparentWidth(new_width);
             plugin.m_detail.SaveSettings();
             plugin.m_capture.SetTunRanges(new_ranges);
             g_option_changed = true;
@@ -542,9 +571,9 @@ ITMPlugin::OptionReturn CProcessNetPlugin::ShowOptionsDialog(void* hParent) {
     HWND hwnd = CreateWindowExW(
         WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
         L"ProcessNetMonitorOptionsDlg",
-        L"TUN \x8BBE\x7F6E",
+        L"\x63D2\x4EF6\x8BBE\x7F6E",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        0, 0, 395, 230,
+        0, 0, 395, 245,
         (HWND)hParent, nullptr, GetModuleHandleW(NULL), nullptr
     );
     

@@ -18,7 +18,7 @@ struct RecentProc {
 
 class CProcessNetItem : public IPluginItem {
 public:
-    enum Direction { DIR_UPLOAD = 0, DIR_DOWNLOAD = 1 };
+    enum Direction { DIR_UPLOAD = 0, DIR_DOWNLOAD = 1, DIR_TRANSPARENT = 2 };
 
     void Init(Direction dir) { m_dir = dir; }
     int OnMouseEvent(MouseEventType type, int x, int y, void* hWnd, int flag) override;
@@ -29,6 +29,13 @@ public:
     const wchar_t* GetItemValueSampleText() const override;
 
     void Update(const std::vector<ProcTraffic>& stats, double sys_up, double sys_down);
+
+    // Custom draw: transparent area only (invisible on taskbar, but still clickable)
+    bool IsCustomDraw() const override { return m_dir == DIR_TRANSPARENT; }
+    int GetItemWidth() const override { return m_dir == DIR_TRANSPARENT ? s_transparent_width : 0; }
+    void DrawItem(void* hDC, int x, int y, int w, int h, bool dark_mode) override { /* intentionally empty for transparent area */ }
+
+    static int s_transparent_width;  // configurable width for transparent area
 
     static wchar_t s_value_buf[2][256];
     std::unordered_map<DWORD, RecentProc> m_recent;
@@ -51,7 +58,7 @@ public:
     OptionReturn ShowOptionsDialog(void* hParent) override;
 
 private:
-    CProcessNetItem m_items[2];
+    CProcessNetItem m_items[3];
     ITrafficMonitor* m_app = nullptr;
     ULONGLONG m_last_time = 0;
     bool m_started = false;

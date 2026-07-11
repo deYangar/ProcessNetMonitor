@@ -370,6 +370,28 @@ void CDetailWindow::RecordHistory(const std::vector<ProcTraffic>& stats) {
     if (++compress_counter >= 60) { compress_counter = 0; CompressHistory(); }
 }
 
+void CDetailWindow::ClearHistory() {
+    m_history.clear();
+    m_last_cum.clear();
+    m_rows.clear();
+    m_hist_total_recv = 0;
+    m_hist_total_sent = 0;
+    m_history_start_tick = WallClockMs();
+    m_history_dirty = true;
+
+    // Delete history file
+    if (!m_config_dir.empty()) {
+        wchar_t path[MAX_PATH];
+        swprintf_s(path, MAX_PATH, L"%s\\history.dat", m_config_dir.c_str());
+        DeleteFileW(path);
+    }
+
+    // Save empty history to reset file
+    SaveHistory();
+
+    if (m_visible) InvalidateRect(m_hwnd, NULL, FALSE);
+}
+
 void CDetailWindow::CompressHistory() {
     ULONGLONG now = WallClockMs();
     for (auto& [name, h] : m_history) {
@@ -909,6 +931,7 @@ void CDetailWindow::SaveSettings() {
         fprintf(f, "%s\"%s\"", i > 0 ? ", " : "", range);
     }
     fprintf(f, "]\n");
+    fprintf(f, "  \"transparent_width\": %d\n", m_transparent_width);
     fprintf(f, "}\n");
     fclose(f);
 }
@@ -984,6 +1007,17 @@ void CDetailWindow::LoadSettings() {
             }
         }
         if (m_tun_ranges.empty()) m_tun_ranges = { L"198.18.0.0/15" };
+    }
+    // Parse transparent_width
+    {
+        size_t pos = json.find("\"transparent_width\"");
+        if (pos != std::string::npos) {
+            pos = json.find(':', pos);
+            if (pos != std::string::npos) {
+                int tw = atoi(json.c_str() + pos + 1);
+                if (tw >= 0 && tw <= 500) m_transparent_width = tw;
+            }
+        }
     }
 }
 
@@ -1270,6 +1304,14 @@ void CDetailWindow::OnLButtonDown(int x, int y) {
                 }
                 return;
             }
+        }
+        // Clear history button
+        if (PtInRect(&m_rcClearBtn, { x, y })) {
+            int ret = MessageBoxW(m_hwnd, L"\u786E\u5B9A\u8981\u6E05\u9664\u6240\u6709\u5386\u53F2\u6D41\u91CF\u6570\u636E\u5417\uFF1F", L"\u6E05\u9664\u6570\u636E", MB_YESNO | MB_ICONQUESTION);
+            if (ret == IDYES) {
+                ClearHistory();
+            }
+            return;
         }
     }
 
@@ -1590,6 +1632,27 @@ void CDetailWindow::DrawTimeRangeButtons(HDC hdc, int w, int y) {
 
         x += bw + 6;
     }
+
+    // Clear history button (right-aligned)
+    const wchar_t* clear_label = L"\u6E05\u9664\u6570\u636E";
+    SIZE clear_sz;
+    GetTextExtentPoint32W(hdc, clear_label, (int)wcslen(clear_label), &clear_sz);
+    int clear_bw = clear_sz.cx + 16;
+    m_rcClearBtn = { w - PADDING - clear_bw, y + 3, w - PADDING, y + TIME_RANGE_H - 3 };
+
+    HBRUSH hClearBrush = CreateSolidBrush(RGB(220, 53, 69));
+    HPEN hClearPen = CreatePen(PS_SOLID, 1, RGB(220, 53, 69));
+    HBRUSH hOldBrush2 = (HBRUSH)SelectObject(hdc, hClearBrush);
+    HPEN hOldPen2 = (HPEN)SelectObject(hdc, hClearPen);
+    RoundRect(hdc, m_rcClearBtn.left, m_rcClearBtn.top,
+              m_rcClearBtn.right, m_rcClearBtn.bottom, 4, 4);
+    SelectObject(hdc, hOldBrush2);
+    SelectObject(hdc, hOldPen2);
+    DeleteObject(hClearBrush);
+    DeleteObject(hClearPen);
+
+    SetTextColor(hdc, RGB(255, 255, 255));
+    DrawTextW(hdc, clear_label, -1, &m_rcClearBtn, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
 
     SelectObject(hdc, hOldFont);
 }
