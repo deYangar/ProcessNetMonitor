@@ -62,6 +62,7 @@ private:
     ITrafficMonitor* m_app = nullptr;
     ULONGLONG m_last_time = 0;
     bool m_started = false;
+    ULONGLONG m_last_start_attempt = 0;  // throttle capture Start() retries
     wchar_t m_tooltip[2048] = L"";
     static CProcessNetPlugin s_instance;
 

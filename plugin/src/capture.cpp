@@ -3,6 +3,7 @@
 #include <tlhelp32.h>
 #include <algorithm>
 #include <set>
+#include <stdarg.h>
 
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "ws2_32.lib")
@@ -129,6 +130,17 @@ std::vector<std::string> PacketCapture::ReadTMAdapterConfig() {
         }
     }
 
+    // Log adapter selection when it changes (for remote diagnostics)
+    std::string sel_key;
+    for (auto& ip : result) sel_key += ip + ";";
+    if (sel_key != m_last_logged_selection) {
+        m_last_logged_selection = sel_key;
+        if (result.empty())
+            WriteLog("adapter selection: NONE (no usable adapter found)");
+        else
+            WriteLog("adapter selection:\n" + log_text);
+    }
+
     return result;
 }
 
@@ -136,8 +148,7 @@ void PacketCapture::RebindSockets(const std::vector<std::string>& new_ips) {
     // Build bind key to detect changes
     std::string new_key;
     for (auto& ip : new_ips) new_key += ip + ";";
-    if (new_key == m_last_bind_key) return;  // no change
-    m_last_bind_key = new_key;
+    if (new_key == m_last_bind_key && !m_socks.empty()) return;  // no change and sockets healthy
 
     // Store local IPs for packet direction detection
     m_local_ips.clear();
@@ -151,24 +162,35 @@ void PacketCapture::RebindSockets(const std::vector<std::string>& new_ips) {
     for (auto& s : m_socks) { if (s != INVALID_SOCKET) closesocket(s); }
     m_socks.clear();
 
-    // Create new sockets
+    // Create new sockets (track last failure stage + WSA error code)
+    int fail_stage = 0, wsa_err = 0;
     for (auto& ip : new_ips) {
         SOCKET s = socket(AF_INET, SOCK_RAW, IPPROTO_IP);
-        if (s == INVALID_SOCKET) continue;
+        if (s == INVALID_SOCKET) { fail_stage = 1; wsa_err = WSAGetLastError(); continue; }
         sockaddr_in addr = {};
         addr.sin_family = AF_INET;
         inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
         if (bind(s, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
-            closesocket(s); continue;
+            fail_stage = 2; wsa_err = WSAGetLastError(); closesocket(s); continue;
         }
         int optval = 1;
         DWORD bytesReturned = 0;
         if (WSAIoctl(s, SIO_RCVALL, &optval, sizeof(optval), NULL, 0, &bytesReturned, NULL, NULL) == SOCKET_ERROR) {
-            closesocket(s); continue;
+            fail_stage = 3; wsa_err = WSAGetLastError(); closesocket(s); continue;
         }
         int timeout = 500;
         setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
         m_socks.push_back(s);
+    }
+
+    if (!m_socks.empty()) {
+        m_last_bind_key = new_key;  // commit key only on success
+        m_fail_stage = 0;
+        m_last_wsa_error = 0;
+    } else {
+        m_last_bind_key.clear();    // leave key uncommitted so next round actually retries
+        m_fail_stage = fail_stage;
+        m_last_wsa_error = wsa_err;
     }
 }
 
@@ -225,15 +247,39 @@ std::wstring PacketCapture::GetProcessPath(DWORD pid) {
 bool PacketCapture::Start() {
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-        wcscpy_s(m_error, L"WSAStartup failed"); return false;
+        SetError(L"\u7f51\u7edc\u521d\u59cb\u5316\u5931\u8d25", L"WSAStartup \u5931\u8d25\uff08\u9519\u8bef\u7801 %d\uff09\u3002Windows \u7f51\u7edc\u7ec4\u4ef6\u5f02\u5e38\uff0c\u8bf7\u5c1d\u8bd5\u91cd\u542f\u7535\u8111\u3002", WSAGetLastError());
+        LogStartupFailure();
+        return false;
     }
 
     auto bind_ips = ReadTMAdapterConfig();
-    if (bind_ips.empty()) { wcscpy_s(m_error, L"No adapter found"); WSACleanup(); return false; }
+    if (bind_ips.empty()) {
+        SetError(L"\u672a\u627e\u5230\u53ef\u7528\u7f51\u5361", L"\u672a\u627e\u5230\u5df2\u542f\u7528\u4e14\u62e5\u6709 IPv4 \u5730\u5740\u7684\u7f51\u7edc\u9002\u914d\u5668\u3002\u8bf7\u68c0\u67e5\u7f51\u7edc\u8fde\u63a5\uff0c\u6216\u67e5\u770b TrafficMonitor \u7684\u300c\u8fde\u63a5\u300d\u8bbe\u7f6e\u3002");
+        LogStartupFailure();
+        WSACleanup(); return false;
+    }
 
     RebindSockets(bind_ips);
     if (m_socks.empty()) {
-        swprintf_s(m_error, L"Raw socket failed. Run as Admin?");
+        int wsa = m_last_wsa_error;
+        switch (m_fail_stage) {
+        case 1:  // socket() failed
+            if (wsa == WSAEACCES)
+                SetError(L"\u9700\u8981\u7ba1\u7406\u5458\u6743\u9650", L"\u521b\u5efa\u539f\u59cb\u5957\u63a5\u5b57\u88ab\u62d2\u7edd\uff08WSAError 10013\uff09\u3002\u672c\u63d2\u4ef6\u901a\u8fc7\u539f\u59cb\u5957\u63a5\u5b57\u6293\u53d6\u6570\u636e\u5305\uff0c\u9700\u8981\u7ba1\u7406\u5458\u6743\u9650\u3002\n\u89e3\u51b3\u65b9\u6cd5\uff1a\u53f3\u952e TrafficMonitor \u2192 \u4ee5\u7ba1\u7406\u5458\u8eab\u4efd\u8fd0\u884c\u3002\n\u82e5\u5df2\u662f\u7ba1\u7406\u5458\u8fd0\u884c\uff0c\u8bf7\u68c0\u67e5\u706b\u7ed2/360 \u7b49\u5b89\u5168\u8f6f\u4ef6\u662f\u5426\u62e6\u622a\u539f\u59cb\u5957\u63a5\u5b57\u3002");
+            else
+                SetError(L"\u5957\u63a5\u5b57\u521b\u5efa\u5931\u8d25", L"\u521b\u5efa\u539f\u59cb\u5957\u63a5\u5b57\u5931\u8d25\uff08WSAError %d\uff09\u3002\u8bf7\u5c1d\u8bd5\u4ee5\u7ba1\u7406\u5458\u8eab\u4efd\u8fd0\u884c TrafficMonitor\uff0c\u6216\u68c0\u67e5\u5b89\u5168\u8f6f\u4ef6\u8bbe\u7f6e\u3002", wsa);
+            break;
+        case 2:  // bind() failed
+            SetError(L"\u7ed1\u5b9a\u7f51\u5361\u5931\u8d25", L"\u7ed1\u5b9a\u7f51\u5361 IP \u5931\u8d25\uff08WSAError %d\uff09\u3002\u7f51\u5361 IP \u53ef\u80fd\u5df2\u53d8\u5316\uff0c\u63d2\u4ef6\u5c06\u81ea\u52a8\u91cd\u8bd5\u3002", wsa);
+            break;
+        case 3:  // WSAIoctl(SIO_RCVALL) failed
+            SetError(L"\u6293\u5305\u88ab\u62d2\u7edd", L"\u5f00\u542f\u6293\u5305\u6a21\u5f0f\u5931\u8d25\uff08SIO_RCVALL\uff0cWSAError %d\uff09\u3002\u901a\u5e38\u662f\u6743\u9650\u4e0d\u8db3\u6216\u88ab\u5b89\u5168\u8f6f\u4ef6\u62e6\u622a\u3002\n\u89e3\u51b3\u65b9\u6cd5\uff1a\u53f3\u952e TrafficMonitor \u2192 \u4ee5\u7ba1\u7406\u5458\u8eab\u4efd\u8fd0\u884c\u3002", wsa);
+            break;
+        default:
+            SetError(L"\u6293\u5305\u542f\u52a8\u5931\u8d25", L"\u65e0\u6cd5\u521b\u5efa\u4efb\u4f55\u6293\u5305\u5957\u63a5\u5b57\u3002\u8bf7\u5c1d\u8bd5\u4ee5\u7ba1\u7406\u5458\u8eab\u4efd\u8fd0\u884c TrafficMonitor\u3002");
+            break;
+        }
+        LogStartupFailure();
         WSACleanup(); return false;
     }
 
@@ -251,6 +297,51 @@ void PacketCapture::Stop() {
     if (m_capture_thread.joinable()) m_capture_thread.join();
     if (m_conn_thread.joinable()) m_conn_thread.join();
     WSACleanup();
+}
+
+// ============================================================
+// Error reporting & diagnostics log
+// ============================================================
+
+void PacketCapture::SetError(const wchar_t* short_msg, const wchar_t* detail_fmt, ...) {
+    wcsncpy_s(m_error, short_msg, _TRUNCATE);
+    va_list args;
+    va_start(args, detail_fmt);
+    _vsnwprintf_s(m_error_detail, _countof(m_error_detail), _TRUNCATE, detail_fmt, args);
+    va_end(args);
+}
+
+void PacketCapture::WriteLog(const std::string& text) {
+    if (m_log_dir.empty()) return;
+    CreateDirectoryW(m_log_dir.c_str(), NULL);
+    std::wstring path = m_log_dir + L"\\capture.log";
+    FILE* f = _wfopen(path.c_str(), L"a, ccs=UTF-8");
+    if (!f) return;
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    fwprintf_s(f, L"[%04d-%02d-%02d %02d:%02d:%02d] ", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, NULL, 0);
+    if (wlen > 1) {
+        std::wstring wtext(wlen - 1, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, &wtext[0], wlen);
+        fputws(wtext.c_str(), f);
+    }
+    fputwc(L'\n', f);
+    fclose(f);
+}
+
+void PacketCapture::LogStartupFailure() {
+    if (m_log_dir.empty()) return;
+    std::wstring err_key = std::wstring(m_error) + L"|" + m_error_detail;
+    if (err_key == m_last_logged_error) return;  // dedupe: log each distinct error once
+    m_last_logged_error = err_key;
+    auto to_u8 = [](const wchar_t* w) {
+        int len = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
+        std::string s;
+        if (len > 1) { s.resize(len - 1); WideCharToMultiByte(CP_UTF8, 0, w, -1, &s[0], len, NULL, NULL); }
+        return s;
+    };
+    WriteLog("START FAILED: " + to_u8(m_error) + " | " + to_u8(m_error_detail));
 }
 
 // ============================================================

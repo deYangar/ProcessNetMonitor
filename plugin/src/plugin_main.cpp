@@ -139,11 +139,18 @@ void CProcessNetPlugin::DataRequired() {
         m_items[0].Init(CProcessNetItem::DIR_UPLOAD);
         m_items[1].Init(CProcessNetItem::DIR_DOWNLOAD);
         m_items[2].Init(CProcessNetItem::DIR_TRANSPARENT);
-        m_started = m_capture.Start();
-        m_last_time = GetTickCount64();
+        // Retry Start() at most every 10 seconds (not every tick)
+        ULONGLONG now = GetTickCount64();
+        if (m_last_start_attempt == 0 || now - m_last_start_attempt >= 10000) {
+            m_last_start_attempt = now;
+            m_started = m_capture.Start();
+            m_last_time = now;
+        }
         if (!m_started) {
             swprintf_s(CProcessNetItem::s_value_buf[0], 256, L"ERR: %s", m_capture.GetLastError());
             swprintf_s(CProcessNetItem::s_value_buf[1], 256, L"ERR: %s", m_capture.GetLastError());
+            swprintf_s(m_tooltip, 2048, L"Process Net Monitor\n\u26a0 \u542f\u52a8\u5931\u8d25\uff1a%s\n\n%s",
+                       m_capture.GetLastError(), m_capture.GetErrorDetail());
         }
         return;
     }
@@ -214,7 +221,7 @@ const wchar_t* CProcessNetPlugin::GetInfo(PluginInfoIndex i) {
     case TMI_DESCRIPTION: return L"Per-process network speed";
     case TMI_AUTHOR: return L"Aemeath";
     case TMI_COPYRIGHT: return L"MIT";
-    case TMI_VERSION: return L"1.8.0";
+    case TMI_VERSION: return L"1.8.1";
     case TMI_URL: return L"https://github.com";
     default: return L"";
     }
@@ -237,6 +244,7 @@ void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
     if (cfg_base && cfg_base[0]) {
         std::wstring cfg_dir = std::wstring(cfg_base) + L"\\ProcessNetMonitor";
         m_detail.SetConfigDir(cfg_dir.c_str());
+        m_capture.SetLogDir(cfg_dir);  // capture.log for diagnostics
     }
     m_detail.LoadHistory();
     m_detail.LoadSettings();
