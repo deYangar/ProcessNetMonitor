@@ -123,6 +123,19 @@ ProcessNetMonitor/
 
 ## 版本历史
 
+### v1.9.0 (2026-08-01)
+- **修复悬浮窗触发不稳定**（#2）：重写 hover 状态机，改用 popup 窗口 100ms 定时器驱动（不再依赖 TM 的 1 秒 DataRequired 回调）。悬停 400ms 显示，离开 300ms 隐藏，行为稳定可预测
+- **任务栏点击固定/取消固定**：点击任务栏插件区域弹出悬浮窗并固定（鼠标离开不消失），再次点击或右键取消固定
+- **修复多屏定位错误**（#2）：悬浮窗和详情窗口现在使用 `MonitorFromRect + GetMonitorInfoW` 定位，在锚点所在显示器的工作区内计算弹出方向和边界约束，不再写死主屏
+- **修复高 DPI 文字过小**（#4）：
+  - 详情窗口字体截断 bug 修复：`int s = (int)m_dpi_scale` 改为浮点乘法 `(int)(-14 * m_dpi_scale)`，125%/150%/175% 缩放下字体正确缩放
+  - 悬浮窗补全套 DPI 适配：字体、行高、padding、图标尺寸、最小宽度全部按所在显示器 DPI 缩放
+  - 每次显示时通过 `shcore!GetDpiForMonitor(MDT_EFFECTIVE_DPI)` 取目标显示器 DPI（与 TM 自身的 DPIFromRect 相同做法）
+- **详情窗口多屏居中**：打开详情窗口时在父窗口所在显示器居中，不再固定主屏
+- **删除遗留调试日志**：移除 `pnm_hover2.log` 写盘
+- **已知限制**：Win11 任务栏上 TM 原生文本 tooltip 层级异常（被任务栏遮挡只剩一行），此为 TM 框架层问题，插件无法修复。建议在 TM 设置中关闭「显示鼠标提示」以消除干扰
+- **ETW 调查结论**（2026-08-01）：Win11 25H2（build 26200）上 NT Kernel Logger 的 TcpIpSend/TcpIpRecv 事件 `size` 字段恒为 0（TDH API 确认）；Microsoft-Windows-TCPIP 提供程序只有连接/状态事件，无字节计数。用户态 ETW 无法实现每进程字节统计，火绒级精度需内核驱动（WFP callout / NDIS filter）。当前方案保持 EStats（TCP）+ raw socket（UDP）
+
 ### v1.8.1 (2026-07-24)
 - **修复任务栏错误提示乱码**：未以管理员身份运行 TrafficMonitor 时，任务栏原先显示被截断成天书的英文错误（用户反馈的 "ERR: RRW SOOKET FAILE"），现改为简短中文提示 `ERR: 需要管理员权限`
 - **错误信息细分**：区分权限不足（WSAEACCES 10013）、网卡绑定失败、抓包被拒（SIO_RCVALL）、无可用网卡四种情况；鼠标悬停任务栏插件时显示详细错误说明和解决方法

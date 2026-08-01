@@ -195,19 +195,7 @@ bool CDetailWindow::Initialize(HINSTANCE hInst) {
     return true;
 }
 
-void CDetailWindow::UpdateDpiScale(HWND hwnd) {
-    if (hwnd == nullptr) hwnd = m_hwnd;
-    int dpi = 96;
-    // Prefer GetDpiForWindow (works even if process is not DPI-aware)
-    HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
-    if (hUser32 && hwnd) {
-        typedef UINT (WINAPI *PFN_GetDpiForWindow)(HWND);
-        auto pfn = (PFN_GetDpiForWindow)GetProcAddress(hUser32, "GetDpiForWindow");
-        if (pfn) dpi = pfn(hwnd);
-    }
-    if (dpi == 0) dpi = 96;
-    m_dpi_scale = dpi / 96.0f;
-    
+void CDetailWindow::ApplyLayoutScale() {
     TITLE_BAR_H      = (int)(BASE_TITLE_BAR_H * m_dpi_scale);
     TAB_BAR_H        = (int)(BASE_TAB_BAR_H * m_dpi_scale);
     TIME_RANGE_H     = (int)(BASE_TIME_RANGE_H * m_dpi_scale);
@@ -239,6 +227,31 @@ void CDetailWindow::UpdateDpiScale(HWND hwnd) {
     }
 }
 
+void CDetailWindow::UpdateDpiScale(HWND hwnd) {
+    if (hwnd == nullptr) hwnd = m_hwnd;
+    int dpi = 96;
+    // Prefer GetDpiForWindow (works even if process is not DPI-aware)
+    HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
+    if (hUser32 && hwnd) {
+        typedef UINT (WINAPI *PFN_GetDpiForWindow)(HWND);
+        auto pfn = (PFN_GetDpiForWindow)GetProcAddress(hUser32, "GetDpiForWindow");
+        if (pfn) dpi = pfn(hwnd);
+    }
+    if (dpi == 0) dpi = 96;
+    m_dpi_scale = dpi / 96.0f;
+    ApplyLayoutScale();
+}
+
+void CDetailWindow::UpdateDpiScaleForRect(const RECT& rc) {
+    // Per-monitor DPI via shcore (same approach as TM's own DPIFromRect) -
+    // reliable per target monitor, e.g. when the window opens on a secondary
+    // monitor with different scaling.
+    float s = PNM_GetDpiScaleForRect(rc);
+    if (s < 0.5f) s = 1.0f;
+    m_dpi_scale = s;
+    ApplyLayoutScale();
+}
+
 void CDetailWindow::CreateFonts() {
     if (m_font_title) DeleteObject(m_font_title);
     if (m_font_row) DeleteObject(m_font_row);
@@ -246,20 +259,23 @@ void CDetailWindow::CreateFonts() {
     if (m_font_small) DeleteObject(m_font_small);
     if (m_font_time) DeleteObject(m_font_time);
     
-    int s = (int)m_dpi_scale;
-    m_font_title  = CreateFontW(-14*s, 0,0,0, FW_SEMIBOLD, FALSE,FALSE,FALSE,
+    // NOTE: use float scaling here. The old code did `int s = (int)m_dpi_scale;`
+    // which truncated 1.5 -> 1, leaving fonts unscaled at 125%/150%/175% DPI
+    // while the layout grew -> tiny text (issue #4).
+    float s = m_dpi_scale;
+    m_font_title  = CreateFontW((int)(-14*s), 0,0,0, FW_SEMIBOLD, FALSE,FALSE,FALSE,
                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                 CLEARTYPE_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Microsoft YaHei");
-    m_font_row    = CreateFontW(-14*s, 0,0,0, FW_NORMAL, FALSE,FALSE,FALSE,
+    m_font_row    = CreateFontW((int)(-14*s), 0,0,0, FW_NORMAL, FALSE,FALSE,FALSE,
                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                 CLEARTYPE_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Microsoft YaHei");
-    m_font_header = CreateFontW(-13*s, 0,0,0, FW_SEMIBOLD, FALSE,FALSE,FALSE,
+    m_font_header = CreateFontW((int)(-13*s), 0,0,0, FW_SEMIBOLD, FALSE,FALSE,FALSE,
                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                 CLEARTYPE_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Microsoft YaHei");
-    m_font_small  = CreateFontW(-11*s, 0,0,0, FW_NORMAL, FALSE,FALSE,FALSE,
+    m_font_small  = CreateFontW((int)(-11*s), 0,0,0, FW_NORMAL, FALSE,FALSE,FALSE,
                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                 CLEARTYPE_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Microsoft YaHei");
-    m_font_time   = CreateFontW(-12*s, 0,0,0, FW_NORMAL, FALSE,FALSE,FALSE,
+    m_font_time   = CreateFontW((int)(-12*s), 0,0,0, FW_NORMAL, FALSE,FALSE,FALSE,
                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                 CLEARTYPE_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Microsoft YaHei");
 }
@@ -298,12 +314,25 @@ void CDetailWindow::Show(HWND parent_wnd) {
         m_br_child = CreateSolidBrush(m_dark_mode ? RGB(36, 36, 40) : RGB(247, 247, 247));
     }
 
-    int sw = GetSystemMetrics(SM_CXSCREEN);
-    int sh = GetSystemMetrics(SM_CYSCREEN);
-    int w = min((int)(720 * m_dpi_scale), sw - 100);
-    int h = min((int)(560 * m_dpi_scale), sh - 100);
-    int x = (sw - w) / 2;
-    int y = (sh - h) / 2;
+    // Center on the monitor that contains the parent window (multi-monitor fix:
+    // previously always centered on the primary screen, so a detail window opened
+    // from a popup on a secondary monitor landed on the primary one).
+    RECT ref_rc = { 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN) };
+    if (parent_wnd && IsWindow(parent_wnd))
+        GetWindowRect(parent_wnd, &ref_rc);
+    RECT work, mon;
+    PNM_GetWorkAreaForRect(ref_rc, work, mon);
+
+    // Adopt the target monitor's DPI before computing the window size
+    UpdateDpiScaleForRect(ref_rc);
+    RecreateGdiObjects();
+
+    int aw = work.right - work.left;
+    int ah = work.bottom - work.top;
+    int w = min((int)(720 * m_dpi_scale), aw - 40);
+    int h = min((int)(560 * m_dpi_scale), ah - 40);
+    int x = work.left + (aw - w) / 2;
+    int y = work.top + (ah - h) / 2;
 
     SetWindowPos(m_hwnd, HWND_TOPMOST, x, y, w, h, SWP_SHOWWINDOW | SWP_NOACTIVATE);
     ShowWindow(m_hwnd, SW_SHOWNOACTIVATE);

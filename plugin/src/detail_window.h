@@ -225,6 +225,8 @@ private:
     int m_hovered_col = -1;
     float m_dpi_scale = 1.0f;
     void UpdateDpiScale(HWND hwnd = nullptr);
+    void UpdateDpiScaleForRect(const RECT& rc);  // per-monitor DPI for a target rect
+    void ApplyLayoutScale();
     void CreateFonts();
     void RecreateGdiObjects();
     bool m_hovering_close = false;

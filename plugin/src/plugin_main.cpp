@@ -40,23 +40,41 @@ int CProcessNetItem::OnMouseEvent(MouseEventType type, int x, int y, void* hWnd,
 
     if (type == MT_LCLICKED) {
         if (is_taskbar) {
-            // Taskbar click: toggle tooltip popup at click position
-            POINT pt = { x, y };
-            ClientToScreen((HWND)hWnd, &pt);
-            plugin.m_popup.ToggleAtPosition(pt.x, pt.y, plugin.m_cached_up, plugin.m_cached_down);
-            plugin.SetPopupClickTime(GetTickCount64());
+            // Taskbar click = pin/unpin the popup.
+            // Pinned popup survives mouse leave; clicking again dismisses it.
+            if (plugin.m_popup.IsVisible() && plugin.m_popup_pinned) {
+                plugin.m_popup_pinned = false;
+                plugin.m_popup.Hide();
+            } else {
+                POINT pt = { x, y };
+                ClientToScreen((HWND)hWnd, &pt);
+                RECT wr;
+                GetWindowRect((HWND)hWnd, &wr);
+                // Anchor band around the click point, spanning the taskbar window height
+                int half = 60;
+                RECT anchor = { pt.x - half, wr.top, pt.x + half, wr.bottom };
+                if (anchor.left < wr.left) { anchor.left = wr.left; anchor.right = wr.left + 2 * half; }
+                if (anchor.right > wr.right) { anchor.right = wr.right; anchor.left = wr.right - 2 * half; }
+                plugin.m_popup_pinned = true;
+                plugin.ShowPopupAt(anchor);
+            }
         } else {
-            // Main window click: toggle detail window
+            // Main window click: toggle detail window (existing behavior), dismiss popup
+            plugin.m_popup_pinned = false;
+            plugin.m_popup.Hide();
             plugin.ToggleDetailWindow((HWND)hWnd);
         }
         return 1;
     }
     if (type == MT_RCLICKED) {
-        // Right-click on taskbar: hide popup
-        if (is_taskbar) {
+        // Right-click dismisses the popup; only consume the event when we actually
+        // hid something, otherwise let TM show its own context menu.
+        if (plugin.m_popup.IsVisible()) {
+            plugin.m_popup_pinned = false;
             plugin.m_popup.Hide();
+            return 1;
         }
-        return 1;
+        return 0;
     }
     if (type == MT_DBCLICKED) {
         // Double-click always opens detail window
@@ -211,8 +229,6 @@ void CProcessNetPlugin::DataRequired() {
         wcscat_s(m_tooltip, line); count++;
     }
     while (count < 5) { wcscat_s(m_tooltip, L"  -\n"); count++; }
-
-    CheckHoverAndShowPopup();
 }
 
 const wchar_t* CProcessNetPlugin::GetInfo(PluginInfoIndex i) {
@@ -221,7 +237,7 @@ const wchar_t* CProcessNetPlugin::GetInfo(PluginInfoIndex i) {
     case TMI_DESCRIPTION: return L"Per-process network speed";
     case TMI_AUTHOR: return L"Aemeath";
     case TMI_COPYRIGHT: return L"MIT";
-    case TMI_VERSION: return L"1.8.1";
+    case TMI_VERSION: return L"1.9.0";
     case TMI_URL: return L"https://github.com";
     default: return L"";
     }
@@ -339,35 +355,41 @@ static BOOL CALLBACK FindTMWindowsProc(HWND hwnd, LPARAM lp) {
     return TRUE;
 }
 
-// Get the TM floating window (not on taskbar)
-// Note: the hovered window itself must also be outside the taskbar,
-// because TM creates #32770 dialog windows in the taskbar area
-// whose parent is the main TM window.
-static HWND GetTMMainWindow(HWND hwnd) {
-    if (!hwnd) return nullptr;
-    // Check if the hovered window is in the taskbar
-    RECT rc;
-    GetWindowRect(hwnd, &rc);
-    APPBARDATA abd = { sizeof(abd) };
-    UINT state = SHAppBarMessage(ABM_GETTASKBARPOS, &abd);
-    if (state) {
-        RECT inter;
-        if (IntersectRect(&inter, &rc, &abd.rc))
-            return nullptr;  // hovered window is in taskbar area
-    }
-    HWND tm = FindTMWindowInChain(hwnd);
-    if (tm && IsTMMainWindow(tm)) return tm;
-    return nullptr;
-}
+// Classify the TM window under the cursor: main floating window or taskbar window.
+// Returns nullptr when the cursor is not over any TrafficMonitor window.
+static HWND DetectTMWindow(HWND hover_wnd, bool& is_taskbar) {
+    is_taskbar = false;
+    if (!hover_wnd) return nullptr;
 
-// Get the TM taskbar window by checking if mouse is within its rect
-static HWND GetTMTaskbarByPoint(const POINT& pt) {
-    FindTMWindowsCtx ctx;
-    EnumWindows(FindTMWindowsProc, reinterpret_cast<LPARAM>(&ctx));
-    if (!ctx.taskbar_wnd) return nullptr;
-    RECT rc;
-    GetWindowRect(ctx.taskbar_wnd, &rc);
-    if (PtInRect(&rc, pt)) return ctx.taskbar_wnd;
+    // TM's taskbar window is an MFC dialog with class "#32770" and window text
+    // "TrafficMonitorTaskbarWindow". Its parent is the main TM window.
+    // We must check the hovered window itself BEFORE walking the parent chain,
+    // otherwise FindTMWindowInChain returns the parent (main window) and we
+    // lose the taskbar context.
+    wchar_t wnd_text[256] = {};
+    GetWindowTextW(hover_wnd, wnd_text, 256);
+    wchar_t hover_cls[64] = {};
+    GetClassNameW(hover_wnd, hover_cls, 64);
+
+    if (wcsstr(wnd_text, L"TrafficMonitorTaskbarWindow") != nullptr ||
+        (wcscmp(hover_cls, L"#32770") == 0 && wcsstr(wnd_text, L"TrafficMonitor") != nullptr)) {
+        // This is the taskbar dialog. Its parent is the main TM window.
+        HWND parent = GetParent(hover_wnd);
+        if (parent) {
+            wchar_t pcls[64] = {};
+            GetClassNameW(parent, pcls, 64);
+            if (wcsncmp(pcls, L"TrafficMonitor", 14) == 0) {
+                is_taskbar = true;
+                return parent;  // return the main TM window handle
+            }
+        }
+    }
+
+    // Fallback: walk parent chain for the main floating window
+    HWND tm = FindTMWindowInChain(hover_wnd);
+    if (!tm) return nullptr;
+    if (IsTMTaskbarWindow(tm)) { is_taskbar = true; return tm; }
+    if (IsTMMainWindow(tm)) return tm;
     return nullptr;
 }
 
@@ -415,65 +437,95 @@ void CProcessNetPlugin::GetProcessDisplayInfo(
         out.resize(CTooltipPopup::MAX_SHOW);
 }
 
-void CProcessNetPlugin::CheckHoverAndShowPopup() {
+// ============================================================
+// Hover state machine (100ms WM_TIMER on the popup window)
+// ============================================================
+//
+// Behavior:
+//   - Hover a TM window (floating main window or taskbar window) for 400ms
+//     -> popup shows, anchored to that window.
+//   - Move onto the popup itself -> stays open (user can click "查看详细").
+//   - Leave everything -> popup hides after a 300ms grace period.
+//   - Click on the taskbar item -> pins the popup (survives mouse leave);
+//     click again / right-click -> dismisses. See OnMouseEvent.
+
+void CProcessNetPlugin::ShowPopupAt(const RECT& anchor) {
+    std::vector<CTooltipPopup::ProcDisplayInfo> procs;
+    GetProcessDisplayInfo(procs, m_cached_stats);
+    m_popup_anchor = anchor;
+    m_popup.UpdateAndShow(procs, m_cached_up, m_cached_down, anchor);
+}
+
+void CProcessNetPlugin::HoverTick() {
     if (!m_popup_created) return;
 
     ULONGLONG now = GetTickCount64();
-    int interval = m_was_hovering ? 80 : 300;
-    if (now - m_last_hover_check < (ULONGLONG)interval) return;
-    m_last_hover_check = now;
 
     POINT pt;
     GetCursorPos(&pt);
     HWND hover_wnd = WindowFromPoint(pt);
+    bool over_popup = (hover_wnd == m_popup.GetHwnd()) || m_popup.IsHovering();
 
-    bool over_popup = (hover_wnd == m_popup.GetHwnd());
+    bool is_taskbar = false;
+    HWND tm_wnd = DetectTMWindow(hover_wnd, is_taskbar);
 
-    // Only detect hover on the main floating window
-    // (taskbar uses click-based popup via OnMouseEvent instead)
-    HWND tm_wnd = GetTMMainWindow(hover_wnd);
-
-    // Debug logging
-    static FILE* s_dbg2 = nullptr;
-    if (!s_dbg2) s_dbg2 = _wfopen(L"C:\\Users\\Public\\Temp\\pnm_hover2.log", L"w");
-    if (s_dbg2) {
-        wchar_t cls[64] = {};
-        GetClassNameW(hover_wnd, cls, 64);
-        RECT rc; GetWindowRect(hover_wnd, &rc);
-        wchar_t tm_cls[64] = {};
-        if (tm_wnd) GetClassNameW(tm_wnd, tm_cls, 64);
-        fwprintf(s_dbg2, L"hover=%p cls=%s rect=(%d,%d,%d,%d) tm_wnd=%p tm_cls=%s over_popup=%d\n",
-            hover_wnd, cls, rc.left, rc.top, rc.right, rc.bottom,
-            tm_wnd, tm_cls, over_popup);
-        fflush(s_dbg2);
-    }
-
-    // Check if mouse is over the taskbar area
-    bool over_taskbar = false;
-    {
-        APPBARDATA abd = { sizeof(abd) };
-        UINT state = SHAppBarMessage(ABM_GETTASKBARPOS, &abd);
-        if (state) over_taskbar = PtInRect(&abd.rc, pt) != 0;
-    }
-
+    // --- show / hide state machine ---
     if (tm_wnd) {
-        RECT wnd_rect;
-        GetWindowRect(tm_wnd, &wnd_rect);
+        // Cursor over a TrafficMonitor window
+        m_hover_leave_tick = 0;
+        if (tm_wnd != m_hover_target) {
+            // Switched target window: restart the hover delay
+            m_hover_target = tm_wnd;
+            m_hover_is_taskbar = is_taskbar;
+            m_hover_start_tick = now;
+        }
+        if (!m_popup.IsVisible() && now - m_hover_start_tick >= 400) {
+            RECT anchor;
+            if (is_taskbar) {
+                // Use the actual taskbar dialog rect (hover_wnd), not the parent
+                // main window rect (tm_wnd). The parent is the floating main window
+                // which lives on the desktop, not in the taskbar.
+                RECT wr;
+                GetWindowRect(hover_wnd, &wr);
+                int half = 60;
+                anchor = { pt.x - half, wr.top, pt.x + half, wr.bottom };
+                if (anchor.left < wr.left) { anchor.left = wr.left; anchor.right = wr.left + 2 * half; }
+                if (anchor.right > wr.right) { anchor.right = wr.right; anchor.left = wr.right - 2 * half; }
+            } else {
+                GetWindowRect(tm_wnd, &anchor);
+            }
+            ShowPopupAt(anchor);
+        }
+    } else if (!over_popup) {
+        // Cursor elsewhere: start/continue the hide grace period
+        m_hover_start_tick = 0;
+        m_hover_target = nullptr;
+        if (m_popup.IsVisible() && !m_popup_pinned) {
+            if (m_hover_leave_tick == 0) {
+                m_hover_leave_tick = now;
+            } else if (now - m_hover_leave_tick >= 300) {
+                m_popup.Hide();
+            }
+        }
+    } else {
+        // Cursor on the popup itself: keep it open
+        m_hover_leave_tick = 0;
+    }
+
+    // --- data refresh while visible (lightweight: no reposition unless anchor moved) ---
+    if (m_popup.IsVisible()) {
         std::vector<CTooltipPopup::ProcDisplayInfo> procs;
         GetProcessDisplayInfo(procs, m_cached_stats);
-        m_popup.UpdateAndShow(procs, m_cached_up, m_cached_down, wnd_rect, false);
-        m_was_hovering = true;
-    } else if (over_popup) {
-        m_was_hovering = true;
-    } else if (over_taskbar && m_popup.IsVisible()) {
-        // Click-shown popup: keep visible while mouse is on the taskbar
-        m_was_hovering = true;
-    } else {
-        // Mouse left both popup and taskbar — hide
-        bool click_grace = (now - m_popup_click_time < 800);
-        if ((m_was_hovering || m_popup.IsVisible()) && !click_grace) {
-            m_popup.Hide();
-            m_was_hovering = false;
+        RECT anchor = m_popup_anchor;
+        // Follow the floating main window if it moves; taskbar/pinned keep their anchor
+        if (!m_popup_pinned && m_hover_target && !m_hover_is_taskbar && IsWindow(m_hover_target)) {
+            GetWindowRect(m_hover_target, &anchor);
+        }
+        if (!EqualRect(&anchor, &m_popup_anchor)) {
+            m_popup_anchor = anchor;
+            m_popup.UpdateAndShow(procs, m_cached_up, m_cached_down, anchor);
+        } else {
+            m_popup.UpdateData(procs, m_cached_up, m_cached_down);
         }
     }
 }

@@ -147,14 +147,12 @@ bool CTooltipPopup::Initialize(HINSTANCE hInst) {
     HRGN rgn = CreateRoundRectRgn(0, 0, 300, 400, CORNER_RADIUS * 2, CORNER_RADIUS * 2);
     SetWindowRgn(m_hwnd, rgn, FALSE);
 
-    // Pre-create cached GDI objects
-    m_font_normal = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-    m_font_small = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
-    m_pen_separator = CreatePen(PS_SOLID, 1, m_dark_mode ? RGB(45, 45, 45) : RGB(235, 235, 235));
+    // Pre-create cached GDI objects (recreated on DPI change via RecreateScaledResources)
+    RecreateScaledResources();
+
+    // Hover state machine: 100ms timer dispatched through TM's message loop
+    // (this window lives on TM's main thread)
+    SetTimer(m_hwnd, TIMER_HOVER, 100, nullptr);
 
     return true;
 }
@@ -164,6 +162,18 @@ LRESULT CTooltipPopup::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_PAINT:
         OnPaint();
         return 0;
+
+    case WM_TIMER:
+        if (wp == TIMER_HOVER)
+            CProcessNetPlugin::Instance().HoverTick();
+        return 0;
+
+    case WM_DPICHANGED: {
+        RECT* prc = (RECT*)lp;
+        if (prc) UpdateDpiScale(*prc);
+        InvalidateRect(m_hwnd, NULL, FALSE);
+        return 0;
+    }
 
     case WM_MOUSELEAVE:
         OnMouseLeave();
@@ -183,7 +193,10 @@ LRESULT CTooltipPopup::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
         {
             POINT pt = { (short)LOWORD(lp), (short)HIWORD(lp) };
             if (PtInRect(&m_rcDetailBtn, pt)) {
-                CProcessNetPlugin::Instance().ToggleDetailWindow(m_hwnd);
+                auto& plugin = CProcessNetPlugin::Instance();
+                plugin.m_popup_pinned = false;
+                plugin.ToggleDetailWindow(m_hwnd);
+                Hide();
             }
         }
         return 0;
@@ -202,7 +215,7 @@ LRESULT CTooltipPopup::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
 void CTooltipPopup::OnMouseLeave() {
     m_tracking = false;
     m_hovering = false;
-    // Don't hide immediately - let TickCheck handle it
+    // Don't hide immediately - the hover timer handles hide delays
 }
 
 // ============================================================
@@ -268,18 +281,14 @@ void CTooltipPopup::CalcLayout(HDC hdc, int& out_w, int& out_h, int& out_up_coun
 
     SelectObject(hdc, hOldFont);
 
-    int speed_area = 110;
-    out_w = PADDING + ICON_SIZE + 8 + max_text_w + 12 + speed_area + PADDING;
+    out_w = PADDING + ICON_SIZE + (int)(8 * m_dpi_scale) + max_text_w
+            + (int)(12 * m_dpi_scale) + SPEED_AREA_W + PADDING;
     out_w = max(out_w, MIN_WIDTH);
 
-    int header_h = 36;
-    int section_title_h = 26;
-    int gap = 4;
-    int btn_area_h = 28;  // "查看详细" button
-    out_h = PADDING + header_h
-            + section_title_h + up_count * ROW_HEIGHT + gap
-            + section_title_h + down_count * ROW_HEIGHT
-            + btn_area_h
+    out_h = PADDING + HEADER_H
+            + SECTION_H + up_count * ROW_HEIGHT + GAP_H
+            + SECTION_H + down_count * ROW_HEIGHT
+            + BTN_AREA_H
             + PADDING;
 }
 
@@ -305,7 +314,8 @@ void CTooltipPopup::DrawBackground(HDC hdc, int w, int h) {
 void CTooltipPopup::DrawSectionTitle(HDC hdc, int y, const wchar_t* title, bool is_upload) {
     // Section title bar with slightly different bg
     HBRUSH hBrush = CreateSolidBrush(GetSectionBgColor());
-    RECT rc = { PADDING - 2, y, 0, y + 20 }; // will set right later
+    int bar_h = (int)(20 * m_dpi_scale);
+    RECT rc = { PADDING - 2, y, 0, y + bar_h }; // will set right later
     // We'll draw a small rounded rect behind the title text
     SIZE sz;
     GetTextExtentPoint32W(hdc, title, (int)wcslen(title), &sz);
@@ -317,10 +327,11 @@ void CTooltipPopup::DrawSectionTitle(HDC hdc, int y, const wchar_t* title, bool 
     rc.right = client.right - PADDING + 2;
 
     // Use round rect for section bg
+    int radius = max(2, (int)(6 * m_dpi_scale));
     HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, hBrush);
     HPEN hNullPen = CreatePen(PS_SOLID, 0, GetSectionBgColor());
     HPEN hOldPen = (HPEN)SelectObject(hdc, hNullPen);
-    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom + 2, 6, 6);
+    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom + 2, radius, radius);
     SelectObject(hdc, hOldBrush);
     SelectObject(hdc, hOldPen);
     DeleteObject(hBrush);
@@ -332,7 +343,7 @@ void CTooltipPopup::DrawSectionTitle(HDC hdc, int y, const wchar_t* title, bool 
 
     HFONT hOldFont = (HFONT)SelectObject(hdc, m_font_small);
 
-    RECT text_rc = { PADDING + 2, y, client.right - PADDING, y + 22 };
+    RECT text_rc = { PADDING + 2, y, client.right - PADDING, y + (int)(22 * m_dpi_scale) };
     DrawTextW(hdc, title, -1, &text_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
     SelectObject(hdc, hOldFont);
@@ -370,7 +381,7 @@ void CTooltipPopup::DrawProcRow(HDC hdc, int y, const ProcDisplayInfo& proc, boo
 
     SIZE name_sz;
     GetTextExtentPoint32W(hdc, display_name.c_str(), (int)display_name.size(), &name_sz);
-    int max_name_w = client.right - PADDING - 120 - x; // leave room for speed
+    int max_name_w = client.right - PADDING - SPEED_AREA_W - (int)(10 * m_dpi_scale) - x; // leave room for speed
     if (name_sz.cx > max_name_w) {
         // Truncate with ellipsis
         while (display_name.size() > 3 && name_sz.cx > max_name_w) {
@@ -380,7 +391,7 @@ void CTooltipPopup::DrawProcRow(HDC hdc, int y, const ProcDisplayInfo& proc, boo
         }
     }
 
-    RECT name_rc = { x, y, client.right - PADDING - 100, y + ROW_HEIGHT };
+    RECT name_rc = { x, y, client.right - PADDING - SPEED_AREA_W + (int)(10 * m_dpi_scale), y + ROW_HEIGHT };
     DrawTextW(hdc, display_name.c_str(), -1, &name_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
     // 3. Speed (right-aligned, accent color)
@@ -389,7 +400,7 @@ void CTooltipPopup::DrawProcRow(HDC hdc, int y, const ProcDisplayInfo& proc, boo
     FormatSpeed(speed, spd_buf, 64);
 
     SetTextColor(hdc, GetAccentColor(is_upload));
-    RECT spd_rc = { client.right - PADDING - 110, y, client.right - PADDING, y + ROW_HEIGHT };
+    RECT spd_rc = { client.right - PADDING - SPEED_AREA_W, y, client.right - PADDING, y + ROW_HEIGHT };
     DrawTextW(hdc, spd_buf, -1, &spd_rc, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
 
     // 4. Subtle separator line
@@ -431,13 +442,13 @@ void CTooltipPopup::OnPaint() {
     FormatSpeed(m_total_up, up_str, 32);
     FormatSpeed(m_total_down, down_str, 32);
     swprintf_s(header, 128, L"\u2191 %s   \u2193 %s", up_str, down_str);
-    RECT header_rc = { PADDING, y, w - PADDING, y + 28 };
+    RECT header_rc = { PADDING, y, w - PADDING, y + HEADER_H };
     DrawTextW(memDC, header, -1, &header_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-    y += 28 + 6;
+    y += HEADER_H;
 
     // === Upload section ===
     DrawSectionTitle(memDC, y, L"\u25B2 \u5B9E\u65F6\u4E0A\u4F20", true);
-    y += 24;
+    y += SECTION_H;
 
     // Upload section: show processes with upload activity first, then fill with historical
     int up_count = 0;
@@ -462,11 +473,11 @@ void CTooltipPopup::OnPaint() {
         DrawTextW(memDC, L"\u65E0\u4E0A\u4F20\u6D41\u91CF", -1, &rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
         y += ROW_HEIGHT;
     }
-    y += 6;
+    y += GAP_H;
 
     // === Download section ===
     DrawSectionTitle(memDC, y, L"\u25BC \u5B9E\u65F6\u4E0B\u8F7D", false);
-    y += 24;
+    y += SECTION_H;
 
     // Download section: show processes with download activity first, then fill
     int down_count = 0;
@@ -490,15 +501,16 @@ void CTooltipPopup::OnPaint() {
         DrawTextW(memDC, L"\u65E0\u4E0B\u8F7D\u6D41\u91CF", -1, &rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
         y += ROW_HEIGHT;
     }
-    y += 4;
+    y += BTN_AREA_H - BTN_H;
 
     // === "\u67E5\u770B\u8BE6\u7EC6" button ===
-    m_rcDetailBtn = { PADDING, y, w - PADDING, y + 24 };
+    m_rcDetailBtn = { PADDING, y, w - PADDING, y + BTN_H };
     HBRUSH hBtnBrush = CreateSolidBrush(m_dark_mode ? RGB(50, 50, 54) : RGB(235, 235, 235));
     HPEN hBtnPen = CreatePen(PS_SOLID, 1, m_dark_mode ? RGB(70, 70, 74) : RGB(210, 210, 210));
     HBRUSH hOldBtnBrush = (HBRUSH)SelectObject(memDC, hBtnBrush);
     HPEN hOldBtnPen = (HPEN)SelectObject(memDC, hBtnPen);
-    RoundRect(memDC, m_rcDetailBtn.left, m_rcDetailBtn.top, m_rcDetailBtn.right, m_rcDetailBtn.bottom, 6, 6);
+    RoundRect(memDC, m_rcDetailBtn.left, m_rcDetailBtn.top, m_rcDetailBtn.right, m_rcDetailBtn.bottom,
+              max(2, (int)(6 * m_dpi_scale)), max(2, (int)(6 * m_dpi_scale)));
     SelectObject(memDC, hOldBtnBrush);
     SelectObject(memDC, hOldBtnPen);
     DeleteObject(hBtnBrush);
@@ -532,51 +544,49 @@ void CTooltipPopup::PositionWindow(const RECT& anchor_rect) {
     CalcLayout(hdc, pw, ph, up_c, down_c);
     ReleaseDC(m_hwnd, hdc);
 
-    // Get work area (excluding taskbar)
-    RECT work;
-    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    // Work area of the monitor that contains the anchor (multi-monitor safe,
+    // fixes popup landing on the primary screen when TM is on a secondary one)
+    RECT work, mon;
+    PNM_GetWorkAreaForRect(anchor_rect, work, mon);
 
-    // Determine taskbar position
-    APPBARDATA abd = { sizeof(abd) };
-    UINT state = SHAppBarMessage(ABM_GETTASKBARPOS, &abd);
+    int aw = anchor_rect.right - anchor_rect.left;
+    int ah = anchor_rect.bottom - anchor_rect.top;
+    int margin = max(4, (int)(4 * m_dpi_scale));
+
+    // Decide which side of the anchor to pop out from, based on which edge of
+    // the work area the anchor hugs (i.e. where the taskbar is).
+    bool at_bottom = anchor_rect.bottom >= work.bottom - 2;
+    bool at_top    = anchor_rect.top <= work.top + 2;
+    bool at_left   = anchor_rect.left <= work.left + 2;
+    bool at_right  = anchor_rect.right >= work.right - 2;
 
     int x, y;
-    int screen_w = GetSystemMetrics(SM_CXSCREEN);
-    int screen_h = GetSystemMetrics(SM_CYSCREEN);
-
-    if (state) {
-        switch (abd.uEdge) {
-        case ABE_BOTTOM: // taskbar at bottom - show popup above
-            x = anchor_rect.left + (anchor_rect.right - anchor_rect.left - pw) / 2;
-            y = anchor_rect.top - ph - 4;
-            break;
-        case ABE_TOP: // taskbar at top - show popup below
-            x = anchor_rect.left + (anchor_rect.right - anchor_rect.left - pw) / 2;
-            y = anchor_rect.bottom + 4;
-            break;
-        case ABE_LEFT: // taskbar at left - show popup to the right
-            x = anchor_rect.right + 4;
-            y = anchor_rect.top + (anchor_rect.bottom - anchor_rect.top - ph) / 2;
-            break;
-        case ABE_RIGHT: // taskbar at right - show popup to the left
-            x = anchor_rect.left - pw - 4;
-            y = anchor_rect.top + (anchor_rect.bottom - anchor_rect.top - ph) / 2;
-            break;
-        default:
-            x = anchor_rect.left;
-            y = anchor_rect.top - ph - 4;
-        }
+    if (at_bottom) {          // taskbar at bottom -> popup above anchor
+        x = anchor_rect.left + (aw - pw) / 2;
+        y = anchor_rect.top - ph - margin;
+    } else if (at_top) {      // taskbar at top -> popup below anchor
+        x = anchor_rect.left + (aw - pw) / 2;
+        y = anchor_rect.bottom + margin;
+    } else if (at_left) {     // taskbar at left -> popup right of anchor
+        x = anchor_rect.right + margin;
+        y = anchor_rect.top + (ah - ph) / 2;
+    } else if (at_right) {    // taskbar at right -> popup left of anchor
+        x = anchor_rect.left - pw - margin;
+        y = anchor_rect.top + (ah - ph) / 2;
     } else {
-        // No taskbar info - default to above anchor
-        x = anchor_rect.left;
-        y = anchor_rect.top - ph - 4;
+        // Floating window away from edges: prefer above, fall back to below
+        x = anchor_rect.left + (aw - pw) / 2;
+        if (anchor_rect.top - ph - margin >= work.top)
+            y = anchor_rect.top - ph - margin;
+        else
+            y = anchor_rect.bottom + margin;
     }
 
-    // Clamp to screen
-    if (x + pw > screen_w) x = screen_w - pw - 4;
-    if (x < 0) x = 4;
-    if (y + ph > screen_h) y = screen_h - ph - 4;
-    if (y < 0) y = 4;
+    // Clamp to the anchor's own monitor work area
+    if (x + pw > work.right) x = work.right - pw - margin;
+    if (x < work.left) x = work.left + margin;
+    if (y + ph > work.bottom) y = work.bottom - ph - margin;
+    if (y < work.top) y = work.top + margin;
 
     SetWindowPos(m_hwnd, HWND_TOPMOST, x, y, pw, ph,
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
@@ -601,10 +611,11 @@ void CTooltipPopup::PositionWindow(const RECT& anchor_rect) {
 
 void CTooltipPopup::UpdateAndShow(const std::vector<ProcDisplayInfo>& procs,
                                    double total_up, double total_down,
-                                   const RECT& item_rect, bool is_taskbar) {
+                                   const RECT& anchor_rect) {
     m_procs = procs;
     m_total_up = total_up;
     m_total_down = total_down;
+    m_last_anchor = anchor_rect;
 
     // Re-check dark mode
     bool old_dark = m_dark_mode;
@@ -615,6 +626,9 @@ void CTooltipPopup::UpdateAndShow(const std::vector<ProcDisplayInfo>& procs,
         m_pen_separator = CreatePen(PS_SOLID, 1, m_dark_mode ? RGB(45, 45, 45) : RGB(235, 235, 235));
     }
 
+    // Per-monitor DPI: the anchor may sit on another monitor with different scaling
+    UpdateDpiScale(anchor_rect);
+
     // Resize and show
     HDC hdc = GetDC(m_hwnd);
     int pw = 0, ph = 0, up_c = 0, down_c = 0;
@@ -623,8 +637,66 @@ void CTooltipPopup::UpdateAndShow(const std::vector<ProcDisplayInfo>& procs,
 
     SetWindowPos(m_hwnd, NULL, 0, 0, pw, ph, SWP_NOMOVE | SWP_NOZORDER);
 
-    PositionWindow(item_rect);
+    PositionWindow(anchor_rect);
     InvalidateRect(m_hwnd, NULL, FALSE);
+}
+
+void CTooltipPopup::UpdateData(const std::vector<ProcDisplayInfo>& procs,
+                               double total_up, double total_down) {
+    m_procs = procs;
+    m_total_up = total_up;
+    m_total_down = total_down;
+    if (m_visible) {
+        // Recalculate size: new processes may have appeared since we first showed
+        RECT old_rc;
+        GetWindowRect(m_hwnd, &old_rc);
+        int old_w = old_rc.right - old_rc.left;
+        int old_h = old_rc.bottom - old_rc.top;
+
+        HDC hdc = GetDC(m_hwnd);
+        int pw = 0, ph = 0, up_c = 0, down_c = 0;
+        CalcLayout(hdc, pw, ph, up_c, down_c);
+        ReleaseDC(m_hwnd, hdc);
+
+        if (pw != old_w || ph != old_h) {
+            // Size changed: resize and reposition (anchor may need re-clamping)
+            SetWindowPos(m_hwnd, NULL, 0, 0, pw, ph, SWP_NOMOVE | SWP_NOZORDER);
+            PositionWindow(m_last_anchor);
+        }
+        InvalidateRect(m_hwnd, NULL, FALSE);
+    }
+}
+
+void CTooltipPopup::UpdateDpiScale(const RECT& anchor_rect) {
+    float s = PNM_GetDpiScaleForRect(anchor_rect);
+    if (s < 0.5f) s = 1.0f;
+    if (fabsf(s - m_dpi_scale) < 0.01f) return;
+    m_dpi_scale = s;
+    PADDING       = (int)(BASE_PADDING * s);
+    ROW_HEIGHT    = (int)(BASE_ROW_HEIGHT * s);
+    ICON_SIZE     = (int)(BASE_ICON_SIZE * s);
+    CORNER_RADIUS = max(1, (int)(BASE_CORNER_RADIUS * s));
+    MIN_WIDTH     = (int)(BASE_MIN_WIDTH * s);
+    HEADER_H      = (int)(BASE_HEADER_H * s);
+    SECTION_H     = (int)(BASE_SECTION_H * s);
+    GAP_H         = (int)(BASE_GAP_H * s);
+    BTN_AREA_H    = (int)(BASE_BTN_AREA_H * s);
+    BTN_H         = (int)(BASE_BTN_H * s);
+    SPEED_AREA_W  = (int)(BASE_SPEED_AREA_W * s);
+    RecreateScaledResources();
+}
+
+void CTooltipPopup::RecreateScaledResources() {
+    if (m_font_normal) DeleteObject(m_font_normal);
+    if (m_font_small) DeleteObject(m_font_small);
+    if (m_pen_separator) DeleteObject(m_pen_separator);
+    m_font_normal = CreateFontW((int)(-15 * m_dpi_scale), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    m_font_small = CreateFontW((int)(-13 * m_dpi_scale), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
+    m_pen_separator = CreatePen(PS_SOLID, 1, m_dark_mode ? RGB(45, 45, 45) : RGB(235, 235, 235));
 }
 
 void CTooltipPopup::Hide() {
@@ -636,55 +708,11 @@ void CTooltipPopup::Hide() {
     }
 }
 
-void CTooltipPopup::ToggleAtPosition(int screen_x, int screen_y, double total_up, double total_down) {
-    if (m_visible) {
-        Hide();
-        return;
-    }
-    m_procs = CProcessNetPlugin::Instance().GetCachedProcDisplayInfo();
-    m_total_up = total_up;
-    m_total_down = total_down;
-
-    m_dark_mode = IsDarkMode();
-    if (m_pen_separator) DeleteObject(m_pen_separator);
-    m_pen_separator = CreatePen(PS_SOLID, 1, m_dark_mode ? RGB(45, 45, 45) : RGB(235, 235, 235));
-
-    // Create a small anchor rect centered on the click point
-    RECT anchor = { screen_x - 80, screen_y - 80, screen_x + 80, screen_y };
-    PositionWindow(anchor);
-    InvalidateRect(m_hwnd, NULL, FALSE);
-}
-
 // Public helper to get cached proc display info
 std::vector<CTooltipPopup::ProcDisplayInfo> CProcessNetPlugin::GetCachedProcDisplayInfo() {
     std::vector<CTooltipPopup::ProcDisplayInfo> out;
     GetProcessDisplayInfo(out, m_cached_stats);
     return out;
-}
-
-bool CTooltipPopup::TickCheck(HWND taskbar_wnd) {
-    // Refresh dark mode periodically
-    m_dark_mode = IsDarkMode();
-
-    if (!m_visible) return false;
-
-    // If mouse is over the popup itself, keep it visible
-    if (m_hovering) return false;
-
-    // Check if mouse is still over the plugin area
-    POINT pt;
-    GetCursorPos(&pt);
-
-    // Get the window under cursor
-    HWND hover_wnd = WindowFromPoint(pt);
-
-    // If hovering over the popup, keep it
-    if (hover_wnd == m_hwnd) return false;
-
-    // If no longer over the taskbar or plugin area, hide
-    // We'll be generous: keep visible if mouse is over the taskbar
-    // But the plugin_main should call Hide() when appropriate
-    return false;
 }
 
 

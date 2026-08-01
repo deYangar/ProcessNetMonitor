@@ -23,15 +23,14 @@ public:
     bool Initialize(HINSTANCE hInst);
 
     // Update data and show/hide popup
-    // hovered_item_rect: screen rect of the hovered plugin item
+    // anchor_rect: screen rect the popup should attach to (TM window or click area)
     void UpdateAndShow(const std::vector<ProcDisplayInfo>& procs,
                        double total_up, double total_down,
-                       const RECT& item_rect, bool is_taskbar);
+                       const RECT& anchor_rect);
+    // Update data only (no reposition); used while popup stays visible
+    void UpdateData(const std::vector<ProcDisplayInfo>& procs,
+                    double total_up, double total_down);
     void Hide();
-
-    // Call this in DataRequired() to check if we should show/hide
-    // Returns true if popup state changed
-    bool TickCheck(HWND taskbar_wnd);
 
     bool IsVisible() const { return m_visible; }
     bool IsHovering() const { return m_hovering; }
@@ -55,6 +54,10 @@ private:
     void DrawSectionTitle(HDC hdc, int y, const wchar_t* title, bool is_upload);
     void PositionWindow(const RECT& anchor_rect);
 
+    // DPI handling (per-monitor, same approach as TM's DPIFromRect)
+    void UpdateDpiScale(const RECT& anchor_rect);
+    void RecreateScaledResources();
+
     // Helpers
     bool IsDarkMode();
     COLORREF GetBgColor();
@@ -73,6 +76,7 @@ private:
     std::vector<ProcDisplayInfo> m_procs;
     double m_total_up = 0;
     double m_total_down = 0;
+    RECT m_last_anchor = {};  // anchor rect used for the current show session
 
     // Icon cache: exe_path -> HICON
     std::unordered_map<std::wstring, HICON> m_icon_cache;
@@ -86,24 +90,42 @@ private:
     bool m_dark_mode_cached = true;
     ULONGLONG m_dark_mode_tick = 0;
 
-    // Layout constants
-    static const int PADDING = 12;
-    static const int ROW_HEIGHT = 32;
-    static const int ICON_SIZE = 22;
-    static const int CORNER_RADIUS = 8;
-    static const int MIN_WIDTH = 300;
+    // Layout constants (DPI-scaled; BASE_ values are for 96 DPI / 100%)
+    int PADDING = 12;
+    int ROW_HEIGHT = 32;
+    int ICON_SIZE = 22;
+    int CORNER_RADIUS = 8;
+    int MIN_WIDTH = 300;
+    int HEADER_H = 34;      // total speed header band
+    int SECTION_H = 24;     // section title step
+    int GAP_H = 4;          // gap between upload/download sections
+    int BTN_AREA_H = 28;    // "查看详细" button band
+    int BTN_H = 24;         // button inner height
+    int SPEED_AREA_W = 110; // right-aligned speed column width
+
+    static const int BASE_PADDING = 12;
+    static const int BASE_ROW_HEIGHT = 32;
+    static const int BASE_ICON_SIZE = 22;
+    static const int BASE_CORNER_RADIUS = 8;
+    static const int BASE_MIN_WIDTH = 300;
+    static const int BASE_HEADER_H = 34;
+    static const int BASE_SECTION_H = 24;
+    static const int BASE_GAP_H = 4;
+    static const int BASE_BTN_AREA_H = 28;
+    static const int BASE_BTN_H = 24;
+    static const int BASE_SPEED_AREA_W = 110;
+
+    float m_dpi_scale = 1.0f;
 
 public:
     static const int MAX_SHOW = 5;  // max processes per section
+    static const UINT_PTR TIMER_HOVER = 1;  // 100ms hover state machine timer
 
     // Mouse tracking
     bool m_tracking = false;
 
     // "查看详细" button rect (updated in OnPaint)
     RECT m_rcDetailBtn = {};
-
-    // Toggle popup at a specific screen position (for taskbar click)
-    void ToggleAtPosition(int screen_x, int screen_y, double total_up, double total_down);
 
     static CTooltipPopup* s_instance;
 };

@@ -74,6 +74,9 @@ public:
     void ToggleDetailWindow(HWND parent_wnd);
     CTooltipPopup m_popup;
     bool m_popup_created = false;
+    bool m_popup_pinned = false;   // click-pinned: stays visible after mouse leaves
+    RECT m_popup_anchor = {};      // anchor rect of the currently shown popup
+    void ShowPopupAt(const RECT& anchor);
     CDetailWindow m_detail;
     PacketCapture m_capture;
     bool m_detail_created = false;
@@ -85,12 +88,13 @@ public:
     std::vector<CTooltipPopup::ProcDisplayInfo> GetCachedProcDisplayInfo();
 
 private:
-    ULONGLONG m_last_hover_check = 0;
-    bool m_was_hovering = false;
-    ULONGLONG m_popup_click_time = 0;  // when popup was shown by click (for hide delay)
+    // Hover state machine (driven by the popup's 100ms WM_TIMER)
+    ULONGLONG m_hover_start_tick = 0;   // when cursor entered the current TM window
+    ULONGLONG m_hover_leave_tick = 0;   // when cursor left everything (hide grace)
+    HWND m_hover_target = nullptr;      // TM window currently hovered
+    bool m_hover_is_taskbar = false;
 public:
-    void SetPopupClickTime(ULONGLONG t) { m_popup_click_time = t; }
-    void CheckHoverAndShowPopup();
+    void HoverTick();
     void GetProcessDisplayInfo(std::vector<CTooltipPopup::ProcDisplayInfo>& out,
                                const std::vector<ProcTraffic>& stats);
 };
