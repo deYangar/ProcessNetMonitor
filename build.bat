@@ -8,7 +8,7 @@ set SDKVER=10.0.26100.0
 
 :: Common flags
 set COMMON_FLAGS=/nologo /O2 /EHsc /MT /std:c++17 /utf-8 /Zi /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /D_WINDLL /Isrc
-set COMMON_LINK=/DLL /DEBUG /MAP iphlpapi.lib ws2_32.lib gdi32.lib user32.lib shell32.lib dwmapi.lib advapi32.lib
+set COMMON_LINK=/DLL /DEBUG /MAP iphlpapi.lib ws2_32.lib gdi32.lib user32.lib shell32.lib dwmapi.lib advapi32.lib tdh.lib
 
 :: Compile resource file
 set "RC=%SDK%\bin\%SDKVER%\x86\rc.exe"
@@ -37,7 +37,7 @@ set INCLUDE=%MSVC%\VC\Tools\MSVC\14.44.35207\include;%SDK%\Include\%SDKVER%\um;%
 set LIB=%MSVC%\VC\Tools\MSVC\14.44.35207\lib\x86;%SDK%\Lib\%SDKVER%\um\x86;%SDK%\Lib\%SDKVER%\ucrt\x86
 set PATH=%MSVC%\VC\Tools\MSVC\14.44.35207\bin\Hostx86\x86;%PATH%
 
-cl %COMMON_FLAGS% /FeProcessNetMonitor_x86.dll src\capture.cpp src\plugin_main.cpp src\tooltip_popup.cpp src\detail_window.cpp /link %COMMON_LINK% /OUT:ProcessNetMonitor_x86.dll
+cl %COMMON_FLAGS% /FeProcessNetMonitor_x86.dll src\capture.cpp src\plugin_main.cpp src\tooltip_popup.cpp src\detail_window.cpp src\etw_capture.cpp /link %COMMON_LINK% /OUT:ProcessNetMonitor_x86.dll
 if %ERRORLEVEL% NEQ 0 (
     echo BUILD FAILED (x86)
     exit /b 1
@@ -51,7 +51,7 @@ set INCLUDE=%MSVC%\VC\Tools\MSVC\14.44.35207\include;%SDK%\Include\%SDKVER%\um;%
 set LIB=%MSVC%\VC\Tools\MSVC\14.44.35207\lib\x64;%SDK%\Lib\%SDKVER%\um\x64;%SDK%\Lib\%SDKVER%\ucrt\x64
 set PATH=%MSVC%\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64;%PATH%
 
-cl %COMMON_FLAGS% /FeProcessNetMonitor.dll src\capture.cpp src\plugin_main.cpp src\tooltip_popup.cpp src\detail_window.cpp /link %COMMON_LINK% /OUT:ProcessNetMonitor.dll
+cl %COMMON_FLAGS% /FeProcessNetMonitor.dll src\capture.cpp src\plugin_main.cpp src\tooltip_popup.cpp src\detail_window.cpp src\etw_capture.cpp /link %COMMON_LINK% /OUT:ProcessNetMonitor.dll
 if %ERRORLEVEL% NEQ 0 (
     echo BUILD FAILED (x64)
     exit /b 1

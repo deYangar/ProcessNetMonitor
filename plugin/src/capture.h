@@ -57,9 +57,6 @@ public:
     
     // 获取指定进程的连接详情
     std::vector<ConnDetail> GetProcessConnections(DWORD pid);
-    
-    // Set TUN address ranges to skip (CIDR notation like "198.18.0.0/15")
-    void SetTunRanges(const std::vector<std::wstring>& ranges);
 
 private:
     void CaptureLoop();
@@ -135,7 +132,6 @@ private:
     
     // Query TCP byte stats from the kernel
     void QueryTcpStats();
-    std::vector<std::pair<uint32_t, uint32_t>> m_tun_cidrs;  // {network, mask} in host byte order
     
     // Debug log (disabled for release)
     // void DumpDebugLog(const std::vector<ProcTraffic>& result, double dt);

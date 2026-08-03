@@ -165,6 +165,25 @@ void CProcessNetPlugin::DataRequired() {
             m_last_time = now;
         }
         if (!m_started) {
+            if (m_etw_cap.HasData()) {
+                // ETW-only mode: legacy capture unavailable but ETW works
+                ULONGLONG n2 = GetTickCount64();
+                double dt2 = (double)(n2 - m_last_time) / 1000.0;
+                if (dt2 < 0.1) dt2 = 0.1;
+                m_last_time = n2;
+                auto stats = m_etw_cap.GetStats(dt2);
+                double su = 0, sd = 0;
+                for (auto& s : stats) { su += s.speed_up; sd += s.speed_down; }
+                m_items[0].Update(stats, su, sd);
+                m_items[1].Update(stats, su, sd);
+                m_cached_stats = stats;
+                m_cached_up = su;
+                m_cached_down = sd;
+                if (m_detail_created) m_detail.UpdateData(stats, su, sd);
+                swprintf_s(m_tooltip, 2048, L"Process Net Monitor (ETW)\nTotal: U:%.1fKB/s D:%.1fKB/s",
+                           su / 1024.0, sd / 1024.0);
+                return;
+            }
             swprintf_s(CProcessNetItem::s_value_buf[0], 256, L"ERR: %s", m_capture.GetLastError());
             swprintf_s(CProcessNetItem::s_value_buf[1], 256, L"ERR: %s", m_capture.GetLastError());
             swprintf_s(m_tooltip, 2048, L"Process Net Monitor\n\u26a0 \u542f\u52a8\u5931\u8d25\uff1a%s\n\n%s",
@@ -179,6 +198,21 @@ void CProcessNetPlugin::DataRequired() {
     m_last_time = now;
 
     auto stats = m_capture.GetStats(dt);
+
+    // ETW backend takes priority: more accurate per-process bytes (TCP+UDP,
+    // kernel attribution, works under TUN). Legacy stays warm as fallback
+    // and supplies conn_count.
+    bool etw_active = m_etw_cap.HasData();
+    if (etw_active) {
+        auto es = m_etw_cap.GetStats(dt);
+        std::map<DWORD, int> conn_by_pid;
+        for (auto& l : stats) conn_by_pid[l.pid] = l.conn_count;
+        for (auto& e : es) {
+            auto it = conn_by_pid.find(e.pid);
+            if (it != conn_by_pid.end()) e.conn_count = it->second;
+        }
+        stats = std::move(es);
+    }
     double su = 0, sd = 0;
     for (auto& s : stats) { su += s.speed_up; sd += s.speed_down; }
 
@@ -196,7 +230,7 @@ void CProcessNetPlugin::DataRequired() {
 
     // Build tooltip text (TM's default text tooltip, kept as fallback)
     wchar_t line[256];
-    wcscpy_s(m_tooltip, L"Process Net Monitor\n");
+    wcscpy_s(m_tooltip, etw_active ? L"Process Net Monitor (ETW)\n" : L"Process Net Monitor\n");
     swprintf_s(line, 256, L"Total: U:%.1fKB/s D:%.1fKB/s\n", su/1024.0, sd/1024.0);
     wcscat_s(m_tooltip, line);
 
@@ -261,13 +295,13 @@ void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
         std::wstring cfg_dir = std::wstring(cfg_base) + L"\\ProcessNetMonitor";
         m_detail.SetConfigDir(cfg_dir.c_str());
         m_capture.SetLogDir(cfg_dir);  // capture.log for diagnostics
+        // Production ETW per-process counter (attaches/starts NT Kernel Logger)
+        m_etw_cap.Start();
     }
     m_detail.LoadHistory();
     m_detail.LoadSettings();
     // Sync transparent width from settings to static member
     CProcessNetItem::s_transparent_width = m_detail.GetTransparentWidth();
-    // Pass TUN ranges from settings to capture
-    m_capture.SetTunRanges(m_detail.GetTunRanges());
     // Record history whenever GetStats is called (independent of detail panel)
     m_capture.SetOnStats([this](const std::vector<ProcTraffic>& stats) {
         m_detail.RecordHistory(stats);
@@ -540,56 +574,26 @@ static bool g_option_changed = false;
 static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE: {
-        // TUN label
-        CreateWindowW(L"STATIC", L"TUN \x5730\x5740\x6BB5\xFF08\x6BCF\x884C\x4E00\x4E2A CIDR\xFF09:",
-            WS_CHILD | WS_VISIBLE, 10, 10, 360, 20, hwnd, (HMENU)1000, nullptr, nullptr);
-        // TUN edit (multiline)
-        CreateWindowW(L"EDIT", L"",
-            WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL,
-            10, 35, 360, 80, hwnd, (HMENU)1001, nullptr, nullptr);
-
         // Transparent area width label
         CreateWindowW(L"STATIC", L"\x900F\x660E\x533A\x57DF\x5BBD\x5EA6\xFF08px\xFF0C\x4EFB\x52A1\x680F\x663E\x793A\x533A\x57DF\xFF09:",
-            WS_CHILD | WS_VISIBLE, 10, 125, 250, 20, hwnd, (HMENU)1002, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE, 10, 12, 250, 20, hwnd, (HMENU)1002, nullptr, nullptr);
         // Width edit
         wchar_t width_buf[16];
         swprintf_s(width_buf, L"%d", CProcessNetItem::s_transparent_width);
         CreateWindowW(L"EDIT", width_buf,
             WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
-            260, 123, 110, 24, hwnd, (HMENU)1003, nullptr, nullptr);
+            260, 10, 110, 24, hwnd, (HMENU)1003, nullptr, nullptr);
 
         // OK button
         CreateWindowW(L"BUTTON", L"OK",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 230, 165, 65, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 230, 50, 65, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
         // Cancel button
         CreateWindowW(L"BUTTON", L"Cancel",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 305, 165, 65, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
-        
-        // Fill edit with current ranges
-        auto ranges = CProcessNetPlugin::Instance().m_detail.GetTunRanges();
-        std::wstring text;
-        for (size_t i = 0; i < ranges.size(); i++) {
-            if (i > 0) text += L"\r\n";
-            text += ranges[i];
-        }
-        SetDlgItemTextW(hwnd, 1001, text.c_str());
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 305, 50, 65, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
         return 0;
     }
     case WM_COMMAND:
         if (LOWORD(wp) == IDOK) {
-            // Save TUN ranges
-            wchar_t buf[2048] = {};
-            GetDlgItemTextW(hwnd, 1001, buf, 2048);
-            std::vector<std::wstring> new_ranges;
-            wchar_t* ctx = nullptr;
-            wchar_t* line = wcstok_s(buf, L"\r\n", &ctx);
-            while (line) {
-                std::wstring trimmed = line;
-                while (!trimmed.empty() && iswspace(trimmed.front())) trimmed.erase(0, 1);
-                while (!trimmed.empty() && iswspace(trimmed.back())) trimmed.pop_back();
-                if (!trimmed.empty()) new_ranges.push_back(trimmed);
-                line = wcstok_s(nullptr, L"\r\n", &ctx);
-            }
             // Save transparent width
             wchar_t wbuf[16] = {};
             GetDlgItemTextW(hwnd, 1003, wbuf, 16);
@@ -599,10 +603,8 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             CProcessNetItem::s_transparent_width = new_width;
 
             auto& plugin = CProcessNetPlugin::Instance();
-            plugin.m_detail.SetTunRanges(new_ranges);
             plugin.m_detail.SetTransparentWidth(new_width);
             plugin.m_detail.SaveSettings();
-            plugin.m_capture.SetTunRanges(new_ranges);
             g_option_changed = true;
             DestroyWindow(hwnd);
             return 0;

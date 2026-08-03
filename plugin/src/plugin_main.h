@@ -3,6 +3,7 @@
 #include <windows.h>
 #include "PluginInterface.h"
 #include "capture.h"
+#include "etw_capture.h"
 #include "tooltip_popup.h"
 #include "detail_window.h"
 #include <unordered_map>
@@ -79,7 +80,9 @@ public:
     void ShowPopupAt(const RECT& anchor);
     CDetailWindow m_detail;
     PacketCapture m_capture;
+    EtwCapture m_etw_cap;   // production ETW per-process byte counter (primary when active)
     bool m_detail_created = false;
+    void StopEtwCapture() { m_etw_cap.Stop(); }
 
     // Cached stats for popup (updated each DataRequired cycle)
     std::vector<ProcTraffic> m_cached_stats;

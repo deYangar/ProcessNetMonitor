@@ -30,6 +30,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
         if (CDetailWindow::s_instance) {
             CDetailWindow::s_instance->SaveHistory();
         }
+        // Stop ETW capture cleanly
+        CProcessNetPlugin::Instance().StopEtwCapture();
     }
     return TRUE;
 }
