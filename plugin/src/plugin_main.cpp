@@ -11,6 +11,37 @@ extern HINSTANCE s_dll_hinst;
 
 // ---- crash diagnostics: write minidump + crash.log on unhandled exception ----
 static LONG WINAPI PnmCrashHandler(EXCEPTION_POINTERS* ep) {
+    // Only dump real crashes - ignore benign first-chance/debug exceptions
+    // such as 0x40010006 (DBG_PRINTEXCEPTION) that VEH sees on every debug print.
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    static const DWORD serious[] = {
+        0xC0000005,  // access violation
+        0xC000001D,  // illegal instruction
+        0xC000008C,  // array bounds exceeded
+        0xC0000094,  // integer divide by zero
+        0xC00000FD,  // stack overflow
+        0xC0000374,  // heap corruption
+        0xC0000409,  // stack buffer overrun / failfast
+        0xC0000139,  // entry point not found
+        0xC0000135,  // dll not found
+        0xC0000142,  // dll init failed
+    };
+    bool serious_crash = false;
+    for (DWORD c : serious) if (code == c) { serious_crash = true; break; }
+    if (!serious_crash) return EXCEPTION_CONTINUE_SEARCH;
+
+    // De-dupe: same code+address within 10s (VEH fires first-chance too)
+    static DWORD s_last_code = 0;
+    static void* s_last_addr = nullptr;
+    static ULONGLONG s_last_tick = 0;
+    ULONGLONG now = GetTickCount64();
+    if (code == s_last_code && ep->ExceptionRecord->ExceptionAddress == s_last_addr &&
+        now - s_last_tick < 10000)
+        return EXCEPTION_CONTINUE_SEARCH;
+    s_last_code = code;
+    s_last_addr = ep->ExceptionRecord->ExceptionAddress;
+    s_last_tick = now;
+
     wchar_t path[MAX_PATH] = L"";
     if (GetEnvironmentVariableW(L"APPDATA", path, MAX_PATH)) {
         wcscat_s(path, L"\\TrafficMonitor\\plugins\\ProcessNetMonitor\\crash.dmp");
@@ -49,6 +80,12 @@ static void PnmInvalidParamHandler(const wchar_t* expr, const wchar_t* func,
     if (InterlockedIncrement(&s_in_handler) > 1)
         __fastfail(FAST_FAIL_FATAL_APP_EXIT);
 
+    // Grab a stack backtrace (Win32 API - no CRT involved) so we can
+    // resolve the caller via the .map file even though CRT passes null
+    // expr/func/file in release builds.
+    void* stack[24] = {};
+    USHORT nstack = CaptureStackBackTrace(2, 24, stack, nullptr);
+
     // ZERO CRT usage here: even swprintf_s/_wfopen re-trigger invalid_parameter
     // in this broken state (recursion -> failfast, log never lands). Only
     // Win32 calls + hand-rolled helpers.
@@ -85,6 +122,18 @@ static void PnmInvalidParamHandler(const wchar_t* expr, const wchar_t* func,
                 rb[j] = 0;
                 wr(L" line=0x");
                 wr(rb);
+                // stack addresses, hand-rolled hex (resolve via .map file)
+                for (USHORT si = 0; si < nstack; si++) {
+                    wr(L" st=");
+                    uintptr_t a = (uintptr_t)stack[si];
+                    wchar_t hx[20];
+                    int hi = 0;
+                    do { hx[hi++] = L"0123456789abcdef"[a & 0xF]; a >>= 4; } while (a && hi < 18);
+                    wchar_t hr[20]; int hj = 0;
+                    while (hi > 0) hr[hj++] = hx[--hi];
+                    hr[hj] = 0;
+                    wr(hr);
+                }
                 wr(L"\n");
                 CloseHandle(hFile);
             }
