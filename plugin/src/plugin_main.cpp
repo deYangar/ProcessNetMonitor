@@ -44,22 +44,35 @@ static LONG WINAPI PnmCrashHandler(EXCEPTION_POINTERS* ep) {
 // failfast exactly like the CRT would.
 static void PnmInvalidParamHandler(const wchar_t* expr, const wchar_t* func,
                                    const wchar_t* file, unsigned line, uintptr_t reserved) {
-    void* stack[32] = {};
-    USHORT n = CaptureStackBackTrace(2, 32, stack, nullptr);
+    // Re-entrancy guard: the CRT itself may fail again while we log
+    static volatile LONG s_in_handler = 0;
+    if (InterlockedIncrement(&s_in_handler) > 1)
+        __fastfail(FAST_FAIL_FATAL_APP_EXIT);
+
+    // Use raw Win32 file I/O only - CRT functions (_wfopen/fwprintf) can
+    // re-trigger invalid_parameter in this broken state and the log never
+    // reaches disk.
     wchar_t path[MAX_PATH] = L"";
-    if (GetEnvironmentVariableW(L"APPDATA", path, MAX_PATH)) {
-        wcscat_s(path, L"\\TrafficMonitor\\plugins\\ProcessNetMonitor\\crash.log");
-        FILE* f = _wfopen(path, L"a");
-        if (f) {
-            SYSTEMTIME st; GetLocalTime(&st);
-            fwprintf(f, L"[%02d:%02d:%02d] INVALID_PARAM expr=%s func=%s file=%s line=%u stack:",
-                     st.wHour, st.wMinute, st.wSecond,
-                     expr ? expr : L"(null)", func ? func : L"(null)",
-                     file ? file : L"(null)", line);
-            for (USHORT i = 0; i < n; i++)
-                fwprintf(f, L" %p", stack[i]);
-            fwprintf(f, L"\n");
-            fclose(f);
+    if (GetEnvironmentVariableW(L"APPDATA", path, MAX_PATH) && path[0]) {
+        wchar_t full[MAX_PATH];
+        if (swprintf_s(full, MAX_PATH,
+                       L"%s\\TrafficMonitor\\plugins\\ProcessNetMonitor\\crash.log", path) > 0) {
+            HANDLE hFile = CreateFileW(full, FILE_APPEND_DATA, FILE_SHARE_READ,
+                                       nullptr, OPEN_ALWAYS, 0, nullptr);
+            if (hFile != INVALID_HANDLE_VALUE) {
+                wchar_t line_buf[1024];
+                SYSTEMTIME st; GetLocalTime(&st);
+                int n = swprintf_s(line_buf, 1024,
+                    L"[%02d:%02d:%02d] INVALID_PARAM expr=%s func=%s file=%s line=%u\n",
+                    st.wHour, st.wMinute, st.wSecond,
+                    expr ? expr : L"(null)", func ? func : L"(null)",
+                    file ? file : L"(null)", line);
+                if (n > 0) {
+                    DWORD written = 0;
+                    WriteFile(hFile, line_buf, (DWORD)n * sizeof(wchar_t), &written, nullptr);
+                }
+                CloseHandle(hFile);
+            }
         }
     }
     __fastfail(FAST_FAIL_FATAL_APP_EXIT);
