@@ -394,8 +394,13 @@ void CProcessNetPlugin::ComputeWindowSpeeds(std::vector<ProcTraffic>& stats) {
             const auto& b = q.back();
             double span = (double)(b.tick - f.tick) / 1000.0;
             if (span > 0.05) {
-                st.speed_up = (double)(b.sent - f.sent) / span;
-                st.speed_down = (double)(b.recv - f.recv) / span;
+                // Guard against counter resets / source switches (legacy<->ETW
+                // cumulative values differ): a backward jump must not become a
+                // huge uint64 underflow speed.
+                uint64_t ds = (b.sent >= f.sent) ? (b.sent - f.sent) : 0;
+                uint64_t dr = (b.recv >= f.recv) ? (b.recv - f.recv) : 0;
+                st.speed_up = (double)ds / span;
+                st.speed_down = (double)dr / span;
             }
         } else {
             st.speed_up = 0;
