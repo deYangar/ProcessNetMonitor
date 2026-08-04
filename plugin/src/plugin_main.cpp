@@ -711,15 +711,20 @@ void CProcessNetPlugin::HoverTick() {
             ShowPopupAt(anchor);
         }
     } else if (!over_popup) {
-        // Cursor elsewhere: start/continue the hide grace period
+        // Cursor elsewhere: start/continue the hide grace period.
+        // Keep m_hover_target alive while the popup is visible so it can keep
+        // following the main window during a drag - the cursor may briefly
+        // leave the window while it is being moved (window lags behind).
         m_hover_start_tick = 0;
-        m_hover_target = nullptr;
         if (m_popup.IsVisible() && !m_popup_pinned) {
             if (m_hover_leave_tick == 0) {
                 m_hover_leave_tick = now;
             } else if (now - m_hover_leave_tick >= 300) {
                 m_popup.Hide();
+                m_hover_target = nullptr;
             }
+        } else if (!m_popup.IsVisible()) {
+            m_hover_target = nullptr;
         }
     } else {
         // Cursor on the popup itself: keep it open
