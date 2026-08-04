@@ -49,28 +49,43 @@ static void PnmInvalidParamHandler(const wchar_t* expr, const wchar_t* func,
     if (InterlockedIncrement(&s_in_handler) > 1)
         __fastfail(FAST_FAIL_FATAL_APP_EXIT);
 
-    // Use raw Win32 file I/O only - CRT functions (_wfopen/fwprintf) can
-    // re-trigger invalid_parameter in this broken state and the log never
-    // reaches disk.
+    // ZERO CRT usage here: even swprintf_s/_wfopen re-trigger invalid_parameter
+    // in this broken state (recursion -> failfast, log never lands). Only
+    // Win32 calls + hand-rolled helpers.
     wchar_t path[MAX_PATH] = L"";
     if (GetEnvironmentVariableW(L"APPDATA", path, MAX_PATH) && path[0]) {
-        wchar_t full[MAX_PATH];
-        if (swprintf_s(full, MAX_PATH,
-                       L"%s\\TrafficMonitor\\plugins\\ProcessNetMonitor\\crash.log", path) > 0) {
+        static const wchar_t suffix[] = L"\\TrafficMonitor\\plugins\\ProcessNetMonitor\\crash.log";
+        size_t plen = wcslen(path);
+        size_t slen = (sizeof(suffix) / sizeof(wchar_t)) - 1;
+        if (plen + slen < MAX_PATH) {
+            wchar_t full[MAX_PATH];
+            memcpy(full, path, plen * sizeof(wchar_t));
+            memcpy(full + plen, suffix, (slen + 1) * sizeof(wchar_t));
             HANDLE hFile = CreateFileW(full, FILE_APPEND_DATA, FILE_SHARE_READ,
                                        nullptr, OPEN_ALWAYS, 0, nullptr);
             if (hFile != INVALID_HANDLE_VALUE) {
-                wchar_t line_buf[1024];
-                SYSTEMTIME st; GetLocalTime(&st);
-                int n = swprintf_s(line_buf, 1024,
-                    L"[%02d:%02d:%02d] INVALID_PARAM expr=%s func=%s file=%s line=%u\n",
-                    st.wHour, st.wMinute, st.wSecond,
-                    expr ? expr : L"(null)", func ? func : L"(null)",
-                    file ? file : L"(null)", line);
-                if (n > 0) {
-                    DWORD written = 0;
-                    WriteFile(hFile, line_buf, (DWORD)n * sizeof(wchar_t), &written, nullptr);
-                }
+                auto wr = [&](const wchar_t* s) {
+                    DWORD w = 0;
+                    WriteFile(hFile, s, (DWORD)wcslen(s) * sizeof(wchar_t), &w, nullptr);
+                };
+                wr(L"INVALID_PARAM expr=");
+                wr(expr ? expr : L"(null)");
+                wr(L" func=");
+                wr(func ? func : L"(null)");
+                wr(L" file=");
+                wr(file ? file : L"(null)");
+                // line as hex, hand-rolled (no CRT itoa)
+                wchar_t lb[16];
+                unsigned v = line;
+                int i = 0;
+                if (v == 0) lb[i++] = L'0';
+                while (v && i < 15) { lb[i++] = L"0123456789abcdef"[v & 0xF]; v >>= 4; }
+                wchar_t rb[16]; int j = 0;
+                while (i > 0) rb[j++] = lb[--i];
+                rb[j] = 0;
+                wr(L" line=0x");
+                wr(rb);
+                wr(L"\n");
                 CloseHandle(hFile);
             }
         }
