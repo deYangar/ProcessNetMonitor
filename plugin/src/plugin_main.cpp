@@ -14,7 +14,7 @@ static const wchar_t* EtwPopupStatus(const EtwCapture* cap) {
         if (st && wcsstr(st, L"attach") != nullptr)
             return L"\u26a0 \u9644\u52a0\u6a21\u5f0f\uff1aNT Kernel Logger \u88ab\u5176\u4ed6\u7a0b\u5e8f\u5360\u7528\uff0c\u5927\u6d41\u91cf\u65f6\u53ef\u80fd\u4e22\u4e8b\u4ef6\uff0c\u5efa\u8bae\u5173\u95ed AppNetworkCounter \u540e\u91cd\u542f TM";
     } else if (cap->IsRunning()) {
-        return L"\u26a0 ETW \u4e0d\u53ef\u7528\uff0c\u5df2\u56de\u9000\u65e7\u91c7\u96c6\uff0c\u6570\u636e\u53ef\u80fd\u4e0d\u5168";
+        return L"\u26a0 ETW \u4e0d\u53ef\u7528\uff0c\u5df2\u56de\u9000\u65e7\u91c7\u96c6\uff0c\u6570\u636e\u53ef\u80fd\u51c6\u786e\u964d\u4f4e";
     }
     return nullptr;
 }

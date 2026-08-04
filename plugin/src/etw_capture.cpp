@@ -424,6 +424,11 @@ std::wstring EtwCapture::ProcName(DWORD pid) {
     std::lock_guard<std::mutex> lk(m_name_mutex);
     auto it = m_name_cache.find(pid);
     if (it != m_name_cache.end()) return it->second;
+    // pid 4 is the System process - it has no image path, name it explicitly
+    if (pid == 4) {
+        m_name_cache[pid] = L"System";
+        return L"System";
+    }
     std::wstring name = L"<" + std::to_wstring(pid) + L">";
     HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (h) {
