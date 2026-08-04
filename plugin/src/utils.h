@@ -3,6 +3,11 @@
 #include <windows.h>
 #include <shellscalingapi.h>
 
+// Posted to popup/detail windows from the refresh timer thread: the window
+// then pulls the latest snapshot on ITS OWN (UI) thread - never touch window
+// members (std::vector etc.) from another thread (heap corruption risk).
+#define WM_PNM_REFRESH (WM_APP + 1)
+
 // Shared speed/byte formatting utilities
 inline void FormatSpeed(double bps, wchar_t* buf, int n) {
     if (bps < 0.01) wcsncpy_s(buf, n, L"0 B/s", _TRUNCATE);

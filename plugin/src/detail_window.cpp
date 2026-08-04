@@ -1,4 +1,5 @@
 ﻿#include "detail_window.h"
+#include "plugin_main.h"
 #include "utils.h"
 #include <shellapi.h>
 #include <dwmapi.h>
@@ -1234,6 +1235,11 @@ LRESULT CDetailWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
             m_history_dirty = true;
             RebuildRows();
         }
+        return 0;
+
+    case WM_PNM_REFRESH:
+        // pull latest snapshot on the UI thread (posted by refresh timer)
+        CProcessNetPlugin::Instance().DetailRefreshFromSnapshot();
         return 0;
 
     default:

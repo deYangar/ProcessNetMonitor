@@ -111,6 +111,9 @@ public:
     void StopRefreshTimer();
     void ComputeWindowSpeeds(std::vector<ProcTraffic>& stats);
     void BuildTooltip(bool etw_active, const std::vector<ProcTraffic>& stats, double su, double sd);
+    // Run on the window's own (UI) thread via WM_PNM_REFRESH
+    void DetailRefreshFromSnapshot();
+    void PopupRefreshFromSnapshot();
     std::vector<CTooltipPopup::ProcDisplayInfo> GetCachedProcDisplayInfo();
 
 private:

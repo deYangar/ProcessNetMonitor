@@ -2,9 +2,40 @@
 #include "utils.h"
 #include <algorithm>
 #include <shellapi.h>
+#include <dbghelp.h>
+
+#pragma comment(lib, "dbghelp.lib")
 
 // From tooltip_popup.cpp DllMain - DLL's HINSTANCE
 extern HINSTANCE s_dll_hinst;
+
+// ---- crash diagnostics: write minidump + crash.log on unhandled exception ----
+static LONG WINAPI PnmCrashHandler(EXCEPTION_POINTERS* ep) {
+    wchar_t path[MAX_PATH] = L"";
+    if (GetEnvironmentVariableW(L"APPDATA", path, MAX_PATH)) {
+        wcscat_s(path, L"\\TrafficMonitor\\plugins\\ProcessNetMonitor\\crash.dmp");
+        HANDLE hFile = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+        if (hFile != INVALID_HANDLE_VALUE) {
+            MINIDUMP_EXCEPTION_INFORMATION mei = { GetCurrentThreadId(), ep, FALSE };
+            MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), hFile,
+                              MiniDumpNormal, &mei, nullptr, nullptr);
+            CloseHandle(hFile);
+        }
+        wchar_t logpath[MAX_PATH];
+        wcscpy_s(logpath, path);
+        wcscat_s(logpath, L".log");
+        FILE* f = _wfopen(logpath, L"w");
+        if (f) {
+            SYSTEMTIME st; GetLocalTime(&st);
+            fwprintf(f, L"[%04d-%02d-%02d %02d:%02d:%02d] code=0x%08X addr=%p thread=%lu\n",
+                     st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
+                     ep->ExceptionRecord->ExceptionCode, ep->ExceptionRecord->ExceptionAddress,
+                     GetCurrentThreadId());
+            fclose(f);
+        }
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
 
 // One-line status for popup/tooltip when ETW cannot own the kernel session
 static const wchar_t* EtwPopupStatus(const EtwCapture* cap) {
@@ -200,7 +231,7 @@ void CProcessNetPlugin::DataRequired() {
                 m_cached_stats = stats;
                 m_cached_up = su;
                 m_cached_down = sd;
-                if (m_detail_created) m_detail.UpdateData(stats, su, sd);
+                if (m_detail_created) PostMessage(m_detail.GetHwnd(), WM_PNM_REFRESH, 0, 0);
                 swprintf_s(m_tooltip, 2048, L"Process Net Monitor (ETW)\nTotal: U:%.1fKB/s D:%.1fKB/s",
                            su / 1024.0, sd / 1024.0);
                 return;
@@ -266,9 +297,9 @@ void CProcessNetPlugin::DataRequired() {
     m_cached_up = su;
     m_cached_down = sd;
 
-    // Update detail window (always, for history recording)
+    // Update detail window via UI thread (history recording keeps working)
     if (m_detail_created) {
-        m_detail.UpdateData(stats, su, sd);
+        PostMessage(m_detail.GetHwnd(), WM_PNM_REFRESH, 0, 0);
     }
 
     BuildTooltip(etw_active, stats, su, sd);
@@ -372,14 +403,45 @@ void CProcessNetPlugin::RefreshTick() {
 
     BuildTooltip(etw_active, stats, su, sd);
 
+    // Never touch popup/detail window members from this timer thread - post
+    // a refresh request; the window updates itself on its own (UI) thread.
     if (m_detail_created) {
-        m_detail.UpdateData(stats, su, sd);
+        PostMessage(m_detail.GetHwnd(), WM_PNM_REFRESH, 0, 0);
     }
     if (m_popup_created && m_popup.IsVisible()) {
-        std::vector<CTooltipPopup::ProcDisplayInfo> procs;
-        GetProcessDisplayInfo(procs, stats);
-        m_popup.UpdateData(procs, su, sd, EtwPopupStatus(&m_etw_cap));
+        PostMessage(m_popup.GetHwnd(), WM_PNM_REFRESH, 0, 0);
     }
+}
+
+// Runs on the detail window's UI thread (WM_PNM_REFRESH handler)
+void CProcessNetPlugin::DetailRefreshFromSnapshot() {
+    std::vector<ProcTraffic> snap;
+    double su = 0, sd = 0;
+    {
+        EnterCriticalSection(&m_data_lock);
+        snap = m_cached_stats;
+        su = m_cached_up;
+        sd = m_cached_down;
+        LeaveCriticalSection(&m_data_lock);
+    }
+    m_detail.UpdateData(snap, su, sd);
+}
+
+// Runs on the popup's UI thread (WM_PNM_REFRESH handler)
+void CProcessNetPlugin::PopupRefreshFromSnapshot() {
+    if (!m_popup.IsVisible()) return;
+    std::vector<ProcTraffic> snap;
+    double su = 0, sd = 0;
+    {
+        EnterCriticalSection(&m_data_lock);
+        snap = m_cached_stats;
+        su = m_cached_up;
+        sd = m_cached_down;
+        LeaveCriticalSection(&m_data_lock);
+    }
+    std::vector<CTooltipPopup::ProcDisplayInfo> procs;
+    GetProcessDisplayInfo(procs, snap);
+    m_popup.UpdateData(procs, su, sd, EtwPopupStatus(&m_etw_cap));
 }
 
 void CProcessNetPlugin::ComputeWindowSpeeds(std::vector<ProcTraffic>& stats) {
@@ -452,6 +514,7 @@ const wchar_t* CProcessNetPlugin::GetTooltipInfo() { return m_tooltip; }
 
 void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
     m_app = p;
+    SetUnhandledExceptionFilter(PnmCrashHandler);
     // Use DLL's HINSTANCE (not EXE's) so resource loading (icons, etc.) works
     HINSTANCE hInst = s_dll_hinst ? s_dll_hinst : (HINSTANCE)GetModuleHandleW(NULL);
     m_popup_created = m_popup.Initialize(hInst);

@@ -170,6 +170,11 @@ LRESULT CTooltipPopup::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
             CProcessNetPlugin::Instance().HoverTick();
         return 0;
 
+    case WM_PNM_REFRESH:
+        // pull latest snapshot on the UI thread (posted by refresh timer)
+        CProcessNetPlugin::Instance().PopupRefreshFromSnapshot();
+        return 0;
+
     case WM_DPICHANGED: {
         RECT* prc = (RECT*)lp;
         if (prc) UpdateDpiScale(*prc);
