@@ -6,17 +6,6 @@
 // From tooltip_popup.cpp DllMain - DLL's HINSTANCE
 extern HINSTANCE s_dll_hinst;
 
-// Sanity cap: anything above 10 GB/s is a counter/parse artifact - zero it.
-// (Real hardware cannot exceed this; a bogus delta or misparsed size field
-// produced values like 5.4e12 B/s on the startup/switch path.)
-static void SanitizeSpeeds(std::vector<ProcTraffic>& stats) {
-    const double MAX_SPEED = 10.0 * 1024.0 * 1024.0 * 1024.0;
-    for (auto& s : stats) {
-        if (s.speed_up > MAX_SPEED) s.speed_up = 0;
-        if (s.speed_down > MAX_SPEED) s.speed_down = 0;
-    }
-}
-
 // One-line status for popup/tooltip when ETW cannot own the kernel session
 static const wchar_t* EtwPopupStatus(const EtwCapture* cap) {
     thread_local wchar_t buf[512];
@@ -204,7 +193,6 @@ void CProcessNetPlugin::DataRequired() {
                 if (dt2 < 0.1) dt2 = 0.1;
                 m_last_time = n2;
                 auto stats = m_etw_cap.GetStats(dt2);
-                SanitizeSpeeds(stats);
                 double su = 0, sd = 0;
                 for (auto& s : stats) { su += s.speed_up; sd += s.speed_down; }
                 m_items[0].Update(stats, su, sd);
@@ -268,7 +256,6 @@ void CProcessNetPlugin::DataRequired() {
             stats = std::move(es);
         }
     }
-    SanitizeSpeeds(stats);
     double su = 0, sd = 0;
     for (auto& s : stats) { su += s.speed_up; sd += s.speed_down; }
 
@@ -369,7 +356,6 @@ void CProcessNetPlugin::RefreshTick() {
 
     // Rolling ~1s speed window (aligned with TM's default 1000ms monitor span)
     ComputeWindowSpeeds(stats);
-    SanitizeSpeeds(stats);
 
     double su = 0, sd = 0;
     for (auto& s : stats) { su += s.speed_up; sd += s.speed_down; }
