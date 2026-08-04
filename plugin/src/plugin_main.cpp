@@ -453,10 +453,11 @@ void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
     m_detail.LoadSettings();
     // Sync transparent width from settings to static member
     CProcessNetItem::s_transparent_width = m_detail.GetTransparentWidth();
-    // Record history whenever GetStats is called (independent of detail panel)
-    m_capture.SetOnStats([this](const std::vector<ProcTraffic>& stats) {
-        m_detail.RecordHistory(stats);
-    });
+
+    // NOTE: history recording happens inside CDetailWindow::UpdateData (fed by
+    // the merged ETW-first stats). We must NOT also record from the legacy
+    // OnStats callback - two sources with different cumulative counters
+    // (legacy double-counts under TUN) alternate and inflate history deltas.
 
     // High-frequency data refresh timer (independent of TM's 1s tick)
     if (!m_lock_inited) {
