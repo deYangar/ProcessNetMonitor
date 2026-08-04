@@ -573,8 +573,16 @@ std::vector<ProcTraffic> EtwCapture::GetStats(double interval_sec) {
         uint64_t dr = c.recv - c.prev_recv;
         c.prev_sent = c.sent;
         c.prev_recv = c.recv;
-        pt.speed_up = (double)ds / interval_sec;
-        pt.speed_down = (double)dr / interval_sec;
+        // First snapshot: only set the baseline - never report the cumulative
+        // bytes as a delta (that produced a huge bogus speed on plugin start).
+        if (!c.seen) {
+            c.seen = true;
+            pt.speed_up = 0;
+            pt.speed_down = 0;
+        } else {
+            pt.speed_up = (double)ds / interval_sec;
+            pt.speed_down = (double)dr / interval_sec;
+        }
         pt.conn_count = 0;
         pt.name = ProcName(pid);
         pt.exe_path = ProcPath(pid);

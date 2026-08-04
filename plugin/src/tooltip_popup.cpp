@@ -287,7 +287,7 @@ void CTooltipPopup::CalcLayout(HDC hdc, int& out_w, int& out_h, int& out_up_coun
     // of stretching the window (user request 2026-08-04).
     // Name column: ~20 chars at 100% DPI (SunloginClient fits, longer names
     // get ellipsized by DrawProcRow's truncation logic).
-    const int NAME_COL_W = (int)(165 * m_dpi_scale);
+    const int NAME_COL_W = (int)(125 * m_dpi_scale);
     out_w = PADDING + ICON_SIZE + (int)(6 * m_dpi_scale) + NAME_COL_W
             + (int)(12 * m_dpi_scale) + SPEED_AREA_W + PADDING;
     out_w = max(out_w, MIN_WIDTH);

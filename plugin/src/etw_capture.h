@@ -77,6 +77,7 @@ private:
         uint64_t prev_recv = 0;
         ULONGLONG last_seen = 0;
         int idle_rounds = 0;
+        bool seen = false;      // first GetStats snapshot only sets the baseline
     };
 
     void ConsumerLoop();
