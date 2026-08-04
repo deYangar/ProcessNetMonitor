@@ -65,6 +65,27 @@ static void PnmInvalidParamHandler(const wchar_t* expr, const wchar_t* func,
     __fastfail(FAST_FAIL_FATAL_APP_EXIT);
 }
 
+// WER LocalDumps: kernel-level crash dumps that do NOT depend on in-process
+// handlers. failfast termination (0xc0000409) bypasses SEH/VEH entirely, so
+// only WER can reliably capture it. Requires admin (HKLM); best effort.
+static void SetupWerLocalDumps() {
+    HKEY hk = nullptr;
+    LSTATUS st = RegCreateKeyExW(HKEY_LOCAL_MACHINE,
+        L"SOFTWARE\\Microsoft\\Windows\\Windows Error Reporting\\LocalDumps\\TrafficMonitor.exe",
+        0, nullptr, 0, KEY_SET_VALUE, nullptr, &hk, nullptr);
+    if (st != ERROR_SUCCESS) return;
+    wchar_t dump_dir[MAX_PATH] = L"";
+    if (GetEnvironmentVariableW(L"APPDATA", dump_dir, MAX_PATH) && dump_dir[0]) {
+        wcscat_s(dump_dir, L"\\TrafficMonitor\\plugins\\ProcessNetMonitor\\werdumps");
+        CreateDirectoryW(dump_dir, nullptr);
+        RegSetValueExW(hk, L"DumpFolder", 0, REG_SZ,
+                       (const BYTE*)dump_dir, (DWORD)((wcslen(dump_dir) + 1) * sizeof(wchar_t)));
+        DWORD type = 2;  // full dump
+        RegSetValueExW(hk, L"DumpType", 0, REG_DWORD, (const BYTE*)&type, sizeof(type));
+    }
+    RegCloseKey(hk);
+}
+
 // One-line status for popup/tooltip when ETW cannot own the kernel session
 static const wchar_t* EtwPopupStatus(const EtwCapture* cap) {
     thread_local wchar_t buf[512];
@@ -548,6 +569,7 @@ void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
     SetUnhandledExceptionFilter(PnmCrashHandler);
     AddVectoredExceptionHandler(1, PnmCrashHandler);
     _set_invalid_parameter_handler(PnmInvalidParamHandler);
+    SetupWerLocalDumps();
     // Use DLL's HINSTANCE (not EXE's) so resource loading (icons, etc.) works
     HINSTANCE hInst = s_dll_hinst ? s_dll_hinst : (HINSTANCE)GetModuleHandleW(NULL);
     m_popup_created = m_popup.Initialize(hInst);
