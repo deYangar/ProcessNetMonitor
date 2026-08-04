@@ -37,6 +37,34 @@ static LONG WINAPI PnmCrashHandler(EXCEPTION_POINTERS* ep) {
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
+// CRT invalid-parameter handler: a *_s safe function received an illegal
+// argument (e.g. NULL src or wrong buffer size). The default CRT behaviour is
+// to failfast (0xc0000409) with no diagnostics. Log the offending function /
+// source line plus a stack backtrace (resolvable via the .map file), then
+// failfast exactly like the CRT would.
+static void PnmInvalidParamHandler(const wchar_t* expr, const wchar_t* func,
+                                   const wchar_t* file, unsigned line, uintptr_t reserved) {
+    void* stack[32] = {};
+    USHORT n = CaptureStackBackTrace(2, 32, stack, nullptr);
+    wchar_t path[MAX_PATH] = L"";
+    if (GetEnvironmentVariableW(L"APPDATA", path, MAX_PATH)) {
+        wcscat_s(path, L"\\TrafficMonitor\\plugins\\ProcessNetMonitor\\crash.log");
+        FILE* f = _wfopen(path, L"a");
+        if (f) {
+            SYSTEMTIME st; GetLocalTime(&st);
+            fwprintf(f, L"[%02d:%02d:%02d] INVALID_PARAM expr=%s func=%s file=%s line=%u stack:",
+                     st.wHour, st.wMinute, st.wSecond,
+                     expr ? expr : L"(null)", func ? func : L"(null)",
+                     file ? file : L"(null)", line);
+            for (USHORT i = 0; i < n; i++)
+                fwprintf(f, L" %p", stack[i]);
+            fwprintf(f, L"\n");
+            fclose(f);
+        }
+    }
+    __fastfail(FAST_FAIL_FATAL_APP_EXIT);
+}
+
 // One-line status for popup/tooltip when ETW cannot own the kernel session
 static const wchar_t* EtwPopupStatus(const EtwCapture* cap) {
     thread_local wchar_t buf[512];
@@ -519,6 +547,7 @@ void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
     // (e.g. heap corruption 0xc0000374), which bypasses the filter.
     SetUnhandledExceptionFilter(PnmCrashHandler);
     AddVectoredExceptionHandler(1, PnmCrashHandler);
+    _set_invalid_parameter_handler(PnmInvalidParamHandler);
     // Use DLL's HINSTANCE (not EXE's) so resource loading (icons, etc.) works
     HINSTANCE hInst = s_dll_hinst ? s_dll_hinst : (HINSTANCE)GetModuleHandleW(NULL);
     m_popup_created = m_popup.Initialize(hInst);
