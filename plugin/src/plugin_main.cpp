@@ -529,13 +529,27 @@ static bool IsTMTaskbarWindow(HWND hwnd) {
     return IntersectRect(&inter, &rc, &tb) != 0;
 }
 
-// Walk the parent chain to find a TrafficMonitor window
+// Walk the parent chain to find a TrafficMonitor window.
+// Dialogs (class #32770) stop the chain: hovering a settings / connection
+// dialog (owned by TM) must NOT trigger our popup. The taskbar dialog is
+// the exception - its title contains "TrafficMonitorTaskbarWindow" and we
+// keep walking up to its parent (the main TM window).
 static HWND FindTMWindowInChain(HWND hwnd) {
     for (HWND cur = hwnd; cur; cur = GetParent(cur)) {
         wchar_t cls[64] = {};
         GetClassNameW(cur, cls, 64);
         if (wcsncmp(cls, L"TrafficMonitor", 14) == 0)
             return cur;
+        if (wcscmp(cls, L"#32770") == 0) {
+            wchar_t txt[256] = {};
+            GetWindowTextW(cur, txt, 256);
+            // Taskbar dialog: keep walking up to its parent (main TM window)
+            if (wcsstr(txt, L"TrafficMonitorTaskbarWindow") != nullptr ||
+                wcsstr(txt, L"TrafficMonitor") != nullptr)
+                continue;
+            // Any other dialog (options, connection details, ...): stop
+            return nullptr;
+        }
     }
     return nullptr;
 }
