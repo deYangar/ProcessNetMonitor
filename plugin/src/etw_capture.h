@@ -37,6 +37,7 @@ public:
     }
     const wchar_t* GetLastError() const { return m_error; }
     const wchar_t* ConnState() const { return m_conn_state; }  // init/starting/self-started/attached/failed
+    const wchar_t* OwnerText() const { return m_owner.empty() ? nullptr : m_owner.c_str(); }
 
     // Same contract as PacketCapture::GetStats: per-process speeds.
     // conn_count is left 0 (merge with PacketCapture data upstream).
@@ -148,6 +149,10 @@ private:
 
     void LogLine(const wchar_t* fmt, ...);
     void LogPeriodicLocked();
+
+    // Best-effort: find which process(es) hold ETW session/consumer handles
+    std::wstring FindSessionOwners();
+    std::wstring m_owner;   // filled when attaching to someone else's session
 
     std::mutex m_name_mutex;
     std::map<DWORD, std::wstring> m_name_cache;

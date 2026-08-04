@@ -8,11 +8,19 @@ extern HINSTANCE s_dll_hinst;
 
 // One-line status for popup/tooltip when ETW cannot own the kernel session
 static const wchar_t* EtwPopupStatus(const EtwCapture* cap) {
+    thread_local wchar_t buf[512];
     if (!cap) return nullptr;
     if (cap->HasData()) {
         const wchar_t* st = cap->ConnState();
-        if (st && wcsstr(st, L"attach") != nullptr)
-            return L"\u26a0 \u9644\u52a0\u6a21\u5f0f\uff1aNT Kernel Logger \u88ab\u5176\u4ed6\u7a0b\u5e8f\u5360\u7528\uff0c\u5927\u6d41\u91cf\u65f6\u53ef\u80fd\u4e22\u4e8b\u4ef6\uff0c\u5efa\u8bae\u5173\u95ed AppNetworkCounter \u540e\u91cd\u542f TM";
+        if (st && wcsstr(st, L"attach") != nullptr) {
+            const wchar_t* owner = cap->OwnerText();
+            if (owner && owner[0]) {
+                swprintf_s(buf, 512, L"\u26a0 \u9644\u52a0\u6a21\u5f0f\uff1aNT Kernel Logger \u7591\u4f3c\u88ab %s \u5360\u7528\uff0c\u5927\u6d41\u91cf\u65f6\u53ef\u80fd\u4e22\u4e8b\u4ef6\uff0c\u5efa\u8bae\u5173\u95ed\u540e\u91cd\u542f TM", owner);
+            } else {
+                swprintf_s(buf, 512, L"\u26a0 \u9644\u52a0\u6a21\u5f0f\uff1aNT Kernel Logger \u88ab\u5176\u4ed6\u7a0b\u5e8f\u5360\u7528\uff0c\u5927\u6d41\u91cf\u65f6\u53ef\u80fd\u4e22\u4e8b\u4ef6\uff0c\u5efa\u8bae\u5173\u95ed AppNetworkCounter \u540e\u91cd\u542f TM");
+            }
+            return buf;
+        }
     } else if (cap->IsRunning()) {
         return L"\u26a0 ETW \u4e0d\u53ef\u7528\uff0c\u5df2\u56de\u9000\u65e7\u91c7\u96c6\uff0c\u6570\u636e\u53ef\u80fd\u51c6\u786e\u964d\u4f4e";
     }
@@ -270,10 +278,17 @@ void CProcessNetPlugin::BuildTooltip(bool etw_active, const std::vector<ProcTraf
     wchar_t line[256];
     if (etw_active) {
         const wchar_t* st = m_etw_cap.ConnState();
-        if (st && wcsstr(st, L"attach") != nullptr)
-            wcscpy_s(m_tooltip, 2048, L"Process Net Monitor (ETW-attach)\n\u26a0 \u9644\u52a0\u6a21\u5f0f\uff1aNT Kernel Logger \u88ab\u5176\u4ed6\u7a0b\u5e8f\u5360\u7528\uff0c\u5927\u6d41\u91cf\u65f6\u53ef\u80fd\u4e22\u4e8b\u4ef6\uff0c\u5efa\u8bae\u5173\u95ed AppNetworkCounter \u540e\u91cd\u542f TM\n");
-        else
+        if (st && wcsstr(st, L"attach") != nullptr) {
+            wchar_t warn[600];
+            const wchar_t* owner = m_etw_cap.OwnerText();
+            if (owner && owner[0])
+                swprintf_s(warn, 600, L"Process Net Monitor (ETW-attach)\n\u26a0 \u9644\u52a0\u6a21\u5f0f\uff1aNT Kernel Logger \u7591\u4f3c\u88ab %s \u5360\u7528\uff0c\u5927\u6d41\u91cf\u65f6\u53ef\u80fd\u4e22\u4e8b\u4ef6\uff0c\u5efa\u8bae\u5173\u95ed\u540e\u91cd\u542f TM\n", owner);
+            else
+                swprintf_s(warn, 600, L"Process Net Monitor (ETW-attach)\n\u26a0 \u9644\u52a0\u6a21\u5f0f\uff1aNT Kernel Logger \u88ab\u5176\u4ed6\u7a0b\u5e8f\u5360\u7528\uff0c\u5927\u6d41\u91cf\u65f6\u53ef\u80fd\u4e22\u4e8b\u4ef6\uff0c\u5efa\u8bae\u5173\u95ed AppNetworkCounter \u540e\u91cd\u542f TM\n");
+            wcscpy_s(m_tooltip, 2048, warn);
+        } else {
             wcscpy_s(m_tooltip, 2048, L"Process Net Monitor (ETW)\n");
+        }
     } else {
         wcscpy_s(m_tooltip, 2048, L"Process Net Monitor\n");
     }

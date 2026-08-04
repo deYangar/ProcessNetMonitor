@@ -4,6 +4,9 @@
 // kernel network events DO carry per-process byte sizes; parse
 // via TDH schema for robustness.
 // ============================================================
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#endif
 #include "etw_capture.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -14,10 +17,172 @@
 #include <cstdarg>
 #include <cwchar>
 #include <share.h>
+#include <set>
+#include <tlhelp32.h>
 
 #pragma comment(lib, "tdh.lib")
 
 EtwCapture* EtwCapture::s_self = nullptr;
+
+// ---- best-effort ETW session owner detection ----
+// There is no public API mapping an ETW session to its creator process.
+// We enumerate all system handles and find processes holding handles of
+// type EtwSession (the session controller) / EtwConsumer (consumers).
+// Visibility is limited by token rights: handles of SYSTEM/admin processes
+// may be invisible - in that case we just fall back to the generic hint.
+
+typedef LONG NTSTATUS;
+typedef NTSTATUS(NTAPI* pNtQuerySystemInformation)(ULONG, PVOID, ULONG, PULONG);
+typedef NTSTATUS(NTAPI* pNtQueryObject)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+typedef NTSTATUS(NTAPI* pNtDuplicateObject)(HANDLE, HANDLE, HANDLE, PHANDLE, ULONG, ULONG, ULONG);
+
+struct SysHandleEntry {
+    PVOID Object;
+    ULONG_PTR UniqueProcessId;
+    ULONG_PTR HandleValue;
+    ULONG GrantedAccess;
+    USHORT CreatorBackTraceIndex;
+    USHORT ObjectTypeIndex;
+    ULONG HandleAttributes;
+    ULONG Reserved;
+};
+struct SysHandleInfo {
+    ULONG_PTR NumberOfHandles;
+    ULONG_PTR Reserved;
+    SysHandleEntry Handles[1];
+};
+// UNICODE_STRING is not defined by windows.h - define our own layout
+struct EtwUsStr {
+    USHORT Length;
+    USHORT MaximumLength;
+    wchar_t* Buffer;
+};
+struct ObjTypeInfo {
+    EtwUsStr TypeName;
+    ULONG TotalNumberOfObjects;
+    ULONG TotalNumberOfHandles;
+    ULONG TotalPagedPoolUsage;
+    ULONG TotalNonPagedPoolUsage;
+    ULONG TotalNamePoolUsage;
+    ULONG TotalHandleTableUsage;
+    ULONG HighWaterNumberOfObjects;
+    ULONG HighWaterNumberOfHandles;
+    ULONG HighWaterPagedPoolUsage;
+    ULONG HighWaterNonPagedPoolUsage;
+    ULONG HighWaterNamePoolUsage;
+    ULONG HighWaterHandleTableUsage;
+    ULONG InvalidAttributes;
+    GENERIC_MAPPING GenericMapping;
+    ULONG ValidAccess;
+    BOOLEAN SecurityRequired;
+    BOOLEAN MaintainHandleCount;
+    BOOLEAN TypeListLock;
+    BOOLEAN SecurityDescriptor;
+};
+
+std::wstring EtwCapture::FindSessionOwners() {
+    std::wstring out;
+
+    // 1) Handle enumeration: precise when the process can see the owner's
+    // handles (works reliably when TM runs elevated).
+    {
+        auto ntdll = GetModuleHandleW(L"ntdll.dll");
+        if (ntdll) {
+            auto qsi = (pNtQuerySystemInformation)GetProcAddress(ntdll, "NtQuerySystemInformation");
+            auto qo = (pNtQueryObject)GetProcAddress(ntdll, "NtQueryObject");
+            auto ndup = (pNtDuplicateObject)GetProcAddress(ntdll, "NtDuplicateObject");
+            if (qsi && qo && ndup) {
+                ULONG len = 0;
+                std::vector<BYTE> buf;
+                for (int attempt = 0; attempt < 3; attempt++) {
+                    buf.resize(len ? len : (1 << 20));
+                    ULONG needed = 0;
+                    NTSTATUS st = qsi(64 /*SystemExtendedHandleInformation*/, buf.data(), (ULONG)buf.size(), &needed);
+                    if (st == 0) break;
+                    if (needed > buf.size()) { len = needed; continue; }
+                    buf.clear();
+                    break;
+                }
+                if (!buf.empty()) {
+                    DWORD self_pid = GetCurrentProcessId();
+                    std::set<DWORD> pids;
+                    auto* info = (SysHandleInfo*)buf.data();
+                    for (ULONG_PTR i = 0; i < info->NumberOfHandles; i++) {
+                        auto& h = info->Handles[i];
+                        if (h.UniqueProcessId == self_pid || h.UniqueProcessId == 0 || h.UniqueProcessId == 4) continue;
+                        HANDLE hProc = OpenProcess(PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)h.UniqueProcessId);
+                        if (!hProc) continue;
+                        HANDLE dup = nullptr;
+                        if (ndup(hProc, (HANDLE)h.HandleValue, GetCurrentProcess(), &dup, 0x02000000, 0, 0) != 0) {
+                            CloseHandle(hProc);
+                            continue;
+                        }
+                        BYTE tbuf[512] = {};
+                        ULONG ret = 0;
+                        if (qo(dup, 2 /*ObjectTypeInformation*/, tbuf, sizeof(tbuf), &ret) == 0) {
+                            auto* t = (ObjTypeInfo*)tbuf;
+                            if (t->TypeName.Buffer && t->TypeName.Length > 0) {
+                                std::wstring type(t->TypeName.Buffer, t->TypeName.Length / 2);
+                                if (type == L"EtwSession" || type == L"EtwConsumer")
+                                    pids.insert((DWORD)h.UniqueProcessId);
+                            }
+                        }
+                        CloseHandle(dup);
+                        CloseHandle(hProc);
+                    }
+                    std::set<std::wstring> names;
+                    for (DWORD pid : pids) {
+                        HANDLE hp = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+                        if (hp) {
+                            wchar_t path[512]; DWORD n = 512;
+                            if (QueryFullProcessImageNameW(hp, 0, path, &n)) {
+                                std::wstring full = path;
+                                size_t p = full.find_last_of(L"\\/");
+                                names.insert((p != std::wstring::npos) ? full.substr(p + 1) : full);
+                            }
+                            CloseHandle(hp);
+                        }
+                    }
+                    for (auto& nm : names) {
+                        if (!out.empty()) out += L", ";
+                        out += nm;
+                    }
+                }
+            }
+        }
+    }
+    if (!out.empty()) return out;
+
+    // 2) Fallback heuristic: known tools that consume the NT Kernel Logger.
+    static const wchar_t* tools[] = {
+        L"appnetworkcounter", L"netlimiter", L"glasswire", L"dumpcap",
+        L"wireshark", L"procmon", L"procmon64", L"perfmon", L"wpr",
+        L"xperf", L"resmon", nullptr
+    };
+    std::set<std::wstring> names;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32W pe = { sizeof(pe) };
+        if (Process32FirstW(snap, &pe)) {
+            do {
+                std::wstring n = pe.szExeFile;
+                for (auto& c : n) c = towlower(c);
+                for (int i = 0; tools[i]; i++) {
+                    if (n.find(tools[i]) != std::wstring::npos) {
+                        names.insert(pe.szExeFile);
+                        break;
+                    }
+                }
+            } while (Process32NextW(snap, &pe));
+        }
+        CloseHandle(snap);
+    }
+    for (auto& nm : names) {
+        if (!out.empty()) out += L", ";
+        out += nm;
+    }
+    return out;
+}
 
 // ---- diagnostics log (shared read: TM can keep running) ----
 static FILE* EtwLogOpen() {
@@ -187,6 +352,8 @@ void EtwCapture::ConsumerLoop() {
                 // fall back: attach to whatever is there
                 wcscpy_s(m_conn_state, L"attached");
                 LogLine(L"attaching to existing session instead (buffers NOT ours)");
+                m_owner = FindSessionOwners();
+                LogLine(L"ETW session owner(s): %s", m_owner.empty() ? L"(unknown)" : m_owner.c_str());
                 consumer = OpenTraceW(&lf);
                 if (consumer == INVALID_PROCESSTRACE_HANDLE) {
                     LogLine(L"attach failed err=%lu", GetLastError());
