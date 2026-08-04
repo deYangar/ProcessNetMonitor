@@ -953,6 +953,7 @@ void CDetailWindow::SaveSettings() {
     fprintf(f, "{\n");
     fprintf(f, "  \"sort_col\": [%d, %d],\n", m_sort_col[0], m_sort_col[1]);
     fprintf(f, "  \"sort_asc\": [%s, %s],\n", m_sort_asc[0] ? "true" : "false", m_sort_asc[1] ? "true" : "false");
+    fprintf(f, "  \"refresh_ms\": %d,\n", m_refresh_ms);
     fprintf(f, "  \"transparent_width\": %d\n", m_transparent_width);
     fprintf(f, "}\n");
     fclose(f);
@@ -1009,6 +1010,17 @@ void CDetailWindow::LoadSettings() {
             if (pos != std::string::npos) {
                 int tw = atoi(json.c_str() + pos + 1);
                 if (tw >= 0 && tw <= 500) m_transparent_width = tw;
+            }
+        }
+    }
+    // Parse refresh_ms
+    {
+        size_t pos = json.find("\"refresh_ms\"");
+        if (pos != std::string::npos) {
+            pos = json.find(':', pos);
+            if (pos != std::string::npos) {
+                int v = atoi(json.c_str() + pos + 1);
+                if (v >= 100 && v <= 2000) m_refresh_ms = v;
             }
         }
     }

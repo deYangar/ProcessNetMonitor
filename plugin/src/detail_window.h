@@ -39,6 +39,8 @@ public:
     void LoadSettings();
     int GetTransparentWidth() const { return m_transparent_width; }
     void SetTransparentWidth(int w) { m_transparent_width = w; }
+    int GetRefreshMs() const { return m_refresh_ms; }
+    void SetRefreshMs(int v) { m_refresh_ms = v; }
     
     // 设置 PacketCapture 指针（用于获取连接详情）
     void SetCapture(PacketCapture* capture) { m_capture = capture; }
@@ -232,6 +234,7 @@ private:
     int m_active_tab = 0;      // 0=实时流量, 1=历史流量
 
     int m_transparent_width = 100;  // transparent area width in pixels
+    int m_refresh_ms = 250;         // plugin data refresh interval (ms)
 
     // Columns - real-time
     enum ColIndex { COL_ICON, COL_NAME, COL_CATEGORY, COL_DOWN, COL_UP, COL_CONN, COL_ACTION };

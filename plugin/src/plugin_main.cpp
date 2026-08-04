@@ -205,6 +205,25 @@ void CProcessNetPlugin::DataRequired() {
         return;
     }
 
+    // Fast path: the refresh timer owns data collection (250ms default).
+    // TM's tick just pushes the latest snapshot to the taskbar items and
+    // rebuilds the tooltip - no duplicate ETW polling.
+    if (m_refresh_timer_ok) {
+        std::vector<ProcTraffic> snap;
+        double su = 0, sd = 0;
+        {
+            EnterCriticalSection(&m_data_lock);
+            snap = m_cached_stats;
+            su = m_cached_up;
+            sd = m_cached_down;
+            m_items[0].Update(snap, su, sd);
+            m_items[1].Update(snap, su, sd);
+            LeaveCriticalSection(&m_data_lock);
+        }
+        BuildTooltip(m_etw_cap.HasData(), snap, su, sd);
+        return;
+    }
+
     ULONGLONG now = GetTickCount64();
     double dt = (double)(now - m_last_time) / 1000.0;
     if (dt < 0.1) dt = 0.1;
@@ -244,7 +263,10 @@ void CProcessNetPlugin::DataRequired() {
         m_detail.UpdateData(stats, su, sd);
     }
 
-    // Build tooltip text (TM's default text tooltip, kept as fallback)
+    BuildTooltip(etw_active, stats, su, sd);
+}
+
+void CProcessNetPlugin::BuildTooltip(bool etw_active, const std::vector<ProcTraffic>& stats, double su, double sd) {
     wchar_t line[256];
     if (etw_active) {
         const wchar_t* st = m_etw_cap.ConnState();
@@ -260,11 +282,15 @@ void CProcessNetPlugin::DataRequired() {
 
     wcscat_s(m_tooltip, L"\n--- Upload ---\n");
     std::vector<RecentProc*> up_list, down_list;
-    for (auto& [pid, rp] : m_items[0].m_recent) {
-        if (rp.speed_up > 0.01 || rp.idle_rounds == 0) up_list.push_back(&rp);
-    }
-    for (auto& [pid, rp] : m_items[1].m_recent) {
-        if (rp.speed_down > 0.01 || rp.idle_rounds == 0) down_list.push_back(&rp);
+    {
+        EnterCriticalSection(&m_data_lock);
+        for (auto& [pid, rp] : m_items[0].m_recent) {
+            if (rp.speed_up > 0.01 || rp.idle_rounds == 0) up_list.push_back(&rp);
+        }
+        for (auto& [pid, rp] : m_items[1].m_recent) {
+            if (rp.speed_down > 0.01 || rp.idle_rounds == 0) down_list.push_back(&rp);
+        }
+        LeaveCriticalSection(&m_data_lock);
     }
     std::sort(up_list.begin(), up_list.end(), [](auto* a, auto* b) { return a->speed_up > b->speed_up; });
     std::sort(down_list.begin(), down_list.end(), [](auto* a, auto* b) { return a->speed_down > b->speed_down; });
@@ -289,6 +315,107 @@ void CProcessNetPlugin::DataRequired() {
     while (count < 5) { wcscat_s(m_tooltip, L"  -\n"); count++; }
 }
 
+// High-frequency refresh: runs on a TimerQueueTimer independent of TM's tick.
+void CProcessNetPlugin::RefreshTick() {
+    if (!m_started) return;
+
+    ULONGLONG now = GetTickCount64();
+    double dt = (double)(now - m_last_time) / 1000.0;
+    if (dt < 0.05) dt = 0.05;
+    m_last_time = now;
+
+    auto stats = m_capture.GetStats(dt);
+    bool etw_active = m_etw_cap.HasData();
+    if (etw_active) {
+        auto es = m_etw_cap.GetStats(dt);
+        if (!es.empty()) {
+            std::map<DWORD, int> conn_by_pid;
+            for (auto& l : stats) conn_by_pid[l.pid] = l.conn_count;
+            for (auto& e : es) {
+                auto it = conn_by_pid.find(e.pid);
+                if (it != conn_by_pid.end()) e.conn_count = it->second;
+            }
+            stats = std::move(es);
+        }
+    }
+
+    // Rolling ~1s speed window (aligned with TM's default 1000ms monitor span)
+    ComputeWindowSpeeds(stats);
+
+    double su = 0, sd = 0;
+    for (auto& s : stats) { su += s.speed_up; sd += s.speed_down; }
+
+    {
+        EnterCriticalSection(&m_data_lock);
+        m_cached_stats = stats;
+        m_cached_up = su;
+        m_cached_down = sd;
+        m_items[0].Update(stats, su, sd);
+        m_items[1].Update(stats, su, sd);
+        LeaveCriticalSection(&m_data_lock);
+    }
+
+    BuildTooltip(etw_active, stats, su, sd);
+
+    if (m_detail_created) {
+        m_detail.UpdateData(stats, su, sd);
+    }
+    if (m_popup_created && m_popup.IsVisible()) {
+        std::vector<CTooltipPopup::ProcDisplayInfo> procs;
+        GetProcessDisplayInfo(procs, stats);
+        m_popup.UpdateData(procs, su, sd, EtwPopupStatus(&m_etw_cap));
+    }
+}
+
+void CProcessNetPlugin::ComputeWindowSpeeds(std::vector<ProcTraffic>& stats) {
+    ULONGLONG now = GetTickCount64();
+    for (auto& st : stats) {
+        auto& q = m_win[st.pid];
+        q.push_back(WinSample{ now, st.bytes_sent, st.bytes_recv });
+        if (q.size() > 6) q.pop_front();
+        while (q.size() >= 2 && now - q.front().tick > 1500) q.pop_front();
+        if (q.size() >= 2) {
+            const auto& f = q.front();
+            const auto& b = q.back();
+            double span = (double)(b.tick - f.tick) / 1000.0;
+            if (span > 0.05) {
+                st.speed_up = (double)(b.sent - f.sent) / span;
+                st.speed_down = (double)(b.recv - f.recv) / span;
+            }
+        } else {
+            st.speed_up = 0;
+            st.speed_down = 0;
+        }
+    }
+    // Prune pids that stopped producing events
+    for (auto it = m_win.begin(); it != m_win.end(); ) {
+        if (it->second.empty() || now - it->second.back().tick > 3000)
+            it = m_win.erase(it);
+        else
+            ++it;
+    }
+}
+
+void CALLBACK CProcessNetPlugin::RefreshTimerProc(void* param, BOOLEAN) {
+    ((CProcessNetPlugin*)param)->RefreshTick();
+}
+
+void CProcessNetPlugin::StartRefreshTimer() {
+    StopRefreshTimer();
+    int ms = m_detail.GetRefreshMs();
+    if (ms < 100) ms = 100;
+    if (ms > 2000) ms = 2000;
+    if (CreateTimerQueueTimer(&m_refresh_timer, nullptr, RefreshTimerProc, this, ms, ms, WT_EXECUTELONGFUNCTION))
+        m_refresh_timer_ok = true;
+}
+
+void CProcessNetPlugin::StopRefreshTimer() {
+    if (m_refresh_timer) {
+        DeleteTimerQueueTimer(nullptr, m_refresh_timer, INVALID_HANDLE_VALUE);
+        m_refresh_timer = nullptr;
+    }
+    m_refresh_timer_ok = false;
+}
 const wchar_t* CProcessNetPlugin::GetInfo(PluginInfoIndex i) {
     switch (i) {
     case TMI_NAME: return L"ProcessNetMonitor";
@@ -330,6 +457,21 @@ void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
     m_capture.SetOnStats([this](const std::vector<ProcTraffic>& stats) {
         m_detail.RecordHistory(stats);
     });
+
+    // High-frequency data refresh timer (independent of TM's 1s tick)
+    if (!m_lock_inited) {
+        InitializeCriticalSection(&m_data_lock);
+        m_lock_inited = true;
+    }
+    StartRefreshTimer();
+}
+
+CProcessNetPlugin::~CProcessNetPlugin() {
+    StopRefreshTimer();
+    if (m_lock_inited) {
+        DeleteCriticalSection(&m_data_lock);
+        m_lock_inited = false;
+    }
 }
 
 void CProcessNetPlugin::OnExtenedInfo(ExtendedInfoIndex index, const wchar_t* data) {
@@ -608,12 +750,27 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
             260, 10, 110, 24, hwnd, (HMENU)1003, nullptr, nullptr);
 
+        // Refresh interval label + combo (100/250/500/1000 ms)
+        CreateWindowW(L"STATIC", L"\x5237\x65B0\x95F4\x9694\xFF08ms\xFF09:",
+            WS_CHILD | WS_VISIBLE, 10, 44, 130, 20, hwnd, (HMENU)1005, nullptr, nullptr);
+        HWND hCombo = CreateWindowW(L"COMBOBOX", L"",
+            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+            150, 42, 100, 120, hwnd, (HMENU)1004, nullptr, nullptr);
+        {
+            static const wchar_t* items[] = { L"100", L"250", L"500", L"1000" };
+            for (int i = 0; i < 4; i++) SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)items[i]);
+            int cur = CProcessNetPlugin::Instance().m_detail.GetRefreshMs();
+            int idx = 1;
+            if (cur <= 100) idx = 0; else if (cur <= 250) idx = 1; else if (cur <= 500) idx = 2; else idx = 3;
+            SendMessageW(hCombo, CB_SETCURSEL, idx, 0);
+        }
+
         // OK button
         CreateWindowW(L"BUTTON", L"OK",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 230, 50, 65, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 230, 80, 65, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
         // Cancel button
         CreateWindowW(L"BUTTON", L"Cancel",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 305, 50, 65, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 305, 80, 65, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
         return 0;
     }
     case WM_COMMAND:
@@ -628,7 +785,17 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
 
             auto& plugin = CProcessNetPlugin::Instance();
             plugin.m_detail.SetTransparentWidth(new_width);
+
+            // Save refresh interval from combo
+            HWND hCombo2 = GetDlgItem(hwnd, 1004);
+            int sel = (int)SendMessageW(hCombo2, CB_GETCURSEL, 0, 0);
+            static const int vals[] = { 100, 250, 500, 1000 };
+            if (sel < 0) sel = 1;
+            if (sel > 3) sel = 3;
+            plugin.m_detail.SetRefreshMs(vals[sel]);
+
             plugin.m_detail.SaveSettings();
+            plugin.StartRefreshTimer();   // apply immediately
             g_option_changed = true;
             DestroyWindow(hwnd);
             return 0;

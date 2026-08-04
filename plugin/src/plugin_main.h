@@ -7,6 +7,8 @@
 #include "tooltip_popup.h"
 #include "detail_window.h"
 #include <unordered_map>
+#include <deque>
+#include <map>
 
 struct RecentProc {
     std::wstring name;
@@ -15,6 +17,13 @@ struct RecentProc {
     double ema_up = 0;      // exponential moving average - recent upload speed
     double ema_down = 0;    // exponential moving average - recent download speed
     int idle_rounds = 0;
+};
+
+// One sample point for the rolling 1-second speed window
+struct WinSample {
+    ULONGLONG tick = 0;
+    uint64_t sent = 0;
+    uint64_t recv = 0;
 };
 
 class CProcessNetItem : public IPluginItem {
@@ -57,6 +66,7 @@ public:
     void OnInitialize(ITrafficMonitor* pApp) override;
     void OnExtenedInfo(ExtendedInfoIndex index, const wchar_t* data) override;
     OptionReturn ShowOptionsDialog(void* hParent) override;
+    ~CProcessNetPlugin();
 
 private:
     CProcessNetItem m_items[3];
@@ -84,10 +94,23 @@ public:
     bool m_detail_created = false;
     void StopEtwCapture() { m_etw_cap.Stop(); }
 
-    // Cached stats for popup (updated each DataRequired cycle)
+    // Cached stats for popup (updated each refresh cycle)
     std::vector<ProcTraffic> m_cached_stats;
     double m_cached_up = 0;
     double m_cached_down = 0;
+
+    // High-frequency refresh timer (independent of TM's 1s DataRequired tick)
+    HANDLE m_refresh_timer = nullptr;
+    bool m_refresh_timer_ok = false;
+    CRITICAL_SECTION m_data_lock;         // guards cached stats + item updates
+    bool m_lock_inited = false;
+    std::map<DWORD, std::deque<WinSample>> m_win;   // rolling 1s window samples
+    static void CALLBACK RefreshTimerProc(void* param, BOOLEAN timer_or_wait);
+    void RefreshTick();
+    void StartRefreshTimer();
+    void StopRefreshTimer();
+    void ComputeWindowSpeeds(std::vector<ProcTraffic>& stats);
+    void BuildTooltip(bool etw_active, const std::vector<ProcTraffic>& stats, double su, double sd);
     std::vector<CTooltipPopup::ProcDisplayInfo> GetCachedProcDisplayInfo();
 
 private:
