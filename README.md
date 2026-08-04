@@ -43,10 +43,27 @@
 - **可拖拽滚动条**：自绘滚动条支持鼠标拖拽、点击翻页、滚轮滚动
 - **不显示系统速度**：系统速度由 TrafficMonitor 本身提供，插件只显示进程级信息
 - **右键隐藏**：任务栏插件区域右键即可隐藏悬浮信息窗口
+- **ETW 内核级采集**（v1.10.0）：优先使用 ETW（NT Kernel Logger）按进程精确统计 TCP+UDP 字节，TUN 代理环境下自动过滤虚拟网卡侧重复流量（与 AppNetworkCounter 归属一致）
+- **高频刷新**（v1.10.0）：自建定时器默认 500ms 刷新（插件「选项」可调 100/250/500/1000ms），滚动 1 秒速度窗口与 TM 主面板同拍
+- **附加模式提示**（v1.10.0）：NT Kernel Logger 被其他工具（如 AppNetworkCounter）占用时，悬浮窗显示黄色警告并提示疑似占用者
+- **进程永不消失**（v1.10.0）：出现过流量的进程永久保留在列表（速度显示 0）
+- **悬浮窗固定宽度**（v1.10.0）：长进程名自动省略号，窗口宽度不随名称伸缩
 
 ## 流量统计原理
 
-### TCP 流量
+### 主方案：ETW 内核级采集（v1.10.0+）
+
+使用 ETW 消费经典 **NT Kernel Logger** 会话（优先自建，缓冲 120×256KB；被其他工具占用时自动附加并提示），通过 TDH schema 解析 `TcpIp/UdpIp` 事件的每进程发送/接收字节数：
+
+- 按 PID 累计字节，滚动 1 秒窗口计算速度
+- **TUN 虚拟网卡过滤**：saddr/daddr 任一端落在虚拟网卡子网（如 mihomo 的 198.18.0.0/15）即过滤——同一份数据在内核出现两次（应用 TUN 侧 + 代理物理侧）时只保留物理侧
+- 兼容 TCP + UDP、IPv4 + IPv6，无需管理员权限即可消费（自建会话需管理员，普通权限自动回退）
+
+**回退方案**：ETW 不可用时回退传统采集（`GetPerTcpConnectionEStats` TCP + raw socket UDP），并在悬浮窗提示。
+
+### 传统方案（回退）
+
+#### TCP 流量
 使用 `GetPerTcpConnectionEStats` API 直接从 TCP 协议栈内核读取每条连接的 `DataBytesIn` / `DataBytesOut` 累计值，按 PID 聚合后计算 delta 得到速度。
 
 **优势**：
@@ -54,10 +71,10 @@
 - 双向流量均准确（解决了 raw socket 在 WLAN 上无法捕获入站包的问题）
 - 自动跳过 loopback 连接（127.0.0.1），避免代理软件流量双重计算
 
-### UDP 流量
+#### UDP 流量
 使用 raw socket（`SIO_RCVALL`）抓包，通过 UDP 端口到 PID 的映射表匹配进程。
 
-### 网卡选择
+#### 网卡选择
 跟随 TrafficMonitor 的网卡设置（自动选择/选择全部/指定网卡），每 5 秒检测配置变化并自动切换。
 
 ## 编译环境
@@ -65,7 +82,7 @@
 - **编译器**：MSVC 14.44.35207 (Visual Studio 2022 BuildTools)
 - **SDK**：Windows SDK 10.0.26100.0
 - **C++ 标准**：C++17
-- **依赖库**：iphlpapi.lib, ws2_32.lib, gdi32.lib, user32.lib, shell32.lib, dwmapi.lib, advapi32.lib
+- **依赖库**：iphlpapi.lib, ws2_32.lib, gdi32.lib, user32.lib, shell32.lib, dwmapi.lib, advapi32.lib, tdh.lib, dbghelp.lib
 
 ## 编译部署
 
@@ -92,7 +109,8 @@ ProcessNetMonitor/
 ├── plugin/
 │   ├── src/
 │   │   ├── PluginInterface.h    # TM 插件接口定义
-│   │   ├── capture.h / .cpp     # 流量采集（GetPerTcpConnectionEStats + raw socket）
+│   │   ├── capture.h / .cpp     # 传统采集（GetPerTcpConnectionEStats + raw socket，ETW 回退）
+│   │   ├── etw_capture.h/.cpp   # ETW 内核级采集（NT Kernel Logger + TDH）
 │   │   ├── plugin_main.h / .cpp # 插件主体（3个item：Up/Down/透明区域）
 │   │   ├── tooltip_popup.h/.cpp # 富文本悬浮信息窗口
 │   │   ├── detail_window.h/.cpp # 火绒风格详情窗口
@@ -100,7 +118,6 @@ ProcessNetMonitor/
 │   │   ├── app.ico              # 插件图标
 │   ├── ProcessNetMonitor.dll         # 64 位编译输出
 │   ├── ProcessNetMonitor_x86.dll     # 32 位编译输出
-│   ├── ProcessNetMonitor_debug.dll   # 64 位调试版（含日志输出）
 ├── TrafficMonitor/
 │   └── TrafficMonitor/          # TM 主程序
 │       └── plugins/             # 插件DLL放这里
@@ -123,6 +140,16 @@ ProcessNetMonitor/
 
 ## 版本历史
 
+### v1.10.0 (2026-08-04)
+- **ETW 内核级采集**：优先自建 NT Kernel Logger 会话（缓冲 120×256KB，大流量不丢事件），TDH 按属性名解析 TcpIp/UdpIp 事件的每进程字节；被其他工具占用时自动附加并提示
+- **TUN 虚拟网卡过滤**：saddr/daddr 任一端落在虚拟网卡子网（如 198.18.0.0/15）即过滤，代理模式下不再重复计数（走代理的应用流量归属代理进程，与 AppNetworkCounter 一致）
+- **高频刷新**：自建 500ms 定时器（插件「选项」可调 100/250/500/1000ms），滚动 1 秒速度窗口与 TM 主面板同拍
+- **附加模式提示**：悬浮窗黄色警告行 + tooltip 警告，显示疑似占用者（AppNetworkCounter 等）
+- **进程永不消失**：出现过流量的进程永久保留在列表
+- **悬浮窗固定宽度**：长进程名省略号，宽度不随名称伸缩；hover 触发排除设置对话框；拖动主悬浮窗时跟随
+- **修复**：详情窗口「无活跃进程」闪空；历史流量双源重复记录虚高；启动/切换瞬间 2^64 级速度虚高（首次基线 + 差值下溢保护）；共享会话缓冲溢出丢事件（数值比 TM 网卡差 2~5 倍）；pid 4 显示为 System；开机自启堆损坏闪退（0xc0000374，窗口更新改 PostMessage 到 UI 线程）
+- **推翻 v1.9.0 的 ETW 结论**：2026-08-01 曾判断"用户态 ETW 无法实现每进程字节统计"——该结论有误（当时是消费者解析 bug）。Win11 25H2 上经典 NT Kernel Logger 的 TcpIp/UdpIp 事件完整携带每进程字节数，TUN 代理环境下照样工作
+
 ### v1.9.0 (2026-08-01)
 - **修复悬浮窗触发不稳定**（#2）：重写 hover 状态机，改用 popup 窗口 100ms 定时器驱动（不再依赖 TM 的 1 秒 DataRequired 回调）。悬停 400ms 显示，离开 300ms 隐藏，行为稳定可预测
 - **任务栏点击固定/取消固定**：点击任务栏插件区域弹出悬浮窗并固定（鼠标离开不消失），再次点击或右键取消固定
@@ -134,7 +161,7 @@ ProcessNetMonitor/
 - **详情窗口多屏居中**：打开详情窗口时在父窗口所在显示器居中，不再固定主屏
 - **删除遗留调试日志**：移除 `pnm_hover2.log` 写盘
 - **已知限制**：Win11 任务栏上 TM 原生文本 tooltip 层级异常（被任务栏遮挡只剩一行），此为 TM 框架层问题，插件无法修复。建议在 TM 设置中关闭「显示鼠标提示」以消除干扰
-- **ETW 调查结论**（2026-08-01）：Win11 25H2（build 26200）上 NT Kernel Logger 的 TcpIpSend/TcpIpRecv 事件 `size` 字段恒为 0（TDH API 确认）；Microsoft-Windows-TCPIP 提供程序只有连接/状态事件，无字节计数。用户态 ETW 无法实现每进程字节统计，火绒级精度需内核驱动（WFP callout / NDIS filter）。当前方案保持 EStats（TCP）+ raw socket（UDP）
+- **ETW 调查结论**（2026-08-01，**已被 v1.10.0 推翻**）：当时判断"用户态 ETW 无法实现每进程字节统计"，系消费者解析 bug 导致，见 v1.10.0 说明
 
 ### v1.8.1 (2026-07-24)
 - **修复任务栏错误提示乱码**：未以管理员身份运行 TrafficMonitor 时，任务栏原先显示被截断成天书的英文错误（用户反馈的 "ERR: RRW SOOKET FAILE"），现改为简短中文提示 `ERR: 需要管理员权限`

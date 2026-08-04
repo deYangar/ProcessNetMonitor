@@ -35,3 +35,6 @@ debug.log
 
 # YOLO session tools - scripts, logs, research
 tools/
+
+# YOLO work plan - local only, never pushed
+YOLO_PLAN.md
