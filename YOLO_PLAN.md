@@ -11,8 +11,10 @@
 - [x] 3. etw_diag 诊断模块：双会话消费 + TDH 解析 + 原始字节 dump → 证明 size 字段有数据
 - [x] 4. 集成进插件 + 编译 + 部署（诊断版）
 - [x] 5. 对比实验：per-PID 字节数完整拿到（mihomo 126MB 等），推翻"TUN 下 size=0"
-- [x] 6. 正式 ETW 后端 etw_capture：attach/start 自动切换 + TDH 分类 + 速度输出 + legacy 合并
-- [x] 7a. x64 编译部署（TM 01:17 运行中，无崩溃）
+- [x] 6. 正式 ETW 后端 etw_capture：attach/start 自动切换 + TDH 分类 + 速度输出
+- [x] 6b. ETW 优先架构（咩咩要求）：ETW 为准，legacy 兑底 + conn_count
+- [x] 6c. 移除 TUN 排除功能（UI/settings/过滤/默认段，咩咩要求）
+- [x] 7a. x64 编译部署 + git 提交 1455dc4（未 push）
 - [ ] 7b. 咩咩同屏实测对比 ANC 数字
 - [ ] 8. x86 编译、清理诊断代码、提交、发版（等咩咩确认）
 

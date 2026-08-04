@@ -28,7 +28,12 @@ public:
     bool Start();
     void Stop();
     bool IsRunning() const { return m_running; }
-    bool HasData() const { return m_got_events; }
+    // "has live data": true only if we received events within the last 15s.
+    // Once the ETW session drops, upstream falls back to legacy capture.
+    bool HasData() const {
+        ULONGLONG t = m_last_event_tick.load(std::memory_order_acquire);
+        return t != 0 && (GetTickCount64() - t) < 15000;
+    }
     const wchar_t* GetLastError() const { return m_error; }
 
     // Same contract as PacketCapture::GetStats: per-process speeds.
@@ -58,6 +63,8 @@ private:
         bool offsets_ok = false;
         uint32_t pid_off = 0, pid_len = 0;
         uint32_t size_off = 0, size_len = 0;
+        uint32_t daddr_off = 0, daddr_len = 0;   // 0 = unknown
+        uint32_t saddr_off = 0, saddr_len = 0;
     };
 
     struct Cum {
@@ -79,8 +86,16 @@ private:
 
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_stop{false};
-    std::atomic<bool> m_got_events{false};
+    std::atomic<ULONGLONG> m_last_event_tick{0};   // set on every kept event
     std::thread m_thread;
+
+    // diagnostics counters (guarded by m_mutex)
+    uint64_t m_ev_total = 0;       // all events reaching OnEvent with data
+    uint64_t m_ev_net = 0;         // classified send/recv with valid offsets
+    uint64_t m_ev_filt_addr = 0;   // skipped by virtual-IP blacklist
+    uint64_t m_ev_kept = 0;        // actually counted
+    ULONGLONG m_last_log_tick = 0;
+    wchar_t m_conn_state[64] = L"init";   // attaching/attached/self/failed
 
     // current consumer state (for Stop() unblock)
     std::atomic<TRACEHANDLE> m_cur_consumer{INVALID_PROCESSTRACE_HANDLE};
@@ -90,6 +105,23 @@ private:
     std::mutex m_mutex;                       // protects m_cum + shape cache
     std::map<ShapeKey, ShapeInfo> m_shapes;
     std::map<DWORD, Cum> m_cum;
+
+    // Adapter unicast IPs, split physical vs virtual (TUN/TAP/VPN...) by name.
+    // Blacklist semantics: only events whose LOCAL address belongs to a virtual
+    // adapter are skipped (dedup against the physical-side copy of the same
+    // bytes). Unknown addresses are ALWAYS kept - no false positives.
+    struct IfaceIps {
+        std::vector<uint32_t> v4;                 // network byte order (memcmp-able)
+        std::vector<std::vector<uint8_t>> v6;     // 16 bytes each
+        ULONGLONG refreshed = 0;
+    };
+    IfaceIps m_phys;  // guarded by m_mutex
+    IfaceIps m_virt;
+    void RefreshIfaceIpsLocked();
+    bool SkipByLocalAddr(const BYTE* ud, USHORT ulen, const ShapeInfo& si);
+
+    void LogLine(const wchar_t* fmt, ...);
+    void LogPeriodicLocked();
 
     std::mutex m_name_mutex;
     std::map<DWORD, std::wstring> m_name_cache;

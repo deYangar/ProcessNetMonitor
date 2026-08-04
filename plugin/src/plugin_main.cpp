@@ -201,17 +201,20 @@ void CProcessNetPlugin::DataRequired() {
 
     // ETW backend takes priority: more accurate per-process bytes (TCP+UDP,
     // kernel attribution, works under TUN). Legacy stays warm as fallback
-    // and supplies conn_count.
+    // and supplies conn_count. If ETW currently yields no rows (session
+    // hiccup / all filtered), keep legacy data so the UI never blanks out.
     bool etw_active = m_etw_cap.HasData();
     if (etw_active) {
         auto es = m_etw_cap.GetStats(dt);
-        std::map<DWORD, int> conn_by_pid;
-        for (auto& l : stats) conn_by_pid[l.pid] = l.conn_count;
-        for (auto& e : es) {
-            auto it = conn_by_pid.find(e.pid);
-            if (it != conn_by_pid.end()) e.conn_count = it->second;
+        if (!es.empty()) {
+            std::map<DWORD, int> conn_by_pid;
+            for (auto& l : stats) conn_by_pid[l.pid] = l.conn_count;
+            for (auto& e : es) {
+                auto it = conn_by_pid.find(e.pid);
+                if (it != conn_by_pid.end()) e.conn_count = it->second;
+            }
+            stats = std::move(es);
         }
-        stats = std::move(es);
     }
     double su = 0, sd = 0;
     for (auto& s : stats) { su += s.speed_up; sd += s.speed_down; }
