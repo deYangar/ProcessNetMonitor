@@ -514,7 +514,11 @@ const wchar_t* CProcessNetPlugin::GetTooltipInfo() { return m_tooltip; }
 
 void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
     m_app = p;
+    // Crash diagnostics: the filter catches normal unhandled exceptions;
+    // the vectored handler also has a chance to catch failfast termination
+    // (e.g. heap corruption 0xc0000374), which bypasses the filter.
     SetUnhandledExceptionFilter(PnmCrashHandler);
+    AddVectoredExceptionHandler(1, PnmCrashHandler);
     // Use DLL's HINSTANCE (not EXE's) so resource loading (icons, etc.) works
     HINSTANCE hInst = s_dll_hinst ? s_dll_hinst : (HINSTANCE)GetModuleHandleW(NULL);
     m_popup_created = m_popup.Initialize(hInst);
