@@ -234,7 +234,7 @@ private:
     int m_active_tab = 0;      // 0=实时流量, 1=历史流量
 
     int m_transparent_width = 100;  // transparent area width in pixels
-    int m_refresh_ms = 250;         // plugin data refresh interval (ms)
+    int m_refresh_ms = 500;         // plugin data refresh interval (ms)
 
     // Columns - real-time
     enum ColIndex { COL_ICON, COL_NAME, COL_CATEGORY, COL_DOWN, COL_UP, COL_CONN, COL_ACTION };
