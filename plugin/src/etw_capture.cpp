@@ -226,10 +226,11 @@ static uint32_t IntypeSize2(uint16_t intype) {
     switch (base) {
     case 3: case 4: case 13: return 1;
     case 5: case 6: return 2;
-    case 7: case 8: case 11: case 21: case 22: return 4;
-    case 9: case 10: case 12: case 16: return 8;
-    case 17: return 8;
-    default: return 0;
+    case 7: case 8: case 11: return 4;              // int32, uint32, float
+    case 9: case 10: case 12: case 16: case 17: return 8;  // int64, uint64, double, pointer, filetime
+    case 20: return 4;                              // hexint32
+    case 21: return 8;                              // hexint64 (was wrongly 4)
+    default: return 0;                              // binary/counted/... handled by p.length
     }
 }
 
