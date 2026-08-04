@@ -600,12 +600,7 @@ std::wstring EtwCapture::ProcName(DWORD pid) {
     std::lock_guard<std::mutex> lk(m_name_mutex);
     auto it = m_name_cache.find(pid);
     if (it != m_name_cache.end()) return it->second;
-    // pid 4 is the System process - it has no image path, name it explicitly
-    if (pid == 4) {
-        m_name_cache[pid] = L"System";
-        return L"System";
-    }
-    std::wstring name = L"<" + std::to_wstring(pid) + L">";
+    std::wstring name;
     HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (h) {
         wchar_t buf[512]; DWORD n = 512;
@@ -617,6 +612,22 @@ std::wstring EtwCapture::ProcName(DWORD pid) {
         }
         CloseHandle(h);
     }
+    if (name.empty()) {
+        // Generic fallback via Toolhelp snapshot: covers System (pid 4),
+        // Registry, protected/system processes that have no accessible image
+        // path - no hardcoded PID special-casing needed.
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snap != INVALID_HANDLE_VALUE) {
+            PROCESSENTRY32W pe = { sizeof(pe) };
+            if (Process32FirstW(snap, &pe)) {
+                do {
+                    if (pe.th32ProcessID == pid) { name = pe.szExeFile; break; }
+                } while (Process32NextW(snap, &pe));
+            }
+            CloseHandle(snap);
+        }
+    }
+    if (name.empty()) name = L"<" + std::to_wstring(pid) + L">";
     m_name_cache[pid] = name;
     return name;
 }
