@@ -123,47 +123,79 @@ void EtwCapture::ConsumerLoop() {
         lf.ProcessTraceMode = EVENT_TRACE_REAL_TIME_MODE | PROCESS_TRACE_MODE_EVENT_RECORD;
         lf.EventRecordCallback = &EtwCapture::Callback;
 
-        // 1) attach to an already-running NT Kernel Logger (e.g. AppNetworkCounter's)
-        consumer = OpenTraceW(&lf);
-        if (consumer == INVALID_PROCESSTRACE_HANDLE) {
-            DWORD openErr = ::GetLastError();
-            // 2) start our own
-            DWORD nameBytes = (DWORD)((wcslen(KERNEL_LOGGER_NAMEW) + 1) * sizeof(wchar_t));
-            DWORD bufSize = sizeof(EVENT_TRACE_PROPERTIES) + nameBytes;
-            std::vector<BYTE> buf(bufSize, 0);
-            auto* props = reinterpret_cast<EVENT_TRACE_PROPERTIES*>(buf.data());
-            props->Wnode.BufferSize = bufSize;
-            props->Wnode.ClientContext = 1;
-            props->BufferSize = 256;
-            props->MinimumBuffers = 4;
-            props->MaximumBuffers = 120;
-            props->FlushTimer = 1;
-            props->LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
-            props->EnableFlags = EVENT_TRACE_FLAG_NETWORK_TCPIP;
+        // 1) Prefer our OWN session: we control buffer sizing so heavy
+        // traffic doesn't overflow and drop events (attaching to another
+        // app's NT Kernel Logger inherits ITS small buffers).
+        DWORD nameBytes = (DWORD)((wcslen(KERNEL_LOGGER_NAMEW) + 1) * sizeof(wchar_t));
+        DWORD bufSize = sizeof(EVENT_TRACE_PROPERTIES) + nameBytes;
+        std::vector<BYTE> buf(bufSize, 0);
+        auto* props = reinterpret_cast<EVENT_TRACE_PROPERTIES*>(buf.data());
+        props->Wnode.BufferSize = bufSize;
+        props->Wnode.ClientContext = 1;
+        props->BufferSize = 256;
+        props->MinimumBuffers = 4;
+        props->MaximumBuffers = 120;
+        props->FlushTimer = 1;
+        props->LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
+        props->EnableFlags = EVENT_TRACE_FLAG_NETWORK_TCPIP;
 
-            TRACEHANDLE session = 0;
-            ULONG sr = StartTraceW(&session, KERNEL_LOGGER_NAMEW, props);
-            if (sr == ERROR_SUCCESS) {
-                started_own = true;
-                m_own_session_handle = session;
-                wcscpy_s(m_conn_state, L"self-started");
-                LogLine(L"StartTrace OK (own session)");
+        TRACEHANDLE session = 0;
+        ULONG sr = StartTraceW(&session, KERNEL_LOGGER_NAMEW, props);
+        if (sr == ERROR_SUCCESS) {
+            started_own = true;
+            m_own_session_handle = session;
+            wcscpy_s(m_conn_state, L"self-started");
+            LogLine(L"StartTrace OK (own session, maxbuf=%u)", props->MaximumBuffers);
+            consumer = OpenTraceW(&lf);
+            if (consumer == INVALID_PROCESSTRACE_HANDLE) {
+                EVENT_TRACE_PROPERTIES sp; memset(&sp, 0, sizeof(sp));
+                sp.Wnode.BufferSize = sizeof(EVENT_TRACE_PROPERTIES);
+                ControlTraceW(session, nullptr, &sp, EVENT_TRACE_CONTROL_STOP);
+                started_own = false;
+                SetError(L"ETW OpenTrace failed err=%lu", GetLastError());
+                LogLine(L"OpenTrace after StartTrace FAILED err=%lu", GetLastError());
+            }
+        } else if (sr == ERROR_ALREADY_EXISTS) {
+            // Someone else owns "NT Kernel Logger" - usually a stale session
+            // left by a killed app (e.g. ANC). Try to stop it and take over;
+            // if that fails, attach to theirs.
+            EVENT_TRACE_PROPERTIES sp; memset(&sp, 0, sizeof(sp));
+            sp.Wnode.BufferSize = sizeof(EVENT_TRACE_PROPERTIES);
+            ULONG st = ControlTraceW(0, KERNEL_LOGGER_NAMEW, &sp, EVENT_TRACE_CONTROL_STOP);
+            LogLine(L"session exists - stop attempt rc=%lu", st);
+            if (st == ERROR_SUCCESS) {
+                ULONG sr2 = StartTraceW(&session, KERNEL_LOGGER_NAMEW, props);
+                if (sr2 == ERROR_SUCCESS) {
+                    started_own = true;
+                    m_own_session_handle = session;
+                    wcscpy_s(m_conn_state, L"self-started");
+                    LogLine(L"took over stale session - StartTrace OK (own, maxbuf=%u)", props->MaximumBuffers);
+                    consumer = OpenTraceW(&lf);
+                    if (consumer == INVALID_PROCESSTRACE_HANDLE) {
+                        EVENT_TRACE_PROPERTIES sp2; memset(&sp2, 0, sizeof(sp2));
+                        sp2.Wnode.BufferSize = sizeof(EVENT_TRACE_PROPERTIES);
+                        ControlTraceW(session, nullptr, &sp2, EVENT_TRACE_CONTROL_STOP);
+                        started_own = false;
+                        SetError(L"ETW OpenTrace failed err=%lu", GetLastError());
+                        LogLine(L"OpenTrace after takeover FAILED err=%lu", GetLastError());
+                    }
+                } else {
+                    LogLine(L"StartTrace after stop failed err=%lu", sr2);
+                }
+            }
+            if (!started_own && consumer == INVALID_PROCESSTRACE_HANDLE) {
+                // fall back: attach to whatever is there
+                wcscpy_s(m_conn_state, L"attached");
+                LogLine(L"attaching to existing session instead (buffers NOT ours)");
                 consumer = OpenTraceW(&lf);
                 if (consumer == INVALID_PROCESSTRACE_HANDLE) {
-                    EVENT_TRACE_PROPERTIES sp; memset(&sp, 0, sizeof(sp));
-                    sp.Wnode.BufferSize = sizeof(EVENT_TRACE_PROPERTIES);
-                    ControlTraceW(session, nullptr, &sp, EVENT_TRACE_CONTROL_STOP);
-                    started_own = false;
-                    SetError(L"ETW OpenTrace failed err=%lu", GetLastError());
-                    LogLine(L"OpenTrace after StartTrace FAILED err=%lu", GetLastError());
+                    LogLine(L"attach failed err=%lu", GetLastError());
+                    SetError(L"ETW attach failed err=%lu", GetLastError());
                 }
-            } else {
-                SetError(L"ETW attach+start failed: Open err=%lu Start=%lu (need admin?)", openErr, sr);
-                LogLine(L"attach err=%lu, StartTrace err=%lu", openErr, sr);
             }
         } else {
-            wcscpy_s(m_conn_state, L"attached");
-            LogLine(L"attached to existing NT Kernel Logger");
+            SetError(L"ETW StartTrace failed err=%lu (need admin?)", sr);
+            LogLine(L"StartTrace failed err=%lu", sr);
         }
 
         if (consumer == INVALID_PROCESSTRACE_HANDLE) {
@@ -295,7 +327,34 @@ void EtwCapture::OnEvent(PEVENT_RECORD rec) {
     // Blacklist semantics: skip ONLY events whose local address belongs to a
     // virtual/TUN adapter (dedup - the same bytes also appear once on the
     // physical side). Unknown addresses are always kept.
-    if (SkipByLocalAddr(ud, ulen, si)) {
+    bool skip = SkipByLocalAddr(ud, ulen, si);
+    // sample local addresses for diagnostics
+    {
+        uint32_t sample_pid = si.pid_len == 4 ? *(const uint32_t*)(ud + si.pid_off) : 0;
+        if (sample_pid == 0 || sample_pid == (uint32_t)-1) sample_pid = rec->EventHeader.ProcessId;
+        uint32_t loff = (si.dir == 1) ? si.saddr_off : si.daddr_off;
+        uint32_t llen = (si.dir == 1) ? si.saddr_len : si.daddr_len;
+        if (llen == 4 && ulen >= (USHORT)(loff + 4)) {
+            uint32_t x; memcpy(&x, ud + loff, 4);
+            (skip ? m_samp_filt : m_samp_kept).insert(x);
+            if (!skip) {
+                // flag shapes whose "local" looks like a public/remote address
+                const uint8_t* b = (const uint8_t*)&x;
+                bool priv = (b[0] == 10) || (b[0] == 127) ||
+                    (b[0] == 169 && b[1] == 254) ||
+                    (b[0] == 172 && b[1] >= 16 && b[1] <= 31) ||
+                    (b[0] == 192 && b[1] == 168) ||
+                    (b[0] == 198 && (b[1] == 18 || b[1] == 19)) ||
+                    (b[0] == 100 && b[1] >= 64 && b[1] <= 127) ||
+                    (b[0] == 0) || (b[0] >= 224);
+                if (!priv) {
+                    WeirdShape ws{ key.p1, key.task, key.opcode, key.id, key.version, si.dir, sample_pid, x };
+                    m_samp_weird.insert(ws);
+                }
+            }
+        }
+    }
+    if (skip) {
         m_ev_filt_addr++;
         return;
     }
@@ -315,6 +374,19 @@ void EtwCapture::OnEvent(PEVENT_RECORD rec) {
     c.idle_rounds = 0;
     m_ev_kept++;
     m_last_event_tick.store(GetTickCount64(), std::memory_order_release);
+
+    // protocol split (diagnostics)
+    bool is_udp = false;
+    if (key.p1 == 0xbf3a50c5) is_udp = true;                       // classic UdpIp
+    else if (key.p1 == 0x7dd42a49) is_udp = (key.task == 11);      // manifest UDPIP
+    else is_udp = (key.opcode == 26 || key.opcode == 27 || key.opcode == 28 || key.opcode == 29);
+    if (is_udp) {
+        if (si.dir == 1) { m_udp_send_ev++; m_udp_send_b += bytes; }
+        else             { m_udp_recv_ev++; m_udp_recv_b += bytes; }
+    } else {
+        if (si.dir == 1) { m_tcp_send_ev++; m_tcp_send_b += bytes; }
+        else             { m_tcp_recv_ev++; m_tcp_recv_b += bytes; }
+    }
 }
 
 std::vector<ProcTraffic> EtwCapture::GetStats(double interval_sec) {
@@ -323,13 +395,11 @@ std::vector<ProcTraffic> EtwCapture::GetStats(double interval_sec) {
 
     std::lock_guard<std::mutex> lk(m_mutex);
     ULONGLONG now = GetTickCount64();
-    for (auto it = m_cum.begin(); it != m_cum.end(); ) {
-        Cum& c = it->second;
+    for (auto& [pid, c] : m_cum) {
         c.idle_rounds++;
-        if (c.idle_rounds > 60) { it = m_cum.erase(it); continue; }  // ~1min idle at 1s poll
 
         ProcTraffic pt;
-        pt.pid = it->first;
+        pt.pid = pid;
         pt.bytes_sent = c.sent;
         pt.bytes_recv = c.recv;
         uint64_t ds = c.sent - c.prev_sent;
@@ -339,11 +409,11 @@ std::vector<ProcTraffic> EtwCapture::GetStats(double interval_sec) {
         pt.speed_up = (double)ds / interval_sec;
         pt.speed_down = (double)dr / interval_sec;
         pt.conn_count = 0;
-        pt.name = ProcName(it->first);
-        pt.exe_path = ProcPath(it->first);
-        if (pt.speed_up > 0.001 || pt.speed_down > 0.001 || c.idle_rounds <= 8)
-            out.push_back(std::move(pt));
-        ++it;
+        pt.name = ProcName(pid);
+        pt.exe_path = ProcPath(pid);
+        // Keep every process that has ever had traffic - never evict
+        // (user request 2026-08-04: drop the idle-removal entirely)
+        out.push_back(std::move(pt));
     }
     LogPeriodicLocked();
     (void)now;
@@ -424,6 +494,18 @@ void EtwCapture::RefreshIfaceIpsLocked() {
                 uint32_t x;
                 memcpy(&x, &((sockaddr_in*)ua->Address.lpSockaddr)->sin_addr, 4);
                 (virt ? m_virt.v4 : m_phys.v4).push_back(x);
+                if (virt) {
+                    // also record the subnet (OnLinkPrefixLength) so TUN-side
+                    // fake-ip addresses in the same range get filtered too
+                    uint8_t pre = (uint8_t)ua->OnLinkPrefixLength;
+                    if (pre == 0 || pre > 32) pre = 32;
+                    uint8_t net[4]; memcpy(net, &x, 4);
+                    uint32_t full = pre / 8, rem = pre % 8;
+                    for (uint32_t i = full; i < 4; i++) net[i] = 0;
+                    if (rem) net[full] = (uint8_t)(net[full] & (0xFF << (8 - rem)));
+                    uint32_t nv; memcpy(&nv, net, 4);
+                    m_virt.subnets_v4.push_back({ nv, pre });
+                }
             } else if (ua->Address.lpSockaddr->sa_family == AF_INET6) {
                 std::vector<uint8_t> b(16);
                 memcpy(b.data(), &((sockaddr_in6*)ua->Address.lpSockaddr)->sin6_addr, 16);
@@ -453,38 +535,122 @@ void EtwCapture::LogPeriodicLocked() {
     if (m_phys.v4.empty()) wcscat_s(phys, 256, L"(none)");
     if (m_virt.v4.empty()) wcscat_s(virt, 256, L"(none)");
 
-    LogLine(L"conn=%s total=%llu net=%llu filt=%llu kept=%llu cum=%zu phys=[%s] virt=[%s]",
+    wchar_t sk[512] = L"", sf[512] = L"";
+    auto fmt_set = [](wchar_t* dst, size_t cap, const std::set<uint32_t>& s) {
+        int n = 0;
+        for (auto v : s) {
+            if (n >= 8) { wcscat_s(dst, cap, L"..."); break; }
+            const uint8_t* b = (const uint8_t*)&v;
+            wchar_t t[32];
+            swprintf_s(t, 32, n ? L",%u.%u.%u.%u" : L"%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+            wcscat_s(dst, cap, t); n++;
+        }
+    };
+    fmt_set(sk, 512, m_samp_kept);
+    fmt_set(sf, 512, m_samp_filt);
+    m_samp_kept.clear();
+    m_samp_filt.clear();
+
+    wchar_t pids[512] = L"";
+    for (auto& [pid, c] : m_cum) {
+        wchar_t t[128];
+        swprintf_s(t, 128, L"%s(%lu) ", ProcName(pid).c_str(), pid);
+        wcscat_s(pids, 512, t);
+    }
+
+    // dump resolved shapes every 30s (offsets tell us which layout is real)
+    if (tnow - m_last_shape_tick >= 30000) {
+        m_last_shape_tick = tnow;
+        wchar_t sd[1600] = L"";
+        for (auto& [k, si] : m_shapes) {
+            if (!si.offsets_ok) continue;
+            if (k.p1 != 0x9a280ac0 && k.p1 != 0x7dd42a49) continue;
+            if (k.opcode != 10 && k.opcode != 11 && k.opcode != 42 && k.opcode != 43) continue;
+            wchar_t t[200];
+            swprintf_s(t, 200, L"{p1=%08x op=%u id=%u dir=%d po=%u so=%u do=%u sl=%u dl=%u} ",
+                       k.p1, k.opcode, k.id, si.dir, si.pid_off, si.saddr_off,
+                       si.daddr_off, si.saddr_len, si.daddr_len);
+            if (wcslen(sd) + wcslen(t) >= 1500) break;
+            wcscat_s(sd, 1600, t);
+        }
+        LogLine(L"SHAPES: %s", sd);
+    }
+
+    wchar_t wd[1600] = L"";
+    for (auto& w : m_samp_weird) {
+        const uint8_t* b = (const uint8_t*)&w.addr;
+        wchar_t t[200];
+        swprintf_s(t, 200, L"{p1=%08x t=%u op=%u id=%u v=%u dir=%d pid=%lu addr=%u.%u.%u.%u} ",
+                   w.p1, w.task, w.opcode, w.id, w.version, w.dir, w.pid,
+                   b[0], b[1], b[2], b[3]);
+        if (wcslen(wd) + wcslen(t) >= 1500) break;
+        wcscat_s(wd, 1600, t);
+    }
+    m_samp_weird.clear();
+
+    LogLine(L"conn=%s total=%llu net=%llu filt=%llu kept=%llu cum=%zu phys=[%s] virt=[%s] keptAddrs=[%s] filtAddrs=[%s] procs=%s weird=%s tcpU=%lluB/%lluev tcpD=%lluB/%lluev udpU=%lluB/%lluev udpD=%lluB/%lluev",
             m_conn_state, m_ev_total, m_ev_net, m_ev_filt_addr, m_ev_kept,
-            m_cum.size(), phys, virt);
+            m_cum.size(), phys, virt, sk, sf, pids, wd,
+            m_tcp_send_b, m_tcp_send_ev, m_tcp_recv_b, m_tcp_recv_ev,
+            m_udp_send_b, m_udp_send_ev, m_udp_recv_b, m_udp_recv_ev);
+    m_tcp_send_ev = 0; m_tcp_send_b = 0;
+    m_tcp_recv_ev = 0; m_tcp_recv_b = 0;
+    m_udp_send_ev = 0; m_udp_send_b = 0;
+    m_udp_recv_ev = 0; m_udp_recv_b = 0;
 }
 
 bool EtwCapture::SkipByLocalAddr(const BYTE* ud, USHORT ulen, const ShapeInfo& si) {
+    // Does a 4-byte address (network byte order) belong to a virtual/TUN subnet?
+    auto in_virt = [this](uint32_t x) -> bool {
+        for (auto p : m_virt.v4) if (p == x) return true;
+        const uint8_t* a4 = (const uint8_t*)&x;
+        for (auto& [nv, pre] : m_virt.subnets_v4) {
+            if (pre == 0 || pre >= 32) continue;
+            const uint8_t* nb = (const uint8_t*)&nv;
+            uint32_t full = pre / 8, rem = pre % 8;
+            bool in = true;
+            for (uint32_t i = 0; i < full && in; i++) if (a4[i] != nb[i]) in = false;
+            if (in && rem) {
+                uint8_t mask = (uint8_t)(0xFF << (8 - rem));
+                if ((a4[full] & mask) != (nb[full] & mask)) in = false;
+            }
+            if (in) return true;
+        }
+        return false;
+    };
+
+    // Primary path: BOTH endpoints parsed. Skip when EITHER endpoint is in a
+    // virtual/TUN subnet. TUN-side events always have one endpoint in the
+    // virtual range; physical-side events never do. This is layout-agnostic:
+    // the classic provider's saddr/daddr byte order contradicts its TDH
+    // schema, so we cannot trust a single "local" field.
+    if (si.saddr_len == 4 && si.daddr_len == 4 &&
+        ulen >= (USHORT)(si.saddr_off + 4) && ulen >= (USHORT)(si.daddr_off + 4)) {
+        uint32_t a, b;
+        memcpy(&a, ud + si.saddr_off, 4);
+        memcpy(&b, ud + si.daddr_off, 4);
+        const uint8_t* pa = (const uint8_t*)&a;
+        const uint8_t* pb = (const uint8_t*)&b;
+        if (pa[0] == 127 || pb[0] == 127) return true;   // loopback
+        return in_virt(a) || in_virt(b);
+    }
+
+    // Fallback: only one endpoint parsed - keep old local-addr semantics.
     uint32_t off, len;
-    if (si.dir == 1) { off = si.saddr_off; len = si.saddr_len; }   // send: local = saddr
-    else             { off = si.daddr_off; len = si.daddr_len; }   // recv: local = daddr
+    if (si.dir == 1) { off = si.saddr_off; len = si.saddr_len; }
+    else             { off = si.daddr_off; len = si.daddr_len; }
     if (len == 0 || ulen < (USHORT)(off + len)) return false;      // unknown -> keep
     const BYTE* a = ud + off;
-
-    // Loopback: 127.0.0.0/8 and ::1
-    if (len == 4 && a[0] == 127) return true;
+    if (len == 4 && a[0] == 127) return true;                      // loopback
     if (len == 16) {
         bool is_loop = true;
         for (int i = 0; i < 15; i++) if (a[i] != 0) { is_loop = false; break; }
         if (is_loop && a[15] == 1) return true;
+        return false;   // IPv6 not subnetted yet - keep
     }
-
-    // Virtual-adapter blacklist: skip only known virtual/TUN local addresses.
-    // Everything else (physical, 0.0.0.0, unrecognized) is kept.
     if (len == 4) {
         uint32_t x; memcpy(&x, a, 4);
-        for (auto p : m_virt.v4) if (p == x) return true;
-        return false;
-    }
-    if (len == 16) {
-        for (auto& v : m_virt.v6) {
-            if (v.size() == 16 && memcmp(v.data(), a, 16) == 0) return true;
-        }
-        return false;
+        return in_virt(x);
     }
     return false;
 }

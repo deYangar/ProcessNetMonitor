@@ -288,6 +288,7 @@ void CTooltipPopup::CalcLayout(HDC hdc, int& out_w, int& out_h, int& out_up_coun
     out_w = max(out_w, MIN_WIDTH);
 
     out_h = PADDING + HEADER_H
+            + (m_status.empty() ? 0 : STATUS_H + 2)
             + SECTION_H + up_count * ROW_HEIGHT + GAP_H
             + SECTION_H + down_count * ROW_HEIGHT
             + BTN_AREA_H
@@ -447,6 +448,17 @@ void CTooltipPopup::OnPaint() {
     RECT header_rc = { PADDING, y, w - PADDING, y + HEADER_H };
     DrawTextW(memDC, header, -1, &header_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
     y += HEADER_H;
+
+    // === Status / warning line (e.g. ETW attach mode) ===
+    if (!m_status.empty()) {
+        SetTextColor(memDC, m_dark_mode ? RGB(255, 200, 80) : RGB(190, 120, 0));
+        HFONT hOldF2 = (HFONT)SelectObject(memDC, m_font_small ? m_font_small : m_font_normal);
+        RECT st_rc = { PADDING, y, w - PADDING, y + STATUS_H };
+        DrawTextW(memDC, m_status.c_str(), -1, &st_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        SelectObject(memDC, hOldF2);
+        y += STATUS_H + 2;
+        SetTextColor(memDC, GetTextColor());
+    }
 
     // === Upload section ===
     DrawSectionTitle(memDC, y, L"\u25B2 \u5B9E\u65F6\u4E0A\u4F20", true);
@@ -613,10 +625,12 @@ void CTooltipPopup::PositionWindow(const RECT& anchor_rect) {
 
 void CTooltipPopup::UpdateAndShow(const std::vector<ProcDisplayInfo>& procs,
                                    double total_up, double total_down,
-                                   const RECT& anchor_rect) {
+                                   const RECT& anchor_rect,
+                                   const wchar_t* status) {
     m_procs = procs;
     m_total_up = total_up;
     m_total_down = total_down;
+    m_status = status ? status : L"";
     m_last_anchor = anchor_rect;
 
     // Re-check dark mode
@@ -644,10 +658,12 @@ void CTooltipPopup::UpdateAndShow(const std::vector<ProcDisplayInfo>& procs,
 }
 
 void CTooltipPopup::UpdateData(const std::vector<ProcDisplayInfo>& procs,
-                               double total_up, double total_down) {
+                               double total_up, double total_down,
+                               const wchar_t* status) {
     m_procs = procs;
     m_total_up = total_up;
     m_total_down = total_down;
+    m_status = status ? status : L"";
     if (m_visible) {
         // Recalculate size: new processes may have appeared since we first showed
         RECT old_rc;
@@ -683,6 +699,7 @@ void CTooltipPopup::UpdateDpiScale(const RECT& anchor_rect) {
     SECTION_H     = (int)(BASE_SECTION_H * s);
     GAP_H         = (int)(BASE_GAP_H * s);
     BTN_AREA_H    = (int)(BASE_BTN_AREA_H * s);
+    STATUS_H      = (int)(BASE_STATUS_H * s);
     BTN_H         = (int)(BASE_BTN_H * s);
     SPEED_AREA_W  = (int)(BASE_SPEED_AREA_W * s);
     RecreateScaledResources();

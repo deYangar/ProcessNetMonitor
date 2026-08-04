@@ -6,6 +6,19 @@
 // From tooltip_popup.cpp DllMain - DLL's HINSTANCE
 extern HINSTANCE s_dll_hinst;
 
+// One-line status for popup/tooltip when ETW cannot own the kernel session
+static const wchar_t* EtwPopupStatus(const EtwCapture* cap) {
+    if (!cap) return nullptr;
+    if (cap->HasData()) {
+        const wchar_t* st = cap->ConnState();
+        if (st && wcsstr(st, L"attach") != nullptr)
+            return L"\u26a0 \u9644\u52a0\u6a21\u5f0f\uff1aNT Kernel Logger \u88ab\u5176\u4ed6\u7a0b\u5e8f\u5360\u7528\uff0c\u5927\u6d41\u91cf\u65f6\u53ef\u80fd\u4e22\u4e8b\u4ef6\uff0c\u5efa\u8bae\u5173\u95ed AppNetworkCounter \u540e\u91cd\u542f TM";
+    } else if (cap->IsRunning()) {
+        return L"\u26a0 ETW \u4e0d\u53ef\u7528\uff0c\u5df2\u56de\u9000\u65e7\u91c7\u96c6\uff0c\u6570\u636e\u53ef\u80fd\u4e0d\u5168";
+    }
+    return nullptr;
+}
+
 CProcessNetPlugin CProcessNetPlugin::s_instance;
 wchar_t CProcessNetItem::s_value_buf[2][256] = { L"starting...", L"starting..." };
 int CProcessNetItem::s_transparent_width = 100;  // default 100px
@@ -233,7 +246,15 @@ void CProcessNetPlugin::DataRequired() {
 
     // Build tooltip text (TM's default text tooltip, kept as fallback)
     wchar_t line[256];
-    wcscpy_s(m_tooltip, etw_active ? L"Process Net Monitor (ETW)\n" : L"Process Net Monitor\n");
+    if (etw_active) {
+        const wchar_t* st = m_etw_cap.ConnState();
+        if (st && wcsstr(st, L"attach") != nullptr)
+            wcscpy_s(m_tooltip, 2048, L"Process Net Monitor (ETW-attach)\n\u26a0 \u9644\u52a0\u6a21\u5f0f\uff1aNT Kernel Logger \u88ab\u5176\u4ed6\u7a0b\u5e8f\u5360\u7528\uff0c\u5927\u6d41\u91cf\u65f6\u53ef\u80fd\u4e22\u4e8b\u4ef6\uff0c\u5efa\u8bae\u5173\u95ed AppNetworkCounter \u540e\u91cd\u542f TM\n");
+        else
+            wcscpy_s(m_tooltip, 2048, L"Process Net Monitor (ETW)\n");
+    } else {
+        wcscpy_s(m_tooltip, 2048, L"Process Net Monitor\n");
+    }
     swprintf_s(line, 256, L"Total: U:%.1fKB/s D:%.1fKB/s\n", su/1024.0, sd/1024.0);
     wcscat_s(m_tooltip, line);
 
@@ -490,7 +511,7 @@ void CProcessNetPlugin::ShowPopupAt(const RECT& anchor) {
     std::vector<CTooltipPopup::ProcDisplayInfo> procs;
     GetProcessDisplayInfo(procs, m_cached_stats);
     m_popup_anchor = anchor;
-    m_popup.UpdateAndShow(procs, m_cached_up, m_cached_down, anchor);
+    m_popup.UpdateAndShow(procs, m_cached_up, m_cached_down, anchor, EtwPopupStatus(&m_etw_cap));
 }
 
 void CProcessNetPlugin::HoverTick() {
@@ -560,9 +581,9 @@ void CProcessNetPlugin::HoverTick() {
         }
         if (!EqualRect(&anchor, &m_popup_anchor)) {
             m_popup_anchor = anchor;
-            m_popup.UpdateAndShow(procs, m_cached_up, m_cached_down, anchor);
+            m_popup.UpdateAndShow(procs, m_cached_up, m_cached_down, anchor, EtwPopupStatus(&m_etw_cap));
         } else {
-            m_popup.UpdateData(procs, m_cached_up, m_cached_down);
+            m_popup.UpdateData(procs, m_cached_up, m_cached_down, EtwPopupStatus(&m_etw_cap));
         }
     }
 }

@@ -24,17 +24,22 @@ public:
 
     // Update data and show/hide popup
     // anchor_rect: screen rect the popup should attach to (TM window or click area)
+    // status: optional one-line status/warning shown under the total speed (may be nullptr)
     void UpdateAndShow(const std::vector<ProcDisplayInfo>& procs,
                        double total_up, double total_down,
-                       const RECT& anchor_rect);
+                       const RECT& anchor_rect,
+                       const wchar_t* status = nullptr);
     // Update data only (no reposition); used while popup stays visible
     void UpdateData(const std::vector<ProcDisplayInfo>& procs,
-                    double total_up, double total_down);
+                    double total_up, double total_down,
+                    const wchar_t* status = nullptr);
     void Hide();
 
     bool IsVisible() const { return m_visible; }
     bool IsHovering() const { return m_hovering; }
     HWND GetHwnd() const { return m_hwnd; }
+
+    std::wstring m_status;   // status/warning line (empty = none)
 
     // Process icon cache
     HICON GetProcessIcon(const std::wstring& exe_path);
@@ -102,6 +107,7 @@ private:
     int BTN_AREA_H = 28;    // "查看详细" button band
     int BTN_H = 24;         // button inner height
     int SPEED_AREA_W = 110; // right-aligned speed column width
+    int STATUS_H = 18;      // status/warning line height (0 = hidden)
 
     static const int BASE_PADDING = 12;
     static const int BASE_ROW_HEIGHT = 32;
@@ -114,6 +120,7 @@ private:
     static const int BASE_BTN_AREA_H = 28;
     static const int BASE_BTN_H = 24;
     static const int BASE_SPEED_AREA_W = 110;
+    static const int BASE_STATUS_H = 18;
 
     float m_dpi_scale = 1.0f;
 

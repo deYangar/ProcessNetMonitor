@@ -13,6 +13,7 @@
 #include <evntcons.h>
 #include <string>
 #include <map>
+#include <set>
 #include <vector>
 #include <thread>
 #include <mutex>
@@ -35,6 +36,7 @@ public:
         return t != 0 && (GetTickCount64() - t) < 15000;
     }
     const wchar_t* GetLastError() const { return m_error; }
+    const wchar_t* ConnState() const { return m_conn_state; }  // init/starting/self-started/attached/failed
 
     // Same contract as PacketCapture::GetStats: per-process speeds.
     // conn_count is left 0 (merge with PacketCapture data upstream).
@@ -95,7 +97,15 @@ private:
     uint64_t m_ev_filt_addr = 0;   // skipped by virtual-IP blacklist
     uint64_t m_ev_kept = 0;        // actually counted
     ULONGLONG m_last_log_tick = 0;
+    ULONGLONG m_last_shape_tick = 0;
     wchar_t m_conn_state[64] = L"init";   // attaching/attached/self/failed
+    std::set<uint32_t> m_samp_kept;  // IPv4 local addrs of kept events (since last log)
+    std::set<uint32_t> m_samp_filt;  // IPv4 local addrs of filtered events
+    // protocol split (diagnostics; guard by m_mutex)
+    uint64_t m_tcp_send_ev = 0, m_tcp_send_b = 0;
+    uint64_t m_tcp_recv_ev = 0, m_tcp_recv_b = 0;
+    uint64_t m_udp_send_ev = 0, m_udp_send_b = 0;
+    uint64_t m_udp_recv_ev = 0, m_udp_recv_b = 0;
 
     // current consumer state (for Stop() unblock)
     std::atomic<TRACEHANDLE> m_cur_consumer{INVALID_PROCESSTRACE_HANDLE};
@@ -113,12 +123,28 @@ private:
     struct IfaceIps {
         std::vector<uint32_t> v4;                 // network byte order (memcmp-able)
         std::vector<std::vector<uint8_t>> v6;     // 16 bytes each
+        std::vector<std::pair<uint32_t, uint8_t>> subnets_v4;  // (network addr, prefix) - virtual adapters only
         ULONGLONG refreshed = 0;
     };
     IfaceIps m_phys;  // guarded by m_mutex
     IfaceIps m_virt;
     void RefreshIfaceIpsLocked();
     bool SkipByLocalAddr(const BYTE* ud, USHORT ulen, const ShapeInfo& si);
+
+    // diagnostics: shapes whose kept local addr looks like a remote/public IP
+    struct WeirdShape {
+        uint32_t p1; uint16_t task; uint8_t opcode; uint16_t id; uint8_t version;
+        int dir; DWORD pid; uint32_t addr;   // addr network byte order
+        bool operator<(const WeirdShape& o) const {
+            if (p1 != o.p1) return p1 < o.p1;
+            if (task != o.task) return task < o.task;
+            if (opcode != o.opcode) return opcode < o.opcode;
+            if (id != o.id) return id < o.id;
+            if (version != o.version) return version < o.version;
+            return false;
+        }
+    };
+    std::set<WeirdShape> m_samp_weird;
 
     void LogLine(const wchar_t* fmt, ...);
     void LogPeriodicLocked();
