@@ -42,27 +42,76 @@ static LONG WINAPI PnmCrashHandler(EXCEPTION_POINTERS* ep) {
     s_last_addr = ep->ExceptionRecord->ExceptionAddress;
     s_last_tick = now;
 
-    wchar_t path[MAX_PATH] = L"";
-    if (PNM_GetDebugDir(path, MAX_PATH)) {
-        wcscat_s(path, L"\\crash.dmp");
-        HANDLE hFile = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
-        if (hFile != INVALID_HANDLE_VALUE) {
-            MINIDUMP_EXCEPTION_INFORMATION mei = { GetCurrentThreadId(), ep, FALSE };
-            MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), hFile,
-                              MiniDumpNormal, &mei, nullptr, nullptr);
-            CloseHandle(hFile);
+    // ---- 1) crash.log FIRST (pure Win32, zero CRT) ----
+    // The ORIGINAL exception must be captured before MiniDumpWriteDump:
+    // dbghelp re-enters its own CRT during failfast and can failfast again,
+    // losing everything (2026-08-05 dev-machine: WER only saw the 2nd
+    // failfast inside this handler - crash.log/crash.dmp never landed).
+    void* stack[24] = {};
+    USHORT nstack = CaptureStackBackTrace(2, 24, stack, nullptr);
+    // zero-CRT hex/decimal helpers (pure arithmetic)
+    auto hexw = [](wchar_t* out, unsigned long long v, int nd) {
+        for (int i = nd - 1; i >= 0; i--) { out[i] = L"0123456789abcdef"[v & 0xF]; v >>= 4; }
+        out[nd] = 0;
+    };
+    auto decw = [](wchar_t* out, unsigned long long v) {
+        wchar_t tmp[24]; int i = 0;
+        if (v == 0) tmp[i++] = L'0';
+        while (v && i < 23) { tmp[i++] = L"0123456789"[v % 10]; v /= 10; }
+        for (int j = 0; j < i; j++) out[j] = tmp[i - 1 - j];
+        out[i] = 0;
+    };
+    wchar_t dir[MAX_PATH] = L"";
+    if (PNM_GetDebugDir(dir, MAX_PATH)) {
+        size_t dlen = wcslen(dir);
+        // <dir>\crash.log (manual concat - no CRT)
+        static const wchar_t lsuf[] = L"\\crash.log";
+        size_t llen = (sizeof(lsuf) / sizeof(wchar_t)) - 1;
+        if (dlen + llen < MAX_PATH) {
+            wchar_t logpath[MAX_PATH];
+            memcpy(logpath, dir, dlen * sizeof(wchar_t));
+            memcpy(logpath + dlen, lsuf, (llen + 1) * sizeof(wchar_t));
+            HANDLE hLog = CreateFileW(logpath, FILE_APPEND_DATA, FILE_SHARE_READ,
+                                      nullptr, OPEN_ALWAYS, 0, nullptr);
+            if (hLog != INVALID_HANDLE_VALUE) {
+                auto wr = [&](const wchar_t* s) {
+                    DWORD w = 0;
+                    WriteFile(hLog, s, (DWORD)wcslen(s) * sizeof(wchar_t), &w, nullptr);
+                };
+                SYSTEMTIME st; GetLocalTime(&st);
+                wchar_t hh[4], mm[4], ss[4], cx[9], ax[17], th[12];
+                decw(hh, st.wHour); decw(mm, st.wMinute); decw(ss, st.wSecond);
+                hexw(cx, code, 8);
+                hexw(ax, (unsigned long long)ep->ExceptionRecord->ExceptionAddress, 16);
+                decw(th, GetCurrentThreadId());
+                wr(L"["); wr(hh); wr(L":"); wr(mm); wr(L":"); wr(ss);
+                wr(L"] CRASH code=0x"); wr(cx);
+                wr(L" addr=0x"); wr(ax);
+                wr(L" thread="); wr(th);
+                for (USHORT si = 0; si < nstack; si++) {
+                    wr(L" st=");
+                    wchar_t sx[17];
+                    hexw(sx, (unsigned long long)stack[si], 16);
+                    wr(sx);
+                }
+                wr(L"\n");
+                CloseHandle(hLog);
+            }
         }
-        wchar_t logpath[MAX_PATH];
-        wcscpy_s(logpath, path);
-        wcscat_s(logpath, L".log");
-        FILE* f = _wfopen(logpath, L"w");
-        if (f) {
-            SYSTEMTIME st; GetLocalTime(&st);
-            fwprintf(f, L"[%04d-%02d-%02d %02d:%02d:%02d] code=0x%08X addr=%p thread=%lu\n",
-                     st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
-                     ep->ExceptionRecord->ExceptionCode, ep->ExceptionRecord->ExceptionAddress,
-                     GetCurrentThreadId());
-            fclose(f);
+        // ---- 2) crash.dmp (best effort - may fail during failfast) ----
+        static const wchar_t dsuf[] = L"\\crash.dmp";
+        size_t dlen2 = (sizeof(dsuf) / sizeof(wchar_t)) - 1;
+        if (dlen + dlen2 < MAX_PATH) {
+            wchar_t dmppath[MAX_PATH];
+            memcpy(dmppath, dir, dlen * sizeof(wchar_t));
+            memcpy(dmppath + dlen, dsuf, (dlen2 + 1) * sizeof(wchar_t));
+            HANDLE hFile = CreateFileW(dmppath, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+            if (hFile != INVALID_HANDLE_VALUE) {
+                MINIDUMP_EXCEPTION_INFORMATION mei = { GetCurrentThreadId(), ep, FALSE };
+                MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), hFile,
+                                  MiniDumpNormal, &mei, nullptr, nullptr);
+                CloseHandle(hFile);
+            }
         }
     }
     return EXCEPTION_CONTINUE_SEARCH;
@@ -758,6 +807,11 @@ static HWND FindTMWindowInChain(HWND hwnd) {
         GetClassNameW(cur, cls, 64);
         if (wcsncmp(cls, L"TrafficMonitor", 14) == 0)
             return cur;
+        // Popup menu (#32768): hovering any menu (incl. submenus) must NOT
+        // trigger our popup - menus are owned by TM but are separate windows
+        // (2026-08-05: mouse on a submenu re-showed the popup).
+        if (wcscmp(cls, L"#32768") == 0)
+            return nullptr;
         if (wcscmp(cls, L"#32770") == 0) {
             wchar_t txt[256] = {};
             GetWindowTextW(cur, txt, 256);
@@ -974,12 +1028,17 @@ void CProcessNetPlugin::HoverTick() {
 static std::vector<std::wstring> g_new_ranges;  // temp storage for dialog result
 static bool g_option_changed = false;
 
+static BOOL CALLBACK OptionsSetFontProc(HWND h, LPARAM lp) {
+    SendMessageW(h, WM_SETFONT, (WPARAM)lp, TRUE);
+    return TRUE;
+}
+
 static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE: {
         // Transparent area width label
-        CreateWindowW(L"STATIC", L"\x900F\x660E\x533A\x57DF\x5BBD\x5EA6\xFF08px\xFF0C\x4EFB\x52A1\x680F\x663E\x793A\x533A\x57DF\xFF09:",
-            WS_CHILD | WS_VISIBLE, 10, 12, 250, 20, hwnd, (HMENU)1002, nullptr, nullptr);
+        CreateWindowW(L"STATIC", L"\x900F\x660E\x533A\x57DF\x5BBD\x5EA6\xFF08px\xFF09:",
+            WS_CHILD | WS_VISIBLE, 10, 12, 200, 20, hwnd, (HMENU)1002, nullptr, nullptr);
         // Width edit
         wchar_t width_buf[16];
         swprintf_s(width_buf, L"%d", CProcessNetItem::s_transparent_width);
@@ -1002,12 +1061,23 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             SendMessageW(hCombo, CB_SETCURSEL, idx, 0);
         }
 
+        // Debug-log checkbox (default OFF)
+        CreateWindowW(L"BUTTON",
+            L"\u8C03\u8BD5\u65E5\u5FD7\uFF08\u5199\u5165\u63D2\u4EF6\u76EE\u5F55 debug\\\uFF09",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            10, 70, 300, 22, hwnd, (HMENU)1006, nullptr, nullptr);
+        if (CProcessNetPlugin::Instance().m_detail.GetDebugLogs())
+            SendMessageW(GetDlgItem(hwnd, 1006), BM_SETCHECK, BST_CHECKED, 0);
+
         // OK button
         CreateWindowW(L"BUTTON", L"OK",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 230, 80, 65, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 230, 100, 65, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
         // Cancel button
         CreateWindowW(L"BUTTON", L"Cancel",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 305, 80, 65, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 305, 100, 65, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
+        // Use the proper UI font (Segoe UI 9pt) on every child control -
+        // default is the bitmap 'System' font (jagged, ugly).
+        EnumChildWindows(hwnd, OptionsSetFontProc, (LPARAM)GetStockObject(DEFAULT_GUI_FONT));
         return 0;
     }
     case WM_COMMAND:
@@ -1030,6 +1100,10 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             if (sel < 0) sel = 1;
             if (sel > 3) sel = 3;
             plugin.m_detail.SetRefreshMs(vals[sel]);
+
+            // Debug-log checkbox
+            bool dbg_logs = (SendMessageW(GetDlgItem(hwnd, 1006), BM_GETCHECK, 0, 0) == BST_CHECKED);
+            plugin.m_detail.SetDebugLogs(dbg_logs);
 
             plugin.m_detail.SaveSettings();
             plugin.StartRefreshTimer();   // apply immediately
@@ -1070,7 +1144,7 @@ ITMPlugin::OptionReturn CProcessNetPlugin::ShowOptionsDialog(void* hParent) {
         L"ProcessNetMonitorOptionsDlg",
         L"\x63D2\x4EF6\x8BBE\x7F6E",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        0, 0, 395, 245,
+        0, 0, 430, 245,
         (HWND)hParent, nullptr, GetModuleHandleW(NULL), nullptr
     );
     

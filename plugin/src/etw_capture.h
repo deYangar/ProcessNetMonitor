@@ -86,6 +86,7 @@ private:
         ULONGLONG last_seen = 0;
         int idle_rounds = 0;
         bool seen = false;      // first GetStats snapshot only sets the baseline
+        std::wstring name;      // resolved process name - kept after process exits
     };
 
     void ConsumerLoop();

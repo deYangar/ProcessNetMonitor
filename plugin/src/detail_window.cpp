@@ -1045,6 +1045,18 @@ void CDetailWindow::LoadSettings() {
     }
 }
 
+// Debug-log master switch: persists to settings.json and syncs the capture
+// backends (etw_capture.log / capture.log). Crash diagnostics stay ON.
+void CDetailWindow::SetDebugLogs(bool on) {
+    m_debug_logs = on;
+    SaveSettings();
+    EtwCapture::SetDebugLogs(m_debug_logs);
+    if (m_capture) {
+        wchar_t dbg[MAX_PATH] = L"";
+        m_capture->SetLogDir(m_debug_logs && PNM_GetDebugDir(dbg, MAX_PATH) ? dbg : L"");
+    }
+}
+
 // ============================================================
 // Hit testing
 // ============================================================
@@ -1199,13 +1211,7 @@ void CDetailWindow::ShowContextMenu(int row, int x, int y) {
         }
         break;
     case 100: { // \u8C03\u8BD5\u65E5\u5FD7\u5F00\u5173
-        m_debug_logs = !m_debug_logs;
-        SaveSettings();
-        EtwCapture::SetDebugLogs(m_debug_logs);
-        if (m_capture) {
-            wchar_t dbg[MAX_PATH] = L"";
-            m_capture->SetLogDir(m_debug_logs && PNM_GetDebugDir(dbg, MAX_PATH) ? dbg : L"");
-        }
+        SetDebugLogs(!m_debug_logs);
         break;
     }
     }

@@ -588,7 +588,8 @@ std::vector<ProcTraffic> EtwCapture::GetStats(double interval_sec) {
             pt.speed_down = (double)dr / interval_sec;
         }
         pt.conn_count = 0;
-        pt.name = ProcName(pid);
+        if (c.name.empty()) c.name = ProcName(pid);
+        pt.name = c.name;
         pt.exe_path = ProcPath(pid);
         // Keep every process that has ever had traffic - never evict
         // (user request 2026-08-04: drop the idle-removal entirely)
@@ -631,7 +632,11 @@ std::wstring EtwCapture::ProcName(DWORD pid) {
         }
     }
     if (name.empty()) name = L"<" + std::to_wstring(pid) + L">";
-    m_name_cache[pid] = name;
+    // Never cache a failed lookup ("<pid>"): the process may be briefly
+    // unqueryable (exiting / protected) - re-resolve on next call so the
+    // real name appears once it is resolvable. The durable name lives in
+    // Cum::name (set by GetStats), so it survives process exit.
+    if (!name.empty() && name[0] != L'<') m_name_cache[pid] = name;
     return name;
 }
 

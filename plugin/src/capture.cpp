@@ -218,7 +218,9 @@ std::wstring PacketCapture::GetProcessName(DWORD pid) {
         }
         CloseHandle(hSnap);
     }
-    m_name_cache[pid] = name;
+    // Never cache a failed lookup ("[pid]"): re-resolve next time so the
+    // real name appears once the process is resolvable.
+    if (!name.empty() && name[0] != L'[') m_name_cache[pid] = name;
     return name;
 }
 
@@ -236,7 +238,7 @@ std::wstring PacketCapture::GetProcessPath(DWORD pid) {
         }
         CloseHandle(hProc);
     }
-    m_path_cache[pid] = path;
+    if (!path.empty()) m_path_cache[pid] = path;  // never cache a failed lookup
     return path;
 }
 

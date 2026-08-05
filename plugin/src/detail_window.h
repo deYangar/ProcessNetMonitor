@@ -44,6 +44,8 @@ public:
     
     // 设置 PacketCapture 指针（用于获取连接详情）
     void SetCapture(PacketCapture* capture) { m_capture = capture; }
+    bool GetDebugLogs() const { return m_debug_logs; }
+    void SetDebugLogs(bool on);
 
 
     // History time range
