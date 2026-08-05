@@ -182,6 +182,7 @@ private:
     bool m_tracking_mouse = false;
     bool m_context_menu_open = false;
     bool m_history_dirty = true;  // only rebuild history rows when new data arrives
+    bool m_debug_logs = false;    // debug logging switch (default OFF; setting: settings.json "debug_logs")
     DWORD m_context_menu_pid = 0;
     std::wstring m_context_menu_path;
 

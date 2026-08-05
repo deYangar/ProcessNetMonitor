@@ -8,6 +8,7 @@
 #define _WIN32_WINNT 0x0A00
 #endif
 #include "etw_capture.h"
+#include "utils.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
@@ -23,6 +24,7 @@
 #pragma comment(lib, "tdh.lib")
 
 EtwCapture* EtwCapture::s_self = nullptr;
+std::atomic<bool> EtwCapture::s_debug_logs{ false };
 
 // ---- best-effort ETW session owner detection ----
 // There is no public API mapping an ETW session to its creator process.
@@ -187,13 +189,14 @@ std::wstring EtwCapture::FindSessionOwners() {
 // ---- diagnostics log (shared read: TM can keep running) ----
 static FILE* EtwLogOpen() {
     wchar_t path[MAX_PATH] = L"";
-    if (!GetEnvironmentVariableW(L"APPDATA", path, MAX_PATH)) return nullptr;
-    wcscat_s(path, L"\\TrafficMonitor\\plugins\\ProcessNetMonitor\\etw_capture.log");
+    if (!PNM_GetDebugDir(path, MAX_PATH)) return nullptr;
+    wcscat_s(path, L"\\etw_capture.log");
     FILE* f = _wfsopen(path, L"a", _SH_DENYNO);
     return f;
 }
 
 void EtwCapture::LogLine(const wchar_t* fmt, ...) {
+    if (!s_debug_logs.load()) return;  // debug logging switch (default off)
     FILE* f = EtwLogOpen();
     if (!f) return;
     SYSTEMTIME st; GetLocalTime(&st);
@@ -719,6 +722,7 @@ void EtwCapture::LogPeriodicLocked() {
             const uint8_t* b = (const uint8_t*)&v[i];
             wchar_t t[32];
             swprintf_s(t, 32, i ? L",%u.%u.%u.%u" : L"%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+            if (wcslen(dst) + wcslen(t) >= cap - 8) break;
             wcscat_s(dst, cap, t);
         }
     };
@@ -731,10 +735,11 @@ void EtwCapture::LogPeriodicLocked() {
     auto fmt_set = [](wchar_t* dst, size_t cap, const std::set<uint32_t>& s) {
         int n = 0;
         for (auto v : s) {
-            if (n >= 8) { wcscat_s(dst, cap, L"..."); break; }
+            if (n >= 8) { if (wcslen(dst) + 4 < cap) wcscat_s(dst, cap, L"..."); break; }
             const uint8_t* b = (const uint8_t*)&v;
             wchar_t t[32];
             swprintf_s(t, 32, n ? L",%u.%u.%u.%u" : L"%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+            if (wcslen(dst) + wcslen(t) >= cap - 8) break;
             wcscat_s(dst, cap, t); n++;
         }
     };
@@ -746,7 +751,8 @@ void EtwCapture::LogPeriodicLocked() {
     wchar_t pids[512] = L"";
     for (auto& [pid, c] : m_cum) {
         wchar_t t[128];
-        swprintf_s(t, 128, L"%s(%lu) ", ProcName(pid).c_str(), pid);
+        swprintf_s(t, 128, L"%.96ls(%lu) ", ProcName(pid).c_str(), pid);
+        if (wcslen(pids) + wcslen(t) >= 480) break;
         wcscat_s(pids, 512, t);
     }
 

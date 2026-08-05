@@ -43,6 +43,14 @@ public:
     // conn_count is left 0 (merge with PacketCapture data upstream).
     std::vector<ProcTraffic> GetStats(double interval_sec);
 
+    // Debug-log master switch (default OFF, user setting in settings.json /
+    // detail-window context menu). Controls etw_capture.log / capture.log
+    // generation. Crash diagnostics (crash.log / crash.dmp / werdumps) are
+    // ALWAYS enabled so crashes stay diagnosable even with logging off.
+    static void SetDebugLogs(bool on) { s_debug_logs.store(on); }
+    static bool DebugLogs() { return s_debug_logs.load(); }
+    static std::atomic<bool> s_debug_logs;
+
 private:
     struct ShapeKey {
         uint32_t p1;      // provider GUID Data1 (enough to distinguish our 3 providers)

@@ -36,6 +36,7 @@
   - 连接状态颜色编码：绿=ESTABLISHED, 蓝=LISTENING, 橙=TIME_WAIT, 深橙=CLOSE_WAIT
   - 多进程合并：Chrome 等多进程软件按名称合并为一行，展开后显示各子进程
   - 右键菜单：定位文件 / 文件属性 / 结束进程
+  - 右键菜单：调试日志开关（默认关，开启后生成诊断日志，见「调试日志与崩溃排查」）
   - 历史数据持久化：关闭重启后历史数据不丢失
   - 排序状态持久化：排序设置保存到文件，TM 重启后恢复
 - **高 DPI 支持**：适配 150%/175%/200% 等系统缩放，跟随显示器 DPI 变化自动调整
@@ -135,8 +136,27 @@ ProcessNetMonitor/
 ## 数据存储
 
 - **历史流量**：`%APPDATA%\TrafficMonitor\plugins\ProcessNetMonitor\history.dat`（非 portable 模式）或 `<exe_dir>\plugins\ProcessNetMonitor\history.dat`（portable 模式）
-- **排序设置**：同目录下 `settings.json`
+- **排序/设置**：同目录下 `settings.json`（含 `debug_logs` 开关，默认 `false`）
 - 数据格式版本 v4，自动兼容 v2/v3 旧格式
+
+## 调试日志与崩溃排查
+
+- **开关**：详情窗口行右键 → 「调试日志: 关 (点击开启)」。默认**关闭**（不写 etw_capture.log / capture.log）
+- **位置**：所有日志都写在插件目录下，与配置同处一处：
+  ```
+  plugins/
+  ├── ProcessNetMonitor.dll
+  └── ProcessNetMonitor/
+      ├── settings.json / history.dat   ← 配置
+      └── debug/                        ← 诊断输出
+          ├── werdumps/                 ← WER 转储目录（启动时创建，常驻空目录）
+          ├── etw_capture.log           ← ETW 采集诊断（开关开启后每 5 秒一条）
+          ├── capture.log               ← 传统采集诊断（开关开启后生成）
+          ├── crash.log                 ← 崩溃日志（仅崩溃时生成）
+          └── crash.dmp / crash.dmp.log ← 崩溃转储（仅崩溃时生成）
+  ```
+- **崩溃日志不受开关控制**：crash.log / crash.dmp / werdumps/ 仅在崩溃时写入，平时不产生文件（debug 目录仅含空的 werdumps 文件夹），保持始终启用以便排查闪退。
+- **遇到闪退时**：把 `debug/` 目录（含 crash.log、werdumps 下的 .dmp）连同 DLL 版本一起反馈即可定位。
 
 ## 版本历史
 

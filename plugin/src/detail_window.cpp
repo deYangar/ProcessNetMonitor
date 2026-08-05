@@ -955,7 +955,8 @@ void CDetailWindow::SaveSettings() {
     fprintf(f, "  \"sort_col\": [%d, %d],\n", m_sort_col[0], m_sort_col[1]);
     fprintf(f, "  \"sort_asc\": [%s, %s],\n", m_sort_asc[0] ? "true" : "false", m_sort_asc[1] ? "true" : "false");
     fprintf(f, "  \"refresh_ms\": %d,\n", m_refresh_ms);
-    fprintf(f, "  \"transparent_width\": %d\n", m_transparent_width);
+    fprintf(f, "  \"transparent_width\": %d,\n", m_transparent_width);
+    fprintf(f, "  \"debug_logs\": %s\n", m_debug_logs ? "true" : "false");
     fprintf(f, "}\n");
     fclose(f);
 }
@@ -1024,6 +1025,23 @@ void CDetailWindow::LoadSettings() {
                 if (v >= 100 && v <= 2000) m_refresh_ms = v;
             }
         }
+    }
+    // Parse debug_logs (default OFF)
+    {
+        size_t pos = json.find("\"debug_logs\"");
+        if (pos != std::string::npos) {
+            pos = json.find(':', pos);
+            if (pos != std::string::npos) {
+                std::string sub = json.substr(pos + 1, 16);
+                m_debug_logs = (sub.find("true") != std::string::npos);
+            }
+        }
+    }
+    // Sync debug-log switch to capture backends (called after SetCapture in OnInitialize)
+    EtwCapture::SetDebugLogs(m_debug_logs);
+    if (m_capture) {
+        wchar_t dbg[MAX_PATH] = L"";
+        m_capture->SetLogDir(m_debug_logs && PNM_GetDebugDir(dbg, MAX_PATH) ? dbg : L"");
     }
 }
 
@@ -1139,6 +1157,11 @@ void CDetailWindow::ShowContextMenu(int row, int x, int y) {
     AppendMenuW(hMenu, MF_STRING, 2, L"\u6587\u4EF6\u5C5E\u6027");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenu, MF_STRING, 3, L"\u7ED3\u675F\u8FDB\u7A0B");
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+    // Debug-log master switch (default OFF; crash diagnostics stay ON)
+    AppendMenuW(hMenu, MF_STRING, 100,
+                m_debug_logs ? L"\u8C03\u8BD5\u65E5\u5FD7: \u5F00 (\u70B9\u51FB\u5173\u95ED)"
+                             : L"\u8C03\u8BD5\u65E5\u5FD7: \u5173 (\u70B9\u51FB\u5F00\u542F)");
 
     int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y, 0, m_hwnd, NULL);
     DestroyMenu(hMenu);
@@ -1175,6 +1198,16 @@ void CDetailWindow::ShowContextMenu(int row, int x, int y) {
             }
         }
         break;
+    case 100: { // \u8C03\u8BD5\u65E5\u5FD7\u5F00\u5173
+        m_debug_logs = !m_debug_logs;
+        SaveSettings();
+        EtwCapture::SetDebugLogs(m_debug_logs);
+        if (m_capture) {
+            wchar_t dbg[MAX_PATH] = L"";
+            m_capture->SetLogDir(m_debug_logs && PNM_GetDebugDir(dbg, MAX_PATH) ? dbg : L"");
+        }
+        break;
+    }
     }
 }
 

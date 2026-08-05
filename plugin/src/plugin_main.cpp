@@ -43,8 +43,8 @@ static LONG WINAPI PnmCrashHandler(EXCEPTION_POINTERS* ep) {
     s_last_tick = now;
 
     wchar_t path[MAX_PATH] = L"";
-    if (GetEnvironmentVariableW(L"APPDATA", path, MAX_PATH)) {
-        wcscat_s(path, L"\\TrafficMonitor\\plugins\\ProcessNetMonitor\\crash.dmp");
+    if (PNM_GetDebugDir(path, MAX_PATH)) {
+        wcscat_s(path, L"\\crash.dmp");
         HANDLE hFile = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
         if (hFile != INVALID_HANDLE_VALUE) {
             MINIDUMP_EXCEPTION_INFORMATION mei = { GetCurrentThreadId(), ep, FALSE };
@@ -90,8 +90,8 @@ static void PnmInvalidParamHandler(const wchar_t* expr, const wchar_t* func,
     // in this broken state (recursion -> failfast, log never lands). Only
     // Win32 calls + hand-rolled helpers.
     wchar_t path[MAX_PATH] = L"";
-    if (GetEnvironmentVariableW(L"APPDATA", path, MAX_PATH) && path[0]) {
-        static const wchar_t suffix[] = L"\\TrafficMonitor\\plugins\\ProcessNetMonitor\\crash.log";
+    if (PNM_GetDebugDir(path, MAX_PATH) && path[0]) {
+        static const wchar_t suffix[] = L"\\crash.log";
         size_t plen = wcslen(path);
         size_t slen = (sizeof(suffix) / sizeof(wchar_t)) - 1;
         if (plen + slen < MAX_PATH) {
@@ -152,8 +152,8 @@ static void SetupWerLocalDumps() {
         0, nullptr, 0, KEY_SET_VALUE, nullptr, &hk, nullptr);
     if (st != ERROR_SUCCESS) return;
     wchar_t dump_dir[MAX_PATH] = L"";
-    if (GetEnvironmentVariableW(L"APPDATA", dump_dir, MAX_PATH) && dump_dir[0]) {
-        wcscat_s(dump_dir, L"\\TrafficMonitor\\plugins\\ProcessNetMonitor\\werdumps");
+    if (PNM_GetDebugDir(dump_dir, MAX_PATH) && dump_dir[0]) {
+        wcscat_s(dump_dir, L"\\werdumps");
         CreateDirectoryW(dump_dir, nullptr);
         RegSetValueExW(hk, L"DumpFolder", 0, REG_SZ,
                        (const BYTE*)dump_dir, (DWORD)((wcslen(dump_dir) + 1) * sizeof(wchar_t)));
@@ -630,7 +630,7 @@ const wchar_t* CProcessNetPlugin::GetInfo(PluginInfoIndex i) {
     case TMI_DESCRIPTION: return L"Per-process network speed";
     case TMI_AUTHOR: return L"Aemeath";
     case TMI_COPYRIGHT: return L"MIT";
-    case TMI_VERSION: return L"1.10.0";
+    case TMI_VERSION: return L"1.11.0";
     case TMI_URL: return L"https://github.com";
     default: return L"";
     }
@@ -660,7 +660,9 @@ void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
     if (cfg_base && cfg_base[0]) {
         std::wstring cfg_dir = std::wstring(cfg_base) + L"\\ProcessNetMonitor";
         m_detail.SetConfigDir(cfg_dir.c_str());
-        m_capture.SetLogDir(cfg_dir);  // capture.log for diagnostics
+        // capture.log / etw_capture.log follow the "debug_logs" setting
+        // (default OFF), synced inside LoadSettings. Crash diagnostics
+        // (crash.log / crash.dmp / werdumps) are always enabled.
         // Production ETW per-process counter (attaches/starts NT Kernel Logger)
         m_etw_cap.Start();
     }
