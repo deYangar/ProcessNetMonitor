@@ -306,7 +306,7 @@ void EtwCapture::ConsumerLoop() {
         props->MaximumBuffers = 120;
         props->FlushTimer = 1;
         props->LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
-        props->EnableFlags = EVENT_TRACE_FLAG_NETWORK_TCPIP;
+        props->EnableFlags = EVENT_TRACE_FLAG_NETWORK_TCPIP | EVENT_TRACE_FLAG_PROCESS;
 
         TRACEHANDLE session = 0;
         ULONG sr = StartTraceW(&session, KERNEL_LOGGER_NAMEW, props);
@@ -472,6 +472,93 @@ EtwCapture::ShapeInfo& EtwCapture::ResolveShape(PEVENT_RECORD rec, const ShapeKe
 void EtwCapture::OnEvent(PEVENT_RECORD rec) {
     if (m_stop) return;
 
+    // --- ProcessStart V4 (MSNT_SystemTrace, opcode 3): cache image name ---
+    // VERIFIED layout on Win11 25H2 (64-bit consumer, TDH-decode + hex cross-check):
+    //   @0  UniqueProcessKey(8) @8 ProcessId @12 ParentId @16 SessionId
+    //   @20 ExitStatus @24 DirectoryTableBase(8) @32 Flags @36 (16B fixed)
+    //   @52 UserSID: SID struct (Revision@0 SubAuthCount@1 Auth@2-7 SubAuth[]),
+    //        len = 8 + 4*Count  ->  ImageFileName starts at 52+len
+    //   ImageFileName: ANSI, NUL-terminated
+    //   then CommandLine / PackageFullName / ApplicationId: UNICODE, NUL-terminated
+    // Provider GUID is 3D6FA8D0-FE05-11D0-9DDA-00C04FD7BA7C (not the classic
+    // SystemTraceControlGuid 9E814AAD!) and the opcode is 3 (opcode 1 = ThreadStart).
+    // The previous implementation matched neither -> ProcessStart cache never
+    // fired -> short-lived processes stayed "<pid>" forever. Fixed 2026-08-07.
+    if (rec->EventHeader.ProviderId.Data1 == 0x3D6FA8D0 &&
+        (rec->EventHeader.EventDescriptor.Opcode == 1 ||  // realtime ProcessStart
+         rec->EventHeader.EventDescriptor.Opcode == 3) && // session-start replay
+        rec->UserData && rec->UserDataLength >= 56) {
+        const BYTE* ud = (const BYTE*)rec->UserData;
+        ULONG pid = *(const ULONG*)(ud + 8);
+        if (pid != 0 && pid != (ULONG)-1 && ud[52] == 1 && ud[53] >= 1 && ud[53] <= 15) {
+            ULONG sid_len = 8 + 4 * (ULONG)ud[53];
+            ULONG img = 52 + sid_len;
+            std::wstring base;
+            std::wstring path;
+            ULONG cl = 0;
+            if (img + 2 <= rec->UserDataLength) {
+                // ANSI ImageFileName
+                std::string ansi;
+                ULONG k = 0;
+                while (img + k < rec->UserDataLength && k < 280) {
+                    char ch = (char)ud[img + k];
+                    if (ch == 0) break;
+                    if ((unsigned char)ch < 32) { ansi.clear(); break; }  // reject control bytes
+                    ansi += ch;
+                    k++;
+                }
+                cl = img + k + 1;   // CommandLine starts after the NUL
+                if (!ansi.empty()) base.assign(ansi.begin(), ansi.end());
+            }
+            // CommandLine (UNICODE, NUL-terminated): extract first token as full
+            // path when it carries a drive/UNC prefix (also covers CJK exe names
+            // that fail the ANSI ImageFileName parse).
+            if (cl + 1 < rec->UserDataLength) {
+                std::wstring cmd;
+                ULONG p = cl;
+                while (p + 1 < rec->UserDataLength && cmd.size() < 1024) {
+                    wchar_t ch = (wchar_t)(ud[p] | ((wchar_t)ud[p + 1] << 8));
+                    if (ch == 0) break;
+                    cmd += ch;
+                    p += 2;
+                }
+                size_t st = cmd.find_first_not_of(L" \t\"");
+                if (st != std::wstring::npos) {
+                    size_t en = cmd.find_first_of(L" \t\"", st);
+                    std::wstring tok = cmd.substr(st, en == std::wstring::npos ? cmd.size() - st : en - st);
+                    if (tok.size() >= 4 && (tok[1] == L':' || tok.find(L"\\\\") == 0)) path = tok;
+                }
+                if (base.empty() && !path.empty()) {
+                    size_t sl = path.find_last_of(L"\\/");
+                    base = (sl != std::wstring::npos) ? path.substr(sl + 1) : path;
+                }
+            }
+            if (!base.empty()) {
+                std::lock_guard<std::mutex> lk(m_name_mutex);
+                m_name_cache[pid] = base;
+                if (!path.empty()) m_path_cache[pid] = path;
+            }
+        }
+    }
+
+    // Fast path: classic NT Kernel Logger events - only TCPIP send/recv
+    // (opcode 10-13) carry network payloads. ProcessStart/ThreadStart/Image
+    // events (enabled for name caching) must NOT reach ResolveShape: TDH-parsing
+    // them under the lock would stall the consumer during image-load storms
+    // (a process start fires one event per loaded DLL). Also skip the session
+    // control events (EventTraceGuid 68FDD900, op 5/32). Manifest-based
+    // providers (attach mode) have a different ProviderId and are unaffected.
+    if (rec->EventHeader.ProviderId.Data1 == 0x3D6FA8D0 ||
+        rec->EventHeader.ProviderId.Data1 == 0x68FDD900) {
+        return;
+    }
+    // legacy: on old systems the kernel logger events may arrive under the
+    // classic SystemTraceControlGuid (9E814AAD) - keep only opcode 10-13
+    if (rec->EventHeader.ProviderId.Data1 == 0x9E814AAD) {
+        UCHAR op = rec->EventHeader.EventDescriptor.Opcode;
+        if (op < 10 || op > 13) return;
+    }
+
     ShapeKey key;
     key.p1 = rec->EventHeader.ProviderId.Data1;
     key.task = rec->EventHeader.EventDescriptor.Task;
@@ -588,7 +675,24 @@ std::vector<ProcTraffic> EtwCapture::GetStats(double interval_sec) {
             pt.speed_down = (double)dr / interval_sec;
         }
         pt.conn_count = 0;
-        if (c.name.empty()) c.name = ProcName(pid);
+        // Re-resolve when empty OR when the previous lookup failed ("<pid>"):
+        // the failed placeholder must never become durable, otherwise an
+        // exiting/protected process shows "<pid>" forever. Once a real name
+        // is resolved it stays (survives process exit).
+        // Backoff: a dead process can never resolve - don't burn a Toolhelp
+        // snapshot every tick for it; retry at most every 30s.
+        if (c.name.empty() || c.name[0] == L'<') {
+            auto rit = m_name_retry_ts.find(pid);
+            if (rit == m_name_retry_ts.end() || now - rit->second > 30000) {
+                std::wstring try_name = ProcName(pid);
+                if (try_name.empty() || try_name[0] == L'<') {
+                    m_name_retry_ts[pid] = now;   // failed: back off 30s
+                    if (c.name.empty()) c.name = try_name;  // show "<pid>" for now
+                } else {
+                    c.name = try_name;            // resolved - durable
+                }
+            }
+        }
         pt.name = c.name;
         pt.exe_path = ProcPath(pid);
         // Keep every process that has ever had traffic - never evict

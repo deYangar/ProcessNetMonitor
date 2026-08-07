@@ -540,7 +540,9 @@ void CDetailWindow::BuildHistoryRows() {
 
         std::wstring lower = hist.name;
         for (auto& c : lower) c = towlower(c);
-        if (lower.find(L"svchost") != std::wstring::npos ||
+        if (!hist.name.empty() && hist.name[0] == L'<') {
+            row.category = L"\u672A\u77E5";
+        } else if (lower.find(L"svchost") != std::wstring::npos ||
             lower.find(L"system") != std::wstring::npos ||
             lower.find(L"csrss") != std::wstring::npos ||
             lower.find(L"lsass") != std::wstring::npos)
@@ -819,7 +821,9 @@ void CDetailWindow::RebuildRows() {
         // Category
         std::wstring lower = name;
         for (auto& c : lower) c = towlower(c);
-        if (lower.find(L"svchost") != std::wstring::npos ||
+        if (!name.empty() && name[0] == L'<') {
+            row.category = L"\u672A\u77E5";  // unresolved pid - can't classify
+        } else if (lower.find(L"svchost") != std::wstring::npos ||
             lower.find(L"system") != std::wstring::npos ||
             lower.find(L"csrss") != std::wstring::npos ||
             lower.find(L"lsass") != std::wstring::npos)
@@ -1894,7 +1898,8 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
 
         // Col 1: Name
         SelectObject(hdc, m_font_row);
-        SetTextColor(hdc, GetTextColor());
+        bool name_unresolved = (!row.name.empty() && row.name[0] == L'<');
+        SetTextColor(hdc, name_unresolved ? GetSecondaryTextColor() : GetTextColor());
         {
             std::wstring display = row.name;
             if (display.size() > 4) {

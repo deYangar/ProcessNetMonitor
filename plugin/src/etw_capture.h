@@ -167,6 +167,11 @@ private:
     std::mutex m_name_mutex;
     std::map<DWORD, std::wstring> m_name_cache;
     std::map<DWORD, std::wstring> m_path_cache;
+    // Failed name lookups ("<pid>") are re-tried with backoff: a dead
+    // process can never resolve, and retrying it every refresh tick would
+    // burn a full Toolhelp snapshot per dead pid per tick. 30s cooldown
+    // keeps the cost negligible while still catching late-resolvable ones.
+    std::map<DWORD, ULONGLONG> m_name_retry_ts;
 
     wchar_t m_error[256] = L"";
     void SetError(const wchar_t* fmt, ...);
