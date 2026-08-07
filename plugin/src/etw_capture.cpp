@@ -497,18 +497,25 @@ void EtwCapture::OnEvent(PEVENT_RECORD rec) {
             std::wstring path;
             ULONG cl = 0;
             if (img + 2 <= rec->UserDataLength) {
-                // ANSI ImageFileName
+                // ANSI ImageFileName. Only a clean NUL-terminated run is
+                // trusted: a control byte or an unterminated run (k>=280)
+                // invalidates the whole parse - cl stays 0 so the CommandLine
+                // step below is skipped instead of reading at a wrong offset
+                // (garbage path/name would otherwise be cached).
                 std::string ansi;
                 ULONG k = 0;
+                bool ansi_ok = true;
                 while (img + k < rec->UserDataLength && k < 280) {
                     char ch = (char)ud[img + k];
                     if (ch == 0) break;
-                    if ((unsigned char)ch < 32) { ansi.clear(); break; }  // reject control bytes
+                    if ((unsigned char)ch < 32) { ansi_ok = false; break; }
                     ansi += ch;
                     k++;
                 }
-                cl = img + k + 1;   // CommandLine starts after the NUL
-                if (!ansi.empty()) base.assign(ansi.begin(), ansi.end());
+                if (ansi_ok && k < 280) {   // NUL-terminated within bounds
+                    cl = img + k + 1;       // CommandLine starts after the NUL
+                    if (!ansi.empty()) base.assign(ansi.begin(), ansi.end());
+                }
             }
             // CommandLine (UNICODE, NUL-terminated): extract first token as full
             // path when it carries a drive/UNC prefix (also covers CJK exe names
@@ -549,8 +556,11 @@ void EtwCapture::OnEvent(PEVENT_RECORD rec) {
                     if (h) {
                         wchar_t buf[512]; DWORD n = 512;
                         if (QueryFullProcessImageNameW(h, 0, buf, &n)) {
-                            std::lock_guard<std::mutex> lk(m_name_mutex);
-                            m_path_cache[pid] = buf;
+                            {
+                                std::lock_guard<std::mutex> lk(m_name_mutex);
+                                m_path_cache[pid] = buf;
+                            }
+                            // file IO outside the lock (log writes are slow)
                             LogLine(L"PS path: pid=%lu path=%ls", pid, buf);
                         }
                         CloseHandle(h);
