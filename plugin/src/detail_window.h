@@ -88,6 +88,8 @@ private:
     void DrawSpeedSummary(HDC hdc, int w, int y);
     void DrawTableHeader(HDC hdc, int w, int y);
     void DrawTableRows(HDC hdc, int w, int y, int h);
+    // 连接表格列宽自适应窗口 (协议/状态固定, 本地/远程/归属地按权重分配)
+    void UpdateConnColWidths(int win_w);
     void DrawScrollbar(HDC hdc, int w, int h);
 
     // Layout
@@ -305,7 +307,7 @@ private:
     static const int BASE_CONN_TABLE_PADDING = 12;
     static const int BASE_SUBPROC_HEADER_H = 24;
     static const int BASE_SUBPROC_INDENT = 20;
-    static const int BASE_MIN_WIDTH = 680;
+    static const int BASE_MIN_WIDTH = 780;
     static const int BASE_MIN_HEIGHT = 400;
     
     // Connection table columns
@@ -313,12 +315,13 @@ private:
         const wchar_t* title;
         int width;
     };
-    static const int NUM_CONN_COLS = 4;
+    static const int NUM_CONN_COLS = 5;
     ConnColumn m_conn_cols[NUM_CONN_COLS] = {
         { L"\u534F\u8BAE",    50  },
-        { L"\u672C\u5730\u5730\u5740", 180 },
-        { L"\u8FDC\u7A0B\u5730\u5740", 180 },
-        { L"\u72B6\u6001",    100 },
+        { L"\u672C\u5730\u5730\u5740", 150 },
+        { L"\u8FDC\u7A0B\u5730\u5740", 140 },
+        { L"\u5F52\u5C5E\u5730",     150 },
+        { L"\u72B6\u6001",    90  },
     };
 
     // Icon cache
@@ -329,6 +332,8 @@ private:
     
     // Get expanded row height
     int GetExpandedRowHeight(const DisplayRow& row) const;
+    // 连接行高度: 归属地自动换行后所需行数 x 行高
+    int GetConnRowHeight(const ConnDetail& conn) const;
     int GetTotalHeight() const;
     int GetVisibleHeight() const;
     int GetScrollMax() const;

@@ -63,9 +63,9 @@ public:
     void DataRequired() override;
     const wchar_t* GetInfo(PluginInfoIndex index) override;
     const wchar_t* GetTooltipInfo() override;
+    OptionReturn ShowOptionsDialog(void* hParent) override;
     void OnInitialize(ITrafficMonitor* pApp) override;
     void OnExtenedInfo(ExtendedInfoIndex index, const wchar_t* data) override;
-    OptionReturn ShowOptionsDialog(void* hParent) override;
     ~CProcessNetPlugin();
 
 private:

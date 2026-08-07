@@ -38,3 +38,12 @@ tools/
 
 # YOLO work plan - local only, never pushed
 YOLO_PLAN.md
+
+# Crash dumps
+*.dmp
+# Backup files
+*.backup_*
+# IP geo database (downloaded at runtime)
+*.xdb
+# Research scratch
+research_ipdb/

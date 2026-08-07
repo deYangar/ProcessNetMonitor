@@ -1,8 +1,10 @@
 #include "plugin_main.h"
 #include "utils.h"
+#include "ip_geo.h"
 #include <algorithm>
 #include <shellapi.h>
 #include <dbghelp.h>
+#include <commctrl.h>
 
 #pragma comment(lib, "dbghelp.lib")
 
@@ -679,8 +681,8 @@ const wchar_t* CProcessNetPlugin::GetInfo(PluginInfoIndex i) {
     case TMI_DESCRIPTION: return L"Per-process network speed";
     case TMI_AUTHOR: return L"Aemeath";
     case TMI_COPYRIGHT: return L"MIT";
-    case TMI_VERSION: return L"1.11.0";
-    case TMI_URL: return L"https://github.com";
+    case TMI_VERSION: return L"1.12.0";
+    case TMI_URL: return L"https://github.com/deYangar/ProcessNetMonitor";
     default: return L"";
     }
 }
@@ -719,6 +721,18 @@ void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
     m_detail.LoadSettings();
     // Sync transparent width from settings to static member
     CProcessNetItem::s_transparent_width = m_detail.GetTransparentWidth();
+
+    // IP 归属地库: 检查 DLL 同目录, 缺失则后台自动下载 (不阻塞 UI)
+    {
+        wchar_t dll_path[MAX_PATH] = {};
+        GetModuleFileNameW(s_dll_hinst ? s_dll_hinst : (HINSTANCE)GetModuleHandleW(NULL), dll_path, MAX_PATH);
+        std::wstring dll_dir(dll_path);
+        size_t slash = dll_dir.find_last_of(L"\\");
+        if (slash != std::wstring::npos) {
+            dll_dir = dll_dir.substr(0, slash);
+            IpGeo::Instance().EnsureDatabase(dll_dir);
+        }
+    }
 
     // NOTE: history recording happens inside CDetailWindow::UpdateData (fed by
     // the merged ETW-first stats). We must NOT also record from the legacy
@@ -1061,20 +1075,50 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             SendMessageW(hCombo, CB_SETCURSEL, idx, 0);
         }
 
-        // Debug-log checkbox (default OFF)
+        // 启用归属地显示 checkbox (第3行)
+        CreateWindowW(L"BUTTON", L"\u542F\u7528\u8FDE\u63A5\u5F52\u5C5E\u5730\u663E\u793A\uFF08\u5173\u95ED\u540E\u4E0D\u4E0B\u8F7D\u5E93\uFF09",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            10, 70, 340, 22, hwnd, (HMENU)1012, nullptr, nullptr);
+        if (IpGeo::Instance().IsEnabled())
+            SendMessageW(GetDlgItem(hwnd, 1012), BM_SETCHECK, BST_CHECKED, 0);
+
+        // ---- IP 库设置 ----
+        // 代理服务器 label + edit (placeholder 提示)
+        CreateWindowW(L"STATIC", L"IP\u5E93\u4E0B\u8F7D\u8D70\u4EE3\u7406\u5730\u5740\uFF08\u652F\u6301 http/socks5\uFF0C\u7559\u7A7A=\u76F4\u8FDE\uFF09",
+            WS_CHILD | WS_VISIBLE, 10, 100, 470, 20, hwnd, (HMENU)1010, nullptr, nullptr);
+        HWND hProxyEdit = CreateWindowW(L"EDIT", IpGeo::Instance().GetProxy().c_str(),
+            WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+            10, 122, 460, 24, hwnd, (HMENU)1007, nullptr, nullptr);
+        // 占位提示 (EM_SETCUEBANNER 由 comctl32 处理, 无需额外样式; 注意 0x2000 是 ES_NUMBER 不能加!)
+        SendMessageW(hProxyEdit, EM_SETCUEBANNER, TRUE, (LPARAM)L"http://127.0.0.1:7890 \u6216 socks5://127.0.0.1:1080 \u7B49");
+
+        // 更新间隔 label + edit
+        CreateWindowW(L"STATIC", L"IP\u5E93\u81EA\u52A8\u66F4\u65B0\u95F4\u9694\uFF08\u5929\uFF0C\u9ED8\u8BA47\uFF09",
+            WS_CHILD | WS_VISIBLE, 10, 154, 250, 20, hwnd, (HMENU)1011, nullptr, nullptr);
+        wchar_t days_buf[16];
+        swprintf_s(days_buf, L"%d", IpGeo::Instance().GetUpdateDays());
+        CreateWindowW(L"EDIT", days_buf,
+            WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
+            265, 152, 50, 24, hwnd, (HMENU)1008, nullptr, nullptr);
+
+        // 立即更新按钮
+        CreateWindowW(L"BUTTON", L"\u7ACB\u5373\u66F4\u65B0",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 325, 152, 95, 24, hwnd, (HMENU)1009, nullptr, nullptr);
+
+        // Debug-log checkbox (default OFF, 最后一行)
         CreateWindowW(L"BUTTON",
             L"\u8C03\u8BD5\u65E5\u5FD7\uFF08\u5199\u5165\u63D2\u4EF6\u76EE\u5F55 debug\\\uFF09",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            10, 70, 300, 22, hwnd, (HMENU)1006, nullptr, nullptr);
+            10, 186, 460, 22, hwnd, (HMENU)1006, nullptr, nullptr);
         if (CProcessNetPlugin::Instance().m_detail.GetDebugLogs())
             SendMessageW(GetDlgItem(hwnd, 1006), BM_SETCHECK, BST_CHECKED, 0);
 
         // OK button
         CreateWindowW(L"BUTTON", L"OK",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 230, 100, 65, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 230, 216, 65, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
         // Cancel button
         CreateWindowW(L"BUTTON", L"Cancel",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 305, 100, 65, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 305, 216, 65, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
         // Use the proper UI font (Segoe UI 9pt) on every child control -
         // default is the bitmap 'System' font (jagged, ugly).
         EnumChildWindows(hwnd, OptionsSetFontProc, (LPARAM)GetStockObject(DEFAULT_GUI_FONT));
@@ -1105,6 +1149,21 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             bool dbg_logs = (SendMessageW(GetDlgItem(hwnd, 1006), BM_GETCHECK, 0, 0) == BST_CHECKED);
             plugin.m_detail.SetDebugLogs(dbg_logs);
 
+            // IP 库代理
+            wchar_t proxy_buf[512] = {};
+            GetDlgItemTextW(hwnd, 1007, proxy_buf, 512);
+            IpGeo::Instance().SetProxy(proxy_buf);
+
+            // IP 库更新间隔 (天)
+            wchar_t days_buf[32] = {};
+            GetDlgItemTextW(hwnd, 1008, days_buf, 32);
+            int days = _wtoi(days_buf);
+            if (days >= 1 && days <= 365) IpGeo::Instance().SetUpdateDays(days);
+
+            // 启用归属地显示
+            bool geo_on = (SendMessageW(GetDlgItem(hwnd, 1012), BM_GETCHECK, 0, 0) == BST_CHECKED);
+            IpGeo::Instance().SetEnabled(geo_on);
+
             plugin.m_detail.SaveSettings();
             plugin.StartRefreshTimer();   // apply immediately
             g_option_changed = true;
@@ -1114,6 +1173,13 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         if (LOWORD(wp) == IDCANCEL) {
             g_option_changed = false;
             DestroyWindow(hwnd);
+            return 0;
+        }
+        // 立即更新 IP 库
+        if (LOWORD(wp) == 1009) {
+            IpGeo::Instance().ForceUpdate();
+            EnableWindow(GetDlgItem(hwnd, 1009), FALSE);
+            SetWindowTextW(GetDlgItem(hwnd, 1009), L"\u66F4\u65B0\u4E2D...");  // 更新中...
             return 0;
         }
         break;
@@ -1144,7 +1210,7 @@ ITMPlugin::OptionReturn CProcessNetPlugin::ShowOptionsDialog(void* hParent) {
         L"ProcessNetMonitorOptionsDlg",
         L"\x63D2\x4EF6\x8BBE\x7F6E",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        0, 0, 430, 245,
+        0, 0, 500, 330,
         (HWND)hParent, nullptr, GetModuleHandleW(NULL), nullptr
     );
     

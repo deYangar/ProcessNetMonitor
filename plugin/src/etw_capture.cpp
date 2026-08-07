@@ -187,25 +187,31 @@ std::wstring EtwCapture::FindSessionOwners() {
 }
 
 // ---- diagnostics log (shared read: TM can keep running) ----
-static FILE* EtwLogOpen() {
-    wchar_t path[MAX_PATH] = L"";
-    if (!PNM_GetDebugDir(path, MAX_PATH)) return nullptr;
-    wcscat_s(path, L"\\etw_capture.log");
-    FILE* f = _wfsopen(path, L"a", _SH_DENYNO);
-    return f;
-}
+// (已改用 Win32 API 写日志, 见 LogLine: 绕开 CRT FILE* 防第三方 hook 干扰)
 
 void EtwCapture::LogLine(const wchar_t* fmt, ...) {
     if (!s_debug_logs.load()) return;  // debug logging switch (default off)
-    FILE* f = EtwLogOpen();
-    if (!f) return;
+    // 用 Win32 API 写日志 (绕开 CRT FILE* 机制: 第三方注入 hook (如游戏加加 GPP64)
+    // 会干扰 CRT 文件状态导致 fwprintf/fputs failfast 崩溃 0xC0040409)
+    wchar_t path[MAX_PATH] = L"";
+    if (!PNM_GetDebugDir(path, MAX_PATH)) return;
+    wcscat_s(path, L"\\etw_capture.log");
+    HANDLE h = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    wchar_t buf[2048];
     SYSTEMTIME st; GetLocalTime(&st);
-    fwprintf(f, L"[%02u:%02u:%02u] ", st.wHour, st.wMinute, st.wSecond);
-    va_list ap; va_start(ap, fmt);
-    vfwprintf(f, fmt, ap);
-    va_end(ap);
-    fwprintf(f, L"\n");
-    fclose(f);
+    int n = _snwprintf_s(buf, 2048, _TRUNCATE, L"[%02u:%02u:%02u] ", st.wHour, st.wMinute, st.wSecond);
+    if (n < 0) n = 0;
+    if (n < 2048) {
+        va_list ap; va_start(ap, fmt);
+        _vsnwprintf_s(buf + n, 2048 - n, _TRUNCATE, fmt, ap);
+        va_end(ap);
+    }
+    if (n < 2048) _snwprintf_s(buf + n, 2048 - n, _TRUNCATE, L"\n");
+    DWORD wr = 0;
+    WriteFile(h, buf, (DWORD)(wcsnlen_s(buf, 2048) * sizeof(wchar_t)), &wr, NULL);
+    CloseHandle(h);
 }
 
 // dir: 0=ignore 1=send 2=recv

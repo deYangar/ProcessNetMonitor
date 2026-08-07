@@ -2,6 +2,7 @@
 #include "plugin_main.h"
 #include "utils.h"
 #include "signature.h"
+#include "ip_geo.h"
 #include <shellapi.h>
 #include <dwmapi.h>
 #include <algorithm>
@@ -222,7 +223,7 @@ void CDetailWindow::ApplyLayoutScale() {
     
     static const int BASE_RT_WIDTHS[NUM_COLS] = {42, 180, 90, 100, 100, 60, 80};
     static const int BASE_HIST_WIDTHS[NUM_COLS] = {42, 140, 70, 90, 90, 85, 85};
-    static const int BASE_CONN_WIDTHS[NUM_CONN_COLS] = {50, 180, 180, 100};
+    static const int BASE_CONN_WIDTHS[NUM_CONN_COLS] = {50, 150, 150, 150, 110};
     for (int i = 0; i < NUM_COLS; i++) {
         m_rt_cols[i].width = (int)(BASE_RT_WIDTHS[i] * m_dpi_scale);
         m_hist_cols[i].width = (int)(BASE_HIST_WIDTHS[i] * m_dpi_scale);
@@ -994,6 +995,25 @@ void CDetailWindow::SaveSettings() {
     fprintf(f, "  \"sort_asc\": [%s, %s],\n", m_sort_asc[0] ? "true" : "false", m_sort_asc[1] ? "true" : "false");
     fprintf(f, "  \"refresh_ms\": %d,\n", m_refresh_ms);
     fprintf(f, "  \"transparent_width\": %d,\n", m_transparent_width);
+    RECT rc;
+    GetWindowRect(m_hwnd, &rc);
+    fprintf(f, "  \"win_w\": %d,\n", rc.right - rc.left);
+    fprintf(f, "  \"win_h\": %d,\n", rc.bottom - rc.top);
+    // IP 归属地设置 (proxy / update_days / enabled)
+    {
+        const std::wstring& proxy = IpGeo::Instance().GetProxy();
+        std::string proxy8;
+        if (!proxy.empty()) {
+            int n = WideCharToMultiByte(CP_UTF8, 0, proxy.c_str(), (int)proxy.size(), NULL, 0, NULL, NULL);
+            if (n > 0) {
+                proxy8.resize(n);
+                WideCharToMultiByte(CP_UTF8, 0, proxy.c_str(), (int)proxy.size(), &proxy8[0], n, NULL, NULL);
+            }
+        }
+        fprintf(f, "  \"geo_proxy\": \"%s\",\n", proxy8.c_str());
+        fprintf(f, "  \"geo_update_days\": %d,\n", IpGeo::Instance().GetUpdateDays());
+        fprintf(f, "  \"geo_enabled\": %s,\n", IpGeo::Instance().IsEnabled() ? "true" : "false");
+    }
     fprintf(f, "  \"debug_logs\": %s\n", m_debug_logs ? "true" : "false");
     fprintf(f, "}\n");
     fclose(f);
@@ -1075,6 +1095,59 @@ void CDetailWindow::LoadSettings() {
             }
         }
     }
+    // Parse win_w / win_h (restore window size)
+    {
+        int ww = 0, wh = 0;
+        size_t pos = json.find("\"win_w\"");
+        if (pos != std::string::npos) {
+            pos = json.find(':', pos);
+            if (pos != std::string::npos) ww = atoi(json.c_str() + pos + 1);
+        }
+        pos = json.find("\"win_h\"");
+        if (pos != std::string::npos) {
+            pos = json.find(':', pos);
+            if (pos != std::string::npos) wh = atoi(json.c_str() + pos + 1);
+        }
+        if (ww >= MIN_WIDTH && wh >= MIN_HEIGHT && m_hwnd) {
+            SetWindowPos(m_hwnd, NULL, 0, 0, ww, wh, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+    // IP 归属地设置: geo_proxy / geo_update_days / geo_enabled
+    {
+        size_t pos = json.find("\"geo_proxy\"");
+        if (pos != std::string::npos) {
+            pos = json.find(':', pos);
+            pos = json.find('"', pos);
+            if (pos != std::string::npos) {
+                size_t end = json.find('"', pos + 1);
+                if (end != std::string::npos) {
+                    std::string v = json.substr(pos + 1, end - pos - 1);
+                    int n = MultiByteToWideChar(CP_UTF8, 0, v.c_str(), (int)v.size(), NULL, 0);
+                    if (n > 0) {
+                        std::wstring w(n, 0);
+                        MultiByteToWideChar(CP_UTF8, 0, v.c_str(), (int)v.size(), &w[0], n);
+                        IpGeo::Instance().SetProxy(w);
+                    }
+                }
+            }
+        }
+        pos = json.find("\"geo_update_days\"");
+        if (pos != std::string::npos) {
+            pos = json.find(':', pos);
+            if (pos != std::string::npos) {
+                int v = atoi(json.c_str() + pos + 1);
+                if (v >= 1 && v <= 365) IpGeo::Instance().SetUpdateDays(v);
+            }
+        }
+        pos = json.find("\"geo_enabled\"");
+        if (pos != std::string::npos) {
+            pos = json.find(':', pos);
+            if (pos != std::string::npos) {
+                std::string sub = json.substr(pos + 1, 8);
+                IpGeo::Instance().SetEnabled(sub.find("true") != std::string::npos);
+            }
+        }
+    }
     // Sync debug-log switch to capture backends (called after SetCapture in OnInitialize)
     EtwCapture::SetDebugLogs(m_debug_logs);
     if (m_capture) {
@@ -1145,6 +1218,22 @@ void CDetailWindow::ScrollTo(int pos) {
     InvalidateRect(m_hwnd, NULL, FALSE);
 }
 
+int CDetailWindow::GetConnRowHeight(const ConnDetail& conn) const {
+    int h = CONN_ROW_H;
+    std::wstring geo = IpGeo::Instance().Query(conn.remote_addr);
+    if (geo.empty() || geo == L"-") return h;
+    HDC hdc = CreateCompatibleDC(NULL);
+    if (!hdc) return h;
+    HFONT old = (HFONT)SelectObject(hdc, m_font_row);
+    RECT rc = { 0, 0, m_conn_cols[3].width, 0 };
+    DrawTextW(hdc, geo.c_str(), -1, &rc, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+    SelectObject(hdc, old);
+    DeleteDC(hdc);
+    int lines = (rc.bottom + CONN_ROW_H - 1) / CONN_ROW_H;
+    if (lines < 1) lines = 1;
+    return lines * CONN_ROW_H;
+}
+
 int CDetailWindow::GetExpandedRowHeight(const DisplayRow& row) const {
     int h = ROW_H;  // Main row
 
@@ -1161,7 +1250,8 @@ int CDetailWindow::GetExpandedRowHeight(const DisplayRow& row) const {
                 if (!sp.connections.empty()) {
                     h += CHILD_ROW_H + CONN_HEADER_H;
                     int max_rows = sp.conn_expanded ? (int)sp.connections.size() : min((int)sp.connections.size(), MAX_CONN_ROWS);
-                    h += max_rows * CONN_ROW_H;
+                    for (int ci = 0; ci < max_rows; ci++)
+                        h += GetConnRowHeight(sp.connections[ci]);
                     if ((int)sp.connections.size() > MAX_CONN_ROWS && !sp.conn_expanded)
                         h += CONN_ROW_H;
                 }
@@ -1290,6 +1380,23 @@ LRESULT CDetailWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_NCHITTEST: {
         POINT pt = { (short)LOWORD(lp), (short)HIWORD(lp) };
         ScreenToClient(m_hwnd, &pt);
+        // 窗口边缘: 支持拖拽缩放 (边缘优先于标题栏)
+        int edge = (int)(6 * m_dpi_scale);
+        if (edge < 4) edge = 4;
+        RECT rc;
+        GetClientRect(m_hwnd, &rc);
+        bool hit_left = pt.x < edge;
+        bool hit_right = pt.x >= rc.right - edge;
+        bool hit_top = pt.y < edge;
+        bool hit_bottom = pt.y >= rc.bottom - edge;
+        if (hit_left && hit_top) return HTTOPLEFT;
+        if (hit_right && hit_top) return HTTOPRIGHT;
+        if (hit_left && hit_bottom) return HTBOTTOMLEFT;
+        if (hit_right && hit_bottom) return HTBOTTOMRIGHT;
+        if (hit_left) return HTLEFT;
+        if (hit_right) return HTRIGHT;
+        if (hit_top) return HTTOP;
+        if (hit_bottom) return HTBOTTOM;
         if (pt.y < TITLE_BAR_H && pt.y >= 0) {
             if (PtInRect(&m_rcClose, pt)) return HTCLIENT;
             if (PtInRect(&m_rcMin, pt)) return HTCLIENT;
@@ -1297,6 +1404,18 @@ LRESULT CDetailWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
         }
         return HTCLIENT;
     }
+
+    case WM_GETMINMAXINFO: {
+        MINMAXINFO* mmi = (MINMAXINFO*)lp;
+        mmi->ptMinTrackSize.x = MIN_WIDTH;
+        mmi->ptMinTrackSize.y = MIN_HEIGHT;
+        return 0;
+    }
+
+    case WM_EXITSIZEMOVE:
+        // 拖拽调整大小结束 - 保存窗口宽高
+        SaveSettings();
+        return 0;
 
     case WM_SYSCOMMAND:
         if ((wp & 0xFFF0) == SC_CLOSE) { Hide(); return 0; }
@@ -1323,6 +1442,13 @@ LRESULT CDetailWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
         // background signature verification finished - refresh so the new
         // categories (系统进程/第三方程序/未签名) appear
         CProcessNetPlugin::Instance().DetailRefreshFromSnapshot();
+        return 0;
+
+    case WM_APP + 5:
+        // IP 库首次下载失败提示
+        MessageBoxW(m_hwnd,
+            L"IP \u5F52\u5C5E\u5730\u6570\u636E\u5E93\u4E0B\u8F7D\u5931\u8D25\u3002\n\u53EF\u5728 \u63D2\u4EF6\u8BBE\u7F6E \u4E2D\u914D\u7F6E\u4EE3\u7406\u670D\u52A1\u5668\uFF0C\u6216\u5173\u95ED\u201C\u542F\u7528\u8FDE\u63A5\u5F52\u5C5E\u5730\u663E\u793A\u201D\u3002",
+            L"ProcessNetMonitor", MB_OK | MB_ICONWARNING);
         return 0;
 
     default:
@@ -1438,7 +1564,8 @@ void CDetailWindow::OnLButtonDown(int x, int y) {
                 if (!sp.connections.empty()) {
                     cur_y += CHILD_ROW_H + CONN_HEADER_H;  // title + header
                     int conn_count = sp.conn_expanded ? (int)sp.connections.size() : min((int)sp.connections.size(), MAX_CONN_ROWS);
-                    cur_y += conn_count * CONN_ROW_H;
+                    for (int ci = 0; ci < conn_count; ci++)
+                        cur_y += GetConnRowHeight(sp.connections[ci]);
                     if ((int)sp.connections.size() > MAX_CONN_ROWS && !sp.conn_expanded) {
                         // This is the "more" row
                         if (y >= cur_y && y < cur_y + CONN_ROW_H) {
@@ -1857,12 +1984,35 @@ void CDetailWindow::DrawTableHeader(HDC hdc, int w, int y) {
     SelectObject(hdc, hOldFont);
 }
 
+    // 连接表格列宽自适应窗口: 协议/状态固定, 本地/远程/归属地按权重分配
+    // 权重: 本地 100 : 远程 100 : 归属地 120 (归属地关闭时权重 0)
+    void CDetailWindow::UpdateConnColWidths(int win_w) {
+        int table_w = win_w - PADDING - 20 - (int)(32 * m_dpi_scale) - SUBPROC_INDENT - CONN_TABLE_PADDING;
+        if (table_w < 320) table_w = 320;
+        int fixed = m_conn_cols[0].width + m_conn_cols[4].width;  // 协议 + 状态 (已 DPI 缩放)
+        int rest = table_w - fixed;
+        if (rest < 200) rest = 200;
+        if (IpGeo::Instance().IsEnabled()) {
+            m_conn_cols[1].width = (int)(rest * 100 / 320);
+            m_conn_cols[2].width = (int)(rest * 100 / 320);
+            m_conn_cols[3].width = rest - m_conn_cols[1].width - m_conn_cols[2].width;
+        } else {
+            // 归属地关闭: 本地/远程对半分
+            m_conn_cols[1].width = rest / 2;
+            m_conn_cols[2].width = rest - m_conn_cols[1].width;
+            m_conn_cols[3].width = 0;
+        }
+    }
+
 void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
     int row_h = GetRowHeight();
 
     HFONT hOldFont = (HFONT)SelectObject(hdc, m_font_row);
     SetBkMode(hdc, TRANSPARENT);
     Column* cols = GetActiveCols();
+
+    // 连接表格列宽随窗口宽度自适应
+    UpdateConnColWidths(w);
 
     int table_bottom = client_h - PADDING;
     bool is_hist = (m_active_tab == 1);
@@ -2129,7 +2279,7 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
                     int col_x = PADDING + (int)(32 * m_dpi_scale) + SUBPROC_INDENT + CONN_TABLE_PADDING;
                     for (int ci = 0; ci < NUM_CONN_COLS; ci++) {
                         RECT col_rc = { col_x, child_y, col_x + m_conn_cols[ci].width, child_y + CONN_HEADER_H };
-                        DrawTextW(hdc, m_conn_cols[ci].title, -1, &col_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+                        DrawTextW(hdc, m_conn_cols[ci].title, -1, &col_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
                         col_x += m_conn_cols[ci].width;
                     }
                     child_y += CONN_HEADER_H;
@@ -2139,7 +2289,9 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
                     for (int ci = 0; ci < conn_count; ci++) {
                         auto& conn = sp.connections[ci];
 
-                        RECT conn_rc = { PADDING + (int)(32 * m_dpi_scale) + SUBPROC_INDENT, child_y, w - PADDING - 20, child_y + CONN_ROW_H };
+                        // 行高: 归属地自动换行后所需高度
+                        int row_h = GetConnRowHeight(conn);
+                        RECT conn_rc = { PADDING + (int)(32 * m_dpi_scale) + SUBPROC_INDENT, child_y, w - PADDING - 20, child_y + row_h };
                         FillRect(hdc, &conn_rc, m_br_row[ci % 2]);
                         SelectObject(hdc, m_font_row);
 
@@ -2147,20 +2299,35 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
 
                         // Protocol
                         SetTextColor(hdc, conn.protocol == ConnDetail::TCP ? GetAccentColor(false) : GetAccentColor(true));
-                        RECT proto_rc = { col_x, child_y, col_x + m_conn_cols[0].width, child_y + CONN_ROW_H };
-                        DrawTextW(hdc, conn.protocol == ConnDetail::TCP ? L"TCP" : L"UDP", -1, &proto_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+                        RECT proto_rc = { col_x, child_y, col_x + m_conn_cols[0].width, child_y + row_h };
+                        DrawTextW(hdc, conn.protocol == ConnDetail::TCP ? L"TCP" : L"UDP", -1, &proto_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
                         col_x += m_conn_cols[0].width;
 
                         // Local address
                         SetTextColor(hdc, GetTextColor());
-                        RECT local_rc = { col_x, child_y, col_x + m_conn_cols[1].width, child_y + CONN_ROW_H };
-                        DrawTextW(hdc, conn.local_addr.c_str(), -1, &local_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+                        RECT local_rc = { col_x, child_y, col_x + m_conn_cols[1].width, child_y + row_h };
+                        DrawTextW(hdc, conn.local_addr.c_str(), -1, &local_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
                         col_x += m_conn_cols[1].width;
 
                         // Remote address
-                        RECT remote_rc = { col_x, child_y, col_x + m_conn_cols[2].width, child_y + CONN_ROW_H };
-                        DrawTextW(hdc, conn.remote_addr.c_str(), -1, &remote_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+                        RECT remote_rc = { col_x, child_y, col_x + m_conn_cols[2].width, child_y + row_h };
+                        DrawTextW(hdc, conn.remote_addr.c_str(), -1, &remote_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
                         col_x += m_conn_cols[2].width;
+
+                        // Geo location (归属地, 超长自动换行完整显示)
+                        SetTextColor(hdc, GetSecondaryTextColor());
+                        std::wstring geo = IpGeo::Instance().Query(conn.remote_addr);
+                        RECT geo_rc = { col_x, child_y, col_x + m_conn_cols[3].width, child_y + row_h };
+                        if (!geo.empty()) {
+                            // 垂直居中多行文本
+                            RECT mrc = geo_rc;
+                            DrawTextW(hdc, geo.c_str(), -1, &mrc, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+                            int text_h = mrc.bottom - mrc.top;
+                            int top_off = max(0, (row_h - text_h) / 2);
+                            RECT draw_rc = { geo_rc.left, geo_rc.top + top_off, geo_rc.right, geo_rc.top + top_off + text_h };
+                            DrawTextW(hdc, geo.c_str(), -1, &draw_rc, DT_WORDBREAK | DT_LEFT | DT_TOP | DT_NOPREFIX);
+                        }
+                        col_x += m_conn_cols[3].width;
 
                         // State
                         COLORREF state_color = GetSecondaryTextColor();
@@ -2169,10 +2336,10 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
                         else if (conn.state == L"TIME_WAIT") state_color = RGB(255, 152, 0);
                         else if (conn.state == L"CLOSE_WAIT") state_color = RGB(255, 87, 34);
                         SetTextColor(hdc, state_color);
-                        RECT state_rc = { col_x, child_y, col_x + m_conn_cols[3].width, child_y + CONN_ROW_H };
-                        DrawTextW(hdc, conn.state.c_str(), -1, &state_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+                        RECT state_rc = { col_x, child_y, col_x + m_conn_cols[4].width, child_y + row_h };
+                        DrawTextW(hdc, conn.state.c_str(), -1, &state_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
 
-                        child_y += CONN_ROW_H;
+                        child_y += row_h;
                     }
 
                     // "... and N more (click to expand)"

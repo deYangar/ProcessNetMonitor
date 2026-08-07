@@ -317,19 +317,27 @@ void PacketCapture::WriteLog(const std::string& text) {
     if (m_log_dir.empty()) return;
     CreateDirectoryW(m_log_dir.c_str(), NULL);
     std::wstring path = m_log_dir + L"\\capture.log";
-    FILE* f = _wfopen(path.c_str(), L"a, ccs=UTF-8");
-    if (!f) return;
+    // 用 Win32 API (绕开 CRT FILE*: 第三方注入 hook 会干扰 CRT 文件状态导致 failfast)
+    HANDLE h = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    wchar_t buf[2048];
     SYSTEMTIME st;
     GetLocalTime(&st);
-    fwprintf_s(f, L"[%04d-%02d-%02d %02d:%02d:%02d] ", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-    int wlen = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, NULL, 0);
-    if (wlen > 1) {
-        std::wstring wtext(wlen - 1, L'\0');
-        MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, &wtext[0], wlen);
-        fputws(wtext.c_str(), f);
+    int n = _snwprintf_s(buf, 2048, _TRUNCATE, L"[%04d-%02d-%02d %02d:%02d:%02d] ",
+                         st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    if (n < 0) n = 0;
+    if (n < 2048) {
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, NULL, 0);
+        if (wlen > 1) {
+            int wn = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, buf + n, 2048 - n - 1);
+            if (wn > 0) n += wn - 1;
+        }
     }
-    fputwc(L'\n', f);
-    fclose(f);
+    if (n < 2048) _snwprintf_s(buf + n, 2048 - n, _TRUNCATE, L"\n");
+    DWORD wr = 0;
+    WriteFile(h, buf, (DWORD)(wcsnlen_s(buf, 2048) * sizeof(wchar_t)), &wr, NULL);
+    CloseHandle(h);
 }
 
 void PacketCapture::LogStartupFailure() {

@@ -1,2 +1,3 @@
+// resource.rc - ProcessNetMonitor 插件资源
 // App icon for the detail window
 1 ICON "src\\app.ico"
