@@ -548,11 +548,24 @@ void CDetailWindow::BuildHistoryRows() {
             row.category = L"\u672A\u77E5";
         } else {
             // signature-based classification (background worker + cache)
-            switch (SignatureCache::Instance().Check(row.exe_path)) {
-            case SigClass::System:     row.category = L"\u7CFB\u7EDF\u8FDB\u7A0B"; break;
-            case SigClass::ThirdParty: row.category = L"\u7B2C\u4E09\u65B9\u7A0B\u5E8F"; break;
-            case SigClass::Unsigned:   row.category = L"\u672A\u7B7E\u540D"; break;
-            default:                   row.category = L"\u672A\u77E5"; break;
+            SigClass sc = SignatureCache::Instance().Check(row.exe_path);
+            if (sc == SigClass::Unknown && row.exe_path.empty()) {
+                // kernel pseudo-processes have no exe (System/Registry/Idle/
+                // Memory Compression) - classify by well-known names
+                if (lower.find(L"system") != std::wstring::npos ||
+                    lower.find(L"registry") != std::wstring::npos ||
+                    lower.find(L"idle") != std::wstring::npos ||
+                    lower.find(L"memory compression") != std::wstring::npos)
+                    row.category = L"\u7CFB\u7EDF\u8FDB\u7A0B";
+                else
+                    row.category = L"\u672A\u77E5";
+            } else {
+                switch (sc) {
+                case SigClass::System:     row.category = L"\u7CFB\u7EDF\u8FDB\u7A0B"; break;
+                case SigClass::ThirdParty: row.category = L"\u7B2C\u4E09\u65B9\u7A0B\u5E8F"; break;
+                case SigClass::Unsigned:   row.category = L"\u672A\u7B7E\u540D"; break;
+                default:                   row.category = L"\u672A\u77E5"; break;
+                }
             }
         }
 
@@ -831,11 +844,24 @@ void CDetailWindow::RebuildRows() {
             row.category = L"\u672A\u77E5";  // unresolved pid - can't classify
         } else {
             // signature-based classification (background worker + cache)
-            switch (SignatureCache::Instance().Check(row.exe_path)) {
-            case SigClass::System:     row.category = L"\u7CFB\u7EDF\u8FDB\u7A0B"; break;
-            case SigClass::ThirdParty: row.category = L"\u7B2C\u4E09\u65B9\u7A0B\u5E8F"; break;
-            case SigClass::Unsigned:   row.category = L"\u672A\u7B7E\u540D"; break;
-            default:                   row.category = L"\u672A\u77E5"; break;
+            SigClass sc = SignatureCache::Instance().Check(row.exe_path);
+            if (sc == SigClass::Unknown && row.exe_path.empty()) {
+                // kernel pseudo-processes have no exe (System/Registry/Idle/
+                // Memory Compression) - classify by well-known names
+                if (lower.find(L"system") != std::wstring::npos ||
+                    lower.find(L"registry") != std::wstring::npos ||
+                    lower.find(L"idle") != std::wstring::npos ||
+                    lower.find(L"memory compression") != std::wstring::npos)
+                    row.category = L"\u7CFB\u7EDF\u8FDB\u7A0B";
+                else
+                    row.category = L"\u672A\u77E5";
+            } else {
+                switch (sc) {
+                case SigClass::System:     row.category = L"\u7CFB\u7EDF\u8FDB\u7A0B"; break;
+                case SigClass::ThirdParty: row.category = L"\u7B2C\u4E09\u65B9\u7A0B\u5E8F"; break;
+                case SigClass::Unsigned:   row.category = L"\u672A\u7B7E\u540D"; break;
+                default:                   row.category = L"\u672A\u77E5"; break;
+                }
             }
         }
 
