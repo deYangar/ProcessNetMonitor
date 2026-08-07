@@ -529,10 +529,17 @@ void EtwCapture::OnEvent(PEVENT_RECORD rec) {
                     cmd += ch;
                     p += 2;
                 }
-                size_t st = cmd.find_first_not_of(L" \t\"");
+                size_t st = cmd.find_first_not_of(L" \t");
                 if (st != std::wstring::npos) {
-                    size_t en = cmd.find_first_of(L" \t\"", st);
-                    std::wstring tok = cmd.substr(st, en == std::wstring::npos ? cmd.size() - st : en - st);
+                    std::wstring tok;
+                    if (cmd[st] == L'\"') {
+                        // quoted path: "C:\Program Files\...\app.exe" ...
+                        size_t eq = cmd.find(L'\"', st + 1);
+                        if (eq != std::wstring::npos) tok = cmd.substr(st + 1, eq - st - 1);
+                    } else {
+                        size_t en = cmd.find_first_of(L" \t", st);
+                        tok = cmd.substr(st, en == std::wstring::npos ? cmd.size() - st : en - st);
+                    }
                     if (tok.size() >= 4 && (tok[1] == L':' || tok.find(L"\\\\") == 0)) path = tok;
                 }
                 if (base.empty() && !path.empty()) {

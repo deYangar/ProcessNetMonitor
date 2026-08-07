@@ -1,6 +1,7 @@
 ﻿#include "detail_window.h"
 #include "plugin_main.h"
 #include "utils.h"
+#include "signature.h"
 #include <shellapi.h>
 #include <dwmapi.h>
 #include <algorithm>
@@ -176,6 +177,9 @@ bool CDetailWindow::Initialize(HINSTANCE hInst) {
         NULL, NULL, m_hinst, NULL);
 
     if (!m_hwnd) return false;
+
+    // Signature verification worker notifies this window on completion
+    SignatureCache::Instance().SetNotifyHwnd(m_hwnd);
 
     // Now that window exists, get accurate DPI for this monitor
     UpdateDpiScale(m_hwnd);
@@ -542,13 +546,15 @@ void CDetailWindow::BuildHistoryRows() {
         for (auto& c : lower) c = towlower(c);
         if (!hist.name.empty() && hist.name[0] == L'<') {
             row.category = L"\u672A\u77E5";
-        } else if (lower.find(L"svchost") != std::wstring::npos ||
-            lower.find(L"system") != std::wstring::npos ||
-            lower.find(L"csrss") != std::wstring::npos ||
-            lower.find(L"lsass") != std::wstring::npos)
-            row.category = L"\u7CFB\u7EDF\u8FDB\u7A0B";
-        else
-            row.category = L"\u7B2C\u4E09\u65B9\u7A0B\u5E8F";
+        } else {
+            // signature-based classification (background worker + cache)
+            switch (SignatureCache::Instance().Check(row.exe_path)) {
+            case SigClass::System:     row.category = L"\u7CFB\u7EDF\u8FDB\u7A0B"; break;
+            case SigClass::ThirdParty: row.category = L"\u7B2C\u4E09\u65B9\u7A0B\u5E8F"; break;
+            case SigClass::Unsigned:   row.category = L"\u672A\u7B7E\u540D"; break;
+            default:                   row.category = L"\u672A\u77E5"; break;
+            }
+        }
 
         if (expanded_names.count(name)) row.expanded = true;
         m_rows.push_back(row);
@@ -823,13 +829,15 @@ void CDetailWindow::RebuildRows() {
         for (auto& c : lower) c = towlower(c);
         if (!name.empty() && name[0] == L'<') {
             row.category = L"\u672A\u77E5";  // unresolved pid - can't classify
-        } else if (lower.find(L"svchost") != std::wstring::npos ||
-            lower.find(L"system") != std::wstring::npos ||
-            lower.find(L"csrss") != std::wstring::npos ||
-            lower.find(L"lsass") != std::wstring::npos)
-            row.category = L"\u7CFB\u7EDF\u8FDB\u7A0B";
-        else
-            row.category = L"\u7B2C\u4E09\u65B9\u7A0B\u5E8F";
+        } else {
+            // signature-based classification (background worker + cache)
+            switch (SignatureCache::Instance().Check(row.exe_path)) {
+            case SigClass::System:     row.category = L"\u7CFB\u7EDF\u8FDB\u7A0B"; break;
+            case SigClass::ThirdParty: row.category = L"\u7B2C\u4E09\u65B9\u7A0B\u5E8F"; break;
+            case SigClass::Unsigned:   row.category = L"\u672A\u7B7E\u540D"; break;
+            default:                   row.category = L"\u672A\u77E5"; break;
+            }
+        }
 
         // Build sub-processes
         for (auto* st : group) {
@@ -1282,6 +1290,12 @@ LRESULT CDetailWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
 
     case WM_PNM_REFRESH:
         // pull latest snapshot on the UI thread (posted by refresh timer)
+        CProcessNetPlugin::Instance().DetailRefreshFromSnapshot();
+        return 0;
+
+    case WM_APP + 2:
+        // background signature verification finished - refresh so the new
+        // categories (系统进程/第三方程序/未签名) appear
         CProcessNetPlugin::Instance().DetailRefreshFromSnapshot();
         return 0;
 

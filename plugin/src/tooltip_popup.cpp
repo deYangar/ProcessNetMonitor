@@ -1,6 +1,7 @@
 ﻿#include "tooltip_popup.h"
-#include "plugin_main.h"
-#include "utils.h"
+#include "plugin_main.h"  
+#include "utils.h"        
+#include "signature.h"
 #include <shellapi.h>
 #include <dwmapi.h>
 #include <algorithm>
@@ -32,6 +33,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
         }
         // Stop ETW capture cleanly
         CProcessNetPlugin::Instance().StopEtwCapture();
+        // Stop the signature verification worker (file IO must not outlive us)
+        SignatureCache::Instance().Shutdown();
     }
     return TRUE;
 }
