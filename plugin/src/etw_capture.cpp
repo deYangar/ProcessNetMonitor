@@ -534,9 +534,28 @@ void EtwCapture::OnEvent(PEVENT_RECORD rec) {
                 }
             }
             if (!base.empty()) {
-                std::lock_guard<std::mutex> lk(m_name_mutex);
-                m_name_cache[pid] = base;
-                if (!path.empty()) m_path_cache[pid] = path;
+                {
+                    std::lock_guard<std::mutex> lk(m_name_mutex);
+                    m_name_cache[pid] = base;
+                    if (!path.empty()) m_path_cache[pid] = path;
+                }
+                // CommandLine often carries no full path (e.g. "curl -s ..." or
+                // system processes with empty CommandLine). Grab the real image
+                // path while the process is still alive, OUTSIDE the lock - the
+                // icon cache is keyed by exe_path, so a missing path means the
+                // UI falls back to the blank default icon (regression 2026-08-07).
+                if (path.empty()) {
+                    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+                    if (h) {
+                        wchar_t buf[512]; DWORD n = 512;
+                        if (QueryFullProcessImageNameW(h, 0, buf, &n)) {
+                            std::lock_guard<std::mutex> lk(m_name_mutex);
+                            m_path_cache[pid] = buf;
+                            LogLine(L"PS path: pid=%lu path=%ls", pid, buf);
+                        }
+                        CloseHandle(h);
+                    }
+                }
             }
         }
     }
