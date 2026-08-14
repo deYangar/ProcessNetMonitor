@@ -5,6 +5,15 @@
 #include <unordered_map>
 #include "capture.h"
 
+// Set during DLL_PROCESS_DETACH. Window destructors skip DestroyWindow when
+// this is set: destroying windows during DLL unload fires synchronous
+// window-proc/IME callbacks that can crash the host (issue #7).
+extern volatile bool g_shutting_down;
+
+// Destroy a window with IME detached and SEH-guarded. Kept as a standalone
+// function because C2712 forbids __try inside destructors (object unwinding).
+void SafeDestroyWindow(HWND hwnd);
+
 // Rich tooltip popup window - shows process icons + speed info
 // Replaces the plain-text TM tooltip with a Huorong-style popup
 class CTooltipPopup {

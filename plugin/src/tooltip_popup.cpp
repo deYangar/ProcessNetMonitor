@@ -11,9 +11,23 @@
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "user32.lib")
+#pragma comment(lib, "imm32.lib")
 
 CTooltipPopup* CTooltipPopup::s_instance = nullptr;
 HINSTANCE s_dll_hinst = nullptr;
+volatile bool g_shutting_down = false;
+
+void SafeDestroyWindow(HWND hwnd) {
+    if (!hwnd) return;
+    // Detach IME first so third-party IME hooks (e.g. Sogou) don't run inside
+    // the destroy callback, then guard the destruction with SEH as a last
+    // resort (issue #7).
+    ImmAssociateContext(hwnd, nullptr);
+    __try {
+        DestroyWindow(hwnd);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
 
 // Standalone WndProc to avoid member function pointer ABI issues
 static LRESULT CALLBACK StaticWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -27,6 +41,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         s_dll_hinst = (HINSTANCE)hModule;
     } else if (reason == DLL_PROCESS_DETACH) {
+        // Mark shutdown BEFORE doing anything else: window destructors that
+        // run later (CRT static teardown) must not DestroyWindow through
+        // synchronous callbacks (third-party IME hooks can crash the host,
+        // issue #7).
+        g_shutting_down = true;
         // Save history on DLL unload (destructor may not run)
         if (CDetailWindow::s_instance) {
             CDetailWindow::s_instance->SaveHistory();
@@ -81,7 +100,17 @@ CTooltipPopup::CTooltipPopup() {
 }
 
 CTooltipPopup::~CTooltipPopup() {
-    if (m_hwnd) DestroyWindow(m_hwnd);
+    if (m_hwnd) {
+        if (g_shutting_down) {
+            // DLL unload / process exit: skip DestroyWindow. It fires
+            // synchronous window-proc/IME callbacks that can crash the host
+            // during teardown (issue #7); the window dies with the process.
+            m_hwnd = nullptr;
+        } else {
+            SafeDestroyWindow(m_hwnd);
+            m_hwnd = nullptr;
+        }
+    }
     for (auto& [path, icon] : m_icon_cache) {
         if (icon) DestroyIcon(icon);
     }
