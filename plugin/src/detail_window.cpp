@@ -10,6 +10,8 @@
 #include <set>
 #include <ctime>
 
+#pragma comment(lib, "imm32.lib")
+
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "dwmapi.lib")
 
@@ -41,7 +43,16 @@ CDetailWindow::~CDetailWindow() {
     SaveSettings();
     SaveHistory();
     OutputDebugStringW(L"[PNM] ~CDetailWindow: SaveHistory done");
-    if (m_hwnd) DestroyWindow(m_hwnd);
+    if (m_hwnd) {
+        if (g_shutting_down) {
+            // DLL unload / process exit: skip DestroyWindow (issue #7 - see
+            // CTooltipPopup::~CTooltipPopup).
+            m_hwnd = nullptr;
+        } else {
+            SafeDestroyWindow(m_hwnd);
+            m_hwnd = nullptr;
+        }
+    }
     for (auto& [path, icon] : m_icon_cache) {
         if (icon) DestroyIcon(icon);
     }
@@ -1248,12 +1259,13 @@ int CDetailWindow::GetExpandedRowHeight(const DisplayRow& row) const {
                 h += SUBPROC_HEADER_H;
                 if (!sp.exe_path.empty()) h += CHILD_ROW_H;
                 if (!sp.connections.empty()) {
+                    h += 4;  // padding before connection table (matches DrawTableRows)
                     h += CHILD_ROW_H + CONN_HEADER_H;
                     int max_rows = sp.conn_expanded ? (int)sp.connections.size() : min((int)sp.connections.size(), MAX_CONN_ROWS);
                     for (int ci = 0; ci < max_rows; ci++)
                         h += GetConnRowHeight(sp.connections[ci]);
-                    if ((int)sp.connections.size() > MAX_CONN_ROWS && !sp.conn_expanded)
-                        h += CONN_ROW_H;
+                    if ((int)sp.connections.size() > MAX_CONN_ROWS)
+                        h += CONN_ROW_H;  // expand/collapse button row
                 }
             }
         }
@@ -1562,14 +1574,15 @@ void CDetailWindow::OnLButtonDown(int x, int y) {
                 cur_y += SUBPROC_HEADER_H;
                 if (!sp.exe_path.empty()) cur_y += CHILD_ROW_H;
                 if (!sp.connections.empty()) {
+                    cur_y += 4;  // padding before connection table (matches DrawTableRows)
                     cur_y += CHILD_ROW_H + CONN_HEADER_H;  // title + header
                     int conn_count = sp.conn_expanded ? (int)sp.connections.size() : min((int)sp.connections.size(), MAX_CONN_ROWS);
                     for (int ci = 0; ci < conn_count; ci++)
                         cur_y += GetConnRowHeight(sp.connections[ci]);
-                    if ((int)sp.connections.size() > MAX_CONN_ROWS && !sp.conn_expanded) {
-                        // This is the "more" row
+                    if ((int)sp.connections.size() > MAX_CONN_ROWS) {
+                        // expand/collapse button row
                         if (y >= cur_y && y < cur_y + CONN_ROW_H) {
-                            sp.conn_expanded = true;
+                            sp.conn_expanded = !sp.conn_expanded;
                             InvalidateRect(m_hwnd, NULL, FALSE);
                             return;
                         }
@@ -2342,13 +2355,18 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
                         child_y += row_h;
                     }
 
-                    // "... and N more (click to expand)"
-                    if ((int)sp.connections.size() > MAX_CONN_ROWS && !sp.conn_expanded) {
+                    // expand/collapse button
+                    if ((int)sp.connections.size() > MAX_CONN_ROWS) {
                         SetTextColor(hdc, GetAccentColor(true));
                         RECT more_rc = { PADDING + (int)(32 * m_dpi_scale) + SUBPROC_INDENT, child_y, w - PADDING, child_y + CONN_ROW_H };
                         wchar_t more_text[64];
-                        swprintf_s(more_text, L"... \u8FD8\u6709 %d \u4E2A\u8FDE\u63A5 (\u70B9\u51FB\u5C55\u5F00)", (int)sp.connections.size() - MAX_CONN_ROWS);
+                        if (sp.conn_expanded) {
+                            swprintf_s(more_text, L"\u6536\u7F29\u8FDE\u63A5\u5217\u8868 (\u70B9\u51FB\u6536\u8D77, \u5171 %d \u4E2A\u8FDE\u63A5)", (int)sp.connections.size());
+                        } else {
+                            swprintf_s(more_text, L"... \u8FD8\u6709 %d \u4E2A\u8FDE\u63A5 (\u70B9\u51FB\u5C55\u5F00)", (int)sp.connections.size() - MAX_CONN_ROWS);
+                        }
                         DrawTextW(hdc, more_text, -1, &more_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+                        child_y += CONN_ROW_H;
                     }
                 }
                 }  // close for

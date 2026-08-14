@@ -40,14 +40,21 @@ public:
 
     void Update(const std::vector<ProcTraffic>& stats, double sys_up, double sys_down);
 
-    // Custom draw: transparent area only (invisible on taskbar, but still clickable)
-    bool IsCustomDraw() const override { return m_dir == DIR_TRANSPARENT; }
-    int GetItemWidth() const override { return m_dir == DIR_TRANSPARENT ? s_transparent_width : 0; }
-    void DrawItem(void* hDC, int x, int y, int w, int h, bool dark_mode) override { /* intentionally empty for transparent area */ }
+    // Custom draw: transparent area (invisible) + U/D two-column aligned layout
+    // (process name left-aligned at leftmost, speed right-aligned;
+    //  not affected by TM's global "value right align" setting, never clipped)
+    bool IsCustomDraw() const override { return true; }
+    int GetItemWidth() const override;
+    int GetItemWidthEx(void* hDC) const override;
+    void DrawItem(void* hDC, int x, int y, int w, int h, bool dark_mode) override;
 
     static int s_transparent_width;  // configurable width for transparent area
 
     static wchar_t s_value_buf[2][256];
+    static wchar_t s_top_name[2][48];   // full top-process name (custom draw)
+    static wchar_t s_top_speed[2][32];  // top-process speed string (custom draw)
+    static COLORREF s_value_color;      // text color passed by TM (EI_VALUE_TEXT_COLOR)
+    static bool s_has_value_color;
     std::unordered_map<DWORD, RecentProc> m_recent;
     static const int MAX_SHOW = 5;
     static const int MAX_IDLE_ROUNDS = 30;  // keep historical processes longer (~30 seconds)
@@ -58,6 +65,7 @@ private:
 
 class CProcessNetPlugin : public ITMPlugin {
 public:
+    CProcessNetPlugin();
     static CProcessNetPlugin& Instance();
     IPluginItem* GetItem(int index) override;
     void DataRequired() override;

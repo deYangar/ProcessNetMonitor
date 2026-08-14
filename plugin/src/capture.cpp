@@ -383,11 +383,14 @@ void PacketCapture::ConnRefreshLoop() {
         std::map<uint16_t, DWORD> tcp_port_pid;
         std::map<uint16_t, DWORD> udp_port_pid;
         std::map<ConnKey, DWORD> tcp_conns;
+        std::vector<uint8_t> tcpBuf;
+        std::vector<uint8_t> udpBuf;
 
+        // Query TCP table ONCE - shared by m_tcp_conns and m_conn_details_cache
         ULONG tcpSize = 0;
         GetExtendedTcpTable(NULL, &tcpSize, FALSE, AF_INET, TCP_TABLE_OWNER_MODULE_ALL, 0);
         if (tcpSize > 0) {
-            std::vector<uint8_t> tcpBuf(tcpSize);
+            tcpBuf.resize(tcpSize);
             if (GetExtendedTcpTable(tcpBuf.data(), &tcpSize, FALSE, AF_INET, TCP_TABLE_OWNER_MODULE_ALL, 0) == NO_ERROR) {
                 auto* table = (MIB_TCPTABLE_OWNER_MODULE*)tcpBuf.data();
                 for (DWORD i = 0; i < table->dwNumEntries; i++) {
@@ -401,10 +404,11 @@ void PacketCapture::ConnRefreshLoop() {
             }
         }
 
+        // Query UDP table ONCE
         ULONG udpSize = 0;
         GetExtendedUdpTable(NULL, &udpSize, FALSE, AF_INET, UDP_TABLE_OWNER_MODULE, 0);
         if (udpSize > 0) {
-            std::vector<uint8_t> udpBuf(udpSize);
+            udpBuf.resize(udpSize);
             if (GetExtendedUdpTable(udpBuf.data(), &udpSize, FALSE, AF_INET, UDP_TABLE_OWNER_MODULE, 0) == NO_ERROR) {
                 auto* table = (MIB_UDPTABLE_OWNER_MODULE*)udpBuf.data();
                 for (DWORD i = 0; i < table->dwNumEntries; i++) {
@@ -414,10 +418,9 @@ void PacketCapture::ConnRefreshLoop() {
             }
         }
 
+        // Update connection maps and detail cache from the SAME system snapshot
         { std::lock_guard<std::mutex> lk(m_mutex); m_tcp_port_pid = std::move(tcp_port_pid); m_udp_port_pid = std::move(udp_port_pid); m_tcp_conns = std::move(tcp_conns); }
-        
-        // 刷新连接详情缓存
-        RefreshConnectionDetails();
+        RefreshConnectionDetails(tcpBuf.data(), tcpSize, udpBuf.data(), udpSize);
         
         // Check if TM config changed (adapter selection)
         CheckConfigChanged();
@@ -651,96 +654,84 @@ std::vector<ProcTraffic> PacketCapture::GetStats(double dt) {
 // Connection Details
 // ============================================================
 
-void PacketCapture::RefreshConnectionDetails() {
+void PacketCapture::RefreshConnectionDetails(const uint8_t* tcpBuf, ULONG tcpSize, const uint8_t* udpBuf, ULONG udpSize) {
     std::map<DWORD, std::vector<ConnDetail>> new_cache;
     
-    // 1. Get TCP connections
-    ULONG tcpSize = 0;
-    GetExtendedTcpTable(NULL, &tcpSize, FALSE, AF_INET, TCP_TABLE_OWNER_MODULE_ALL, 0);
-    if (tcpSize > 0) {
-        std::vector<uint8_t> tcpBuf(tcpSize);
-        if (GetExtendedTcpTable(tcpBuf.data(), &tcpSize, FALSE, AF_INET, 
-                                TCP_TABLE_OWNER_MODULE_ALL, 0) == NO_ERROR) {
-            auto* table = (MIB_TCPTABLE_OWNER_MODULE*)tcpBuf.data();
-            for (DWORD i = 0; i < table->dwNumEntries; i++) {
-                auto& row = table->table[i];
-                if (!row.dwOwningPid) continue;
-                
-                ConnDetail conn;
-                conn.protocol = ConnDetail::TCP;
-                conn.pid = row.dwOwningPid;
-                
-                // Local address
-                wchar_t local[64];
-                struct in_addr local_addr;
-                local_addr.s_addr = row.dwLocalAddr;
-                swprintf_s(local, L"%S:%u", inet_ntoa(local_addr), 
-                          ntohs((u_short)row.dwLocalPort));
-                conn.local_addr = local;
-                
-                // Remote address
-                wchar_t remote[64];
-                struct in_addr remote_addr;
-                remote_addr.s_addr = row.dwRemoteAddr;
-                if (row.dwRemoteAddr == 0) {
-                    swprintf_s(remote, L"*:*");
-                } else {
-                    swprintf_s(remote, L"%S:%u", inet_ntoa(remote_addr), 
-                              ntohs((u_short)row.dwRemotePort));
-                }
-                conn.remote_addr = remote;
-                
-                // TCP state
-                switch (row.dwState) {
-                case MIB_TCP_STATE_CLOSED:     conn.state = L"CLOSED"; break;
-                case MIB_TCP_STATE_LISTEN:     conn.state = L"LISTENING"; break;
-                case MIB_TCP_STATE_SYN_SENT:   conn.state = L"SYN_SENT"; break;
-                case MIB_TCP_STATE_SYN_RCVD:   conn.state = L"SYN_RCVD"; break;
-                case MIB_TCP_STATE_ESTAB:      conn.state = L"ESTABLISHED"; break;
-                case MIB_TCP_STATE_FIN_WAIT1:  conn.state = L"FIN_WAIT1"; break;
-                case MIB_TCP_STATE_FIN_WAIT2:  conn.state = L"FIN_WAIT2"; break;
-                case MIB_TCP_STATE_CLOSE_WAIT: conn.state = L"CLOSE_WAIT"; break;
-                case MIB_TCP_STATE_CLOSING:    conn.state = L"CLOSING"; break;
-                case MIB_TCP_STATE_LAST_ACK:   conn.state = L"LAST_ACK"; break;
-                case MIB_TCP_STATE_TIME_WAIT:  conn.state = L"TIME_WAIT"; break;
-                case MIB_TCP_STATE_DELETE_TCB: conn.state = L"DELETE_TCB"; break;
-                default:                       conn.state = L"UNKNOWN"; break;
-                }
-                
-                new_cache[row.dwOwningPid].push_back(conn);
+    // 1. Parse TCP connections from shared buffer
+    if (tcpBuf && tcpSize > 0) {
+        auto* table = (MIB_TCPTABLE_OWNER_MODULE*)tcpBuf;
+        for (DWORD i = 0; i < table->dwNumEntries; i++) {
+            auto& row = table->table[i];
+            if (!row.dwOwningPid) continue;
+            
+            ConnDetail conn;
+            conn.protocol = ConnDetail::TCP;
+            conn.pid = row.dwOwningPid;
+            
+            // Local address
+            wchar_t local[64];
+            struct in_addr local_addr;
+            local_addr.s_addr = row.dwLocalAddr;
+            swprintf_s(local, L"%S:%u", inet_ntoa(local_addr), 
+                      ntohs((u_short)row.dwLocalPort));
+            conn.local_addr = local;
+            
+            // Remote address
+            wchar_t remote[64];
+            struct in_addr remote_addr;
+            remote_addr.s_addr = row.dwRemoteAddr;
+            if (row.dwRemoteAddr == 0) {
+                swprintf_s(remote, L"*:*");
+            } else {
+                swprintf_s(remote, L"%S:%u", inet_ntoa(remote_addr), 
+                          ntohs((u_short)row.dwRemotePort));
             }
+            conn.remote_addr = remote;
+            
+            // TCP state
+            switch (row.dwState) {
+            case MIB_TCP_STATE_CLOSED:     conn.state = L"CLOSED"; break;
+            case MIB_TCP_STATE_LISTEN:     conn.state = L"LISTENING"; break;
+            case MIB_TCP_STATE_SYN_SENT:   conn.state = L"SYN_SENT"; break;
+            case MIB_TCP_STATE_SYN_RCVD:   conn.state = L"SYN_RCVD"; break;
+            case MIB_TCP_STATE_ESTAB:      conn.state = L"ESTABLISHED"; break;
+            case MIB_TCP_STATE_FIN_WAIT1:  conn.state = L"FIN_WAIT1"; break;
+            case MIB_TCP_STATE_FIN_WAIT2:  conn.state = L"FIN_WAIT2"; break;
+            case MIB_TCP_STATE_CLOSE_WAIT: conn.state = L"CLOSE_WAIT"; break;
+            case MIB_TCP_STATE_CLOSING:    conn.state = L"CLOSING"; break;
+            case MIB_TCP_STATE_LAST_ACK:   conn.state = L"LAST_ACK"; break;
+            case MIB_TCP_STATE_TIME_WAIT:  conn.state = L"TIME_WAIT"; break;
+            case MIB_TCP_STATE_DELETE_TCB: conn.state = L"DELETE_TCB"; break;
+            default:                       conn.state = L"UNKNOWN"; break;
+            }
+            
+            new_cache[row.dwOwningPid].push_back(conn);
         }
     }
     
-    // 2. Get UDP connections
-    ULONG udpSize = 0;
-    GetExtendedUdpTable(NULL, &udpSize, FALSE, AF_INET, UDP_TABLE_OWNER_MODULE, 0);
-    if (udpSize > 0) {
-        std::vector<uint8_t> udpBuf(udpSize);
-        if (GetExtendedUdpTable(udpBuf.data(), &udpSize, FALSE, AF_INET, 
-                                UDP_TABLE_OWNER_MODULE, 0) == NO_ERROR) {
-            auto* table = (MIB_UDPTABLE_OWNER_MODULE*)udpBuf.data();
-            for (DWORD i = 0; i < table->dwNumEntries; i++) {
-                if (!table->table[i].dwOwningPid) continue;
-                
-                ConnDetail conn;
-                conn.protocol = ConnDetail::UDP;
-                conn.pid = table->table[i].dwOwningPid;
-                
-                // Local address
-                wchar_t local[64];
-                struct in_addr local_addr;
-                local_addr.s_addr = table->table[i].dwLocalAddr;
-                swprintf_s(local, L"%S:%u", inet_ntoa(local_addr), 
-                          ntohs((u_short)table->table[i].dwLocalPort));
-                conn.local_addr = local;
-                
-                // UDP has no remote address
-                conn.remote_addr = L"*:*";
-                conn.state = L"-";
-                
-                new_cache[table->table[i].dwOwningPid].push_back(conn);
-            }
+    // 2. Parse UDP connections from shared buffer
+    if (udpBuf && udpSize > 0) {
+        auto* table = (MIB_UDPTABLE_OWNER_MODULE*)udpBuf;
+        for (DWORD i = 0; i < table->dwNumEntries; i++) {
+            if (!table->table[i].dwOwningPid) continue;
+            
+            ConnDetail conn;
+            conn.protocol = ConnDetail::UDP;
+            conn.pid = table->table[i].dwOwningPid;
+            
+            // Local address
+            wchar_t local[64];
+            struct in_addr local_addr;
+            local_addr.s_addr = table->table[i].dwLocalAddr;
+            swprintf_s(local, L"%S:%u", inet_ntoa(local_addr), 
+                      ntohs((u_short)table->table[i].dwLocalPort));
+            conn.local_addr = local;
+            
+            // UDP has no remote address
+            conn.remote_addr = L"*:*";
+            conn.state = L"-";
+            
+            new_cache[table->table[i].dwOwningPid].push_back(conn);
         }
     }
     

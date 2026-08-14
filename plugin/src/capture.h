@@ -66,7 +66,7 @@ private:
     std::wstring GetProcessPath(DWORD pid);
     
     // 刷新连接详情缓存
-    void RefreshConnectionDetails();
+    void RefreshConnectionDetails(const uint8_t* tcpBuf, ULONG tcpSize, const uint8_t* udpBuf, ULONG udpSize);
 
     std::vector<SOCKET> m_socks;  // multiple sockets for 'select all' mode
     std::atomic<bool> m_running{false};

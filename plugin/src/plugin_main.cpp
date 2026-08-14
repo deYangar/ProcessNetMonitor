@@ -235,9 +235,24 @@ static const wchar_t* EtwPopupStatus(const EtwCapture* cap) {
     return nullptr;
 }
 
+CProcessNetPlugin::CProcessNetPlugin() {
+    // Initialize item roles at construction: TM enumerates the items and
+    // reads GetItemId/IsCustomDraw/GetItemWidth at LOAD time (before the
+    // first DataRequired). If Init were deferred, all three items would
+    // report the same ID ("SpdUp01") during load, which corrupts TM's
+    // display-item config (issue #7).
+    m_items[0].Init(CProcessNetItem::DIR_UPLOAD);
+    m_items[1].Init(CProcessNetItem::DIR_DOWNLOAD);
+    m_items[2].Init(CProcessNetItem::DIR_TRANSPARENT);
+}
+
 CProcessNetPlugin CProcessNetPlugin::s_instance;
 wchar_t CProcessNetItem::s_value_buf[2][256] = { L"starting...", L"starting..." };
 int CProcessNetItem::s_transparent_width = 100;  // default 100px
+wchar_t CProcessNetItem::s_top_name[2][48] = { L"-", L"-" };
+wchar_t CProcessNetItem::s_top_speed[2][32] = { L"0 B/s", L"0 B/s" };
+COLORREF CProcessNetItem::s_value_color = 0;
+bool CProcessNetItem::s_has_value_color = false;
 
 static void FmtSpeed(double bps, wchar_t* buf, int n) {
     FormatSpeed(bps, buf, n);
@@ -261,6 +276,63 @@ const wchar_t* CProcessNetItem::GetItemValueText() const {
 const wchar_t* CProcessNetItem::GetItemValueSampleText() const {
     if (m_dir == DIR_TRANSPARENT) return L"\u900F\u660E\u533A\u57DF";
     return m_dir == DIR_UPLOAD ? L"U:chrome.exe 5.6KB/s" : L"D:mihomo 1.4KB/s";
+}
+
+int CProcessNetItem::GetItemWidth() const {
+    if (m_dir == DIR_TRANSPARENT) return s_transparent_width;
+    return 120;  // 96 DPI fallback width; TM scales it by DPI
+}
+
+int CProcessNetItem::GetItemWidthEx(void* hDC) const {
+    if (m_dir == DIR_TRANSPARENT) return 0;  // fall back to GetItemWidth (TM scales by DPI)
+    HDC hdc = (HDC)hDC;
+    // Width benchmark: prefix + 12-char name + ellipsis + max speed,
+    // so a normal-length name and the speed both fit without clipping.
+    const wchar_t* sample = L"U:abcdefghijkl.. 999.9 MB/s";
+    SIZE sz{};
+    GetTextExtentPoint32W(hdc, sample, (int)wcslen(sample), &sz);
+    return sz.cx;
+}
+
+void CProcessNetItem::DrawItem(void* hDC, int x, int y, int w, int h, bool dark_mode) {
+    if (m_dir == DIR_TRANSPARENT) return;  // invisible area, draw nothing
+    HDC hdc = (HDC)hDC;
+
+    COLORREF color = s_has_value_color ? s_value_color : (dark_mode ? RGB(255, 255, 255) : RGB(0, 0, 0));
+    SetTextColor(hdc, color);
+    SetBkMode(hdc, TRANSPARENT);
+
+    // Local snapshot: same torn-read safety level as the old s_value_buf pattern
+    wchar_t name[48];
+    wchar_t speed[32];
+    wcsncpy_s(name, 48, s_top_name[m_dir], _TRUNCATE);
+    wcsncpy_s(speed, 32, s_top_speed[m_dir], _TRUNCATE);
+
+    // Right column: speed, right-aligned
+    SIZE sz_spd{};
+    GetTextExtentPoint32W(hdc, speed, (int)wcslen(speed), &sz_spd);
+    RECT rc_spd = { x + w - sz_spd.cx, y, x + w, y + h };
+    DrawTextW(hdc, speed, -1, &rc_spd, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    // Left column: U:/D: + process name, left-aligned at the leftmost edge;
+    // dynamically truncated with ".." when it would overlap the speed column
+    std::wstring left = (m_dir == DIR_UPLOAD) ? L"U:" : L"D:";
+    left += name;
+    int avail = (x + w - sz_spd.cx - 3) - x;  // 3px gap between columns
+    SIZE sz_left{};
+    GetTextExtentPoint32W(hdc, left.c_str(), (int)left.size(), &sz_left);
+    if (sz_left.cx > avail && avail > 0) {
+        SIZE sz_dot{};
+        GetTextExtentPoint32W(hdc, L"..", 2, &sz_dot);
+        while (left.size() > 3) {
+            left.pop_back();
+            GetTextExtentPoint32W(hdc, left.c_str(), (int)left.size(), &sz_left);
+            if (sz_left.cx + sz_dot.cx <= avail) break;
+        }
+        left += L"..";
+    }
+    RECT rc_left = { x, y, x + w, y + h };
+    DrawTextW(hdc, left.c_str(), (int)left.size(), &rc_left, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 }
 
 int CProcessNetItem::OnMouseEvent(MouseEventType type, int x, int y, void* hWnd, int flag) {
@@ -366,10 +438,13 @@ void CProcessNetItem::Update(const std::vector<ProcTraffic>& stats, double sys_u
         const auto& n = list[0]->name;
         wcsncpy_s(proc_name, 16, n.c_str(), _TRUNCATE);
         if (n.size() > 12) { proc_name[10] = L'.'; proc_name[11] = L'.'; proc_name[12] = 0; }
+        wcsncpy_s(s_top_name[m_dir], 48, n.c_str(), _TRUNCATE);
         FmtSpeed(spd, proc_str, 32);
     } else {
+        wcsncpy_s(s_top_name[m_dir], 48, L"-", _TRUNCATE);
         FmtSpeed(0, proc_str, 32);
     }
+    wcsncpy_s(s_top_speed[m_dir], 32, proc_str, _TRUNCATE);
 
     wchar_t prefix = (m_dir == DIR_UPLOAD) ? L'U' : L'D';
     swprintf_s(s_value_buf[m_dir], 256, L"%c:%s %s", prefix, proc_name, proc_str);
@@ -759,6 +834,10 @@ void CProcessNetPlugin::OnExtenedInfo(ExtendedInfoIndex index, const wchar_t* da
     if (index == EI_CONFIG_DIR && data && data[0]) {
         m_tm_config_dir = data;
         m_capture.SetTMConfigDir(m_tm_config_dir);
+    } else if (index == EI_VALUE_TEXT_COLOR && data && data[0]) {
+        // TM passes the value text color right before DrawItem (taskbar & main window)
+        CProcessNetItem::s_value_color = (COLORREF)wcstoul(data, nullptr, 10);
+        CProcessNetItem::s_has_value_color = true;
     }
 }
 
