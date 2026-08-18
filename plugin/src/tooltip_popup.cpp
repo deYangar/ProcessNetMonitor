@@ -29,6 +29,44 @@ void SafeDestroyWindow(HWND hwnd) {
     }
 }
 
+// ============================================================
+// Helper: find TrafficMonitor's native tooltip windows
+// ============================================================
+
+// TrafficMonitor uses MFC's CToolTipCtrl, which creates top-level windows of
+// class "tooltips_class32".  Enumerate the visible ones that belong to the
+// same process as the anchor TM window.  If the anchor handle is missing we
+// still collect all visible tooltips so the popup can avoid them.
+static void FindTMTooltips(HWND anchor_hwnd, std::vector<RECT>& out) {
+    out.clear();
+    DWORD tm_pid = 0;
+    if (anchor_hwnd && IsWindow(anchor_hwnd))
+        GetWindowThreadProcessId(anchor_hwnd, &tm_pid);
+
+    HWND hwnd = nullptr;
+    while ((hwnd = FindWindowExW(nullptr, hwnd, L"tooltips_class32", nullptr)) != nullptr) {
+        if (tm_pid != 0) {
+            DWORD pid = 0;
+            GetWindowThreadProcessId(hwnd, &pid);
+            if (pid != tm_pid) continue;
+        }
+        if (!IsWindowVisible(hwnd)) continue;
+        RECT rc;
+        GetWindowRect(hwnd, &rc);
+        if (rc.left >= rc.right || rc.top >= rc.bottom) continue;
+        out.push_back(rc);
+    }
+}
+
+static RECT InflateRectScreen(const RECT& rc, int dx, int dy) {
+    return { rc.left - dx, rc.top - dy, rc.right + dx, rc.bottom + dy };
+}
+
+static bool RectsIntersect(const RECT& a, const RECT& b) {
+    return a.left < b.right && a.right > b.left &&
+           a.top < b.bottom && a.bottom > b.top;
+}
+
 // Standalone WndProc to avoid member function pointer ABI issues
 static LRESULT CALLBACK StaticWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (CTooltipPopup::s_instance)
@@ -644,6 +682,92 @@ void CTooltipPopup::PositionWindow(const RECT& anchor_rect) {
     if (y + ph > work.bottom) y = work.bottom - ph - margin;
     if (y < work.top) y = work.top + margin;
 
+    // --- Avoid overlapping TrafficMonitor's native tooltip -----------------
+    // TM's tooltip is a small "tooltips_class32" popup owned by the hovered TM
+    // window. If it overlaps our popup, nudge our popup away from it.
+    {
+        std::vector<RECT> tips;
+        FindTMTooltips(m_anchor_hwnd, tips);
+        int tip_margin = max(4, (int)(8 * m_dpi_scale));
+        bool moved = true;
+        for (int pass = 0; moved && pass < 4; ++pass) {
+            moved = false;
+            for (const auto& tip : tips) {
+                RECT popup_rc = { x, y, x + pw, y + ph };
+                RECT tip_rc = InflateRectScreen(tip, tip_margin, tip_margin);
+                if (!RectsIntersect(popup_rc, tip_rc)) continue;
+
+                // Candidate 1: push further away from anchor along the primary axis.
+                int c1x = x, c1y = y; bool c1_ok = false;
+                if (at_bottom || (!at_top && !at_left && !at_right)) {
+                    int cand = tip_rc.top - ph;
+                    if (cand >= work.top + margin) { c1y = cand; c1_ok = true; }
+                } else if (at_top) {
+                    int cand = tip_rc.bottom;
+                    if (cand + ph <= work.bottom - margin) { c1y = cand; c1_ok = true; }
+                } else if (at_left) {
+                    int cand = tip_rc.right;
+                    if (cand + pw <= work.right - margin) { c1x = cand; c1_ok = true; }
+                } else if (at_right) {
+                    int cand = tip_rc.left - pw;
+                    if (cand >= work.left + margin) { c1x = cand; c1_ok = true; }
+                }
+
+                // Candidate 2: shift along the secondary axis (horizontal for
+                // vertical layouts, vertical for horizontal layouts).
+                int c2x = x, c2y = y; bool c2_ok = false;
+                if (at_bottom || at_top || (!at_left && !at_right)) {
+                    int cand_right = tip_rc.right + margin;
+                    int cand_left = tip_rc.left - pw - margin;
+                    if (cand_right + pw <= work.right - margin) { c2x = cand_right; c2_ok = true; }
+                    else if (cand_left >= work.left + margin) { c2x = cand_left; c2_ok = true; }
+                } else {
+                    int cand_down = tip_rc.bottom + margin;
+                    int cand_up = tip_rc.top - ph - margin;
+                    if (cand_down + ph <= work.bottom - margin) { c2y = cand_down; c2_ok = true; }
+                    else if (cand_up >= work.top + margin) { c2y = cand_up; c2_ok = true; }
+                }
+
+                // Candidate 3: flip to the opposite side of the anchor.
+                int c3x = x, c3y = y;
+                if (at_bottom || (!at_top && !at_left && !at_right)) {
+                    c3y = anchor_rect.bottom + margin;
+                } else if (at_top) {
+                    c3y = anchor_rect.top - ph - margin;
+                } else if (at_left) {
+                    c3x = anchor_rect.left - pw - margin;
+                } else if (at_right) {
+                    c3x = anchor_rect.right + margin;
+                }
+
+                auto NoIntersect = [&](int cx, int cy) {
+                    RECT rc = { cx, cy, cx + pw, cy + ph };
+                    return !RectsIntersect(rc, tip_rc);
+                };
+
+                // Prefer horizontal displacement (left/right of the tooltip)
+                // so our popup never sits on top of the official tooltip.
+                if (c2_ok && NoIntersect(c2x, c2y)) {
+                    x = c2x; y = c2y;
+                } else if (c1_ok && NoIntersect(c1x, c1y)) {
+                    x = c1x; y = c1y;
+                } else {
+                    x = c3x; y = c3y;
+                }
+                moved = true;
+                break; // recompute intersections after this adjustment
+            }
+        }
+
+        m_last_tooltips = tips;
+    }
+
+    // Final clamp after tooltip avoidance
+    if (x + pw > work.right) x = work.right - pw - margin;
+    if (x < work.left) x = work.left + margin;
+    if (y + ph > work.bottom) y = work.bottom - ph - margin;
+    if (y < work.top) y = work.top + margin;
+
     SetWindowPos(m_hwnd, HWND_TOPMOST, x, y, pw, ph,
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
@@ -668,12 +792,15 @@ void CTooltipPopup::PositionWindow(const RECT& anchor_rect) {
 void CTooltipPopup::UpdateAndShow(const std::vector<ProcDisplayInfo>& procs,
                                    double total_up, double total_down,
                                    const RECT& anchor_rect,
-                                   const wchar_t* status) {
+                                   const wchar_t* status,
+                                   HWND anchor_hwnd) {
     m_procs = procs;
     m_total_up = total_up;
     m_total_down = total_down;
     m_status = status ? status : L"";
     m_last_anchor = anchor_rect;
+    if (anchor_hwnd)
+        m_anchor_hwnd = anchor_hwnd;
 
     // Re-check dark mode
     bool old_dark = m_dark_mode;
@@ -725,6 +852,24 @@ void CTooltipPopup::UpdateData(const std::vector<ProcDisplayInfo>& procs,
         }
         InvalidateRect(m_hwnd, NULL, FALSE);
     }
+}
+
+bool CTooltipPopup::RepositionIfTooltipsChanged() {
+    if (!m_visible) return false;
+
+    std::vector<RECT> tips;
+    FindTMTooltips(m_anchor_hwnd, tips);
+    if (tips.size() != m_last_tooltips.size()) {
+        PositionWindow(m_last_anchor);
+        return true;
+    }
+    for (size_t i = 0; i < tips.size(); ++i) {
+        if (!EqualRect(&tips[i], &m_last_tooltips[i])) {
+            PositionWindow(m_last_anchor);
+            return true;
+        }
+    }
+    return false;
 }
 
 void CTooltipPopup::UpdateDpiScale(const RECT& anchor_rect) {

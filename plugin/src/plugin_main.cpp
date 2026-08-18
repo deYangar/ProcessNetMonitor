@@ -756,7 +756,7 @@ const wchar_t* CProcessNetPlugin::GetInfo(PluginInfoIndex i) {
     case TMI_DESCRIPTION: return L"Per-process network speed";
     case TMI_AUTHOR: return L"Aemeath";
     case TMI_COPYRIGHT: return L"MIT";
-    case TMI_VERSION: return L"1.12.0";
+    case TMI_VERSION: return L"1.13.0";
     case TMI_URL: return L"https://github.com/deYangar/ProcessNetMonitor";
     default: return L"";
     }
@@ -1073,6 +1073,7 @@ void CProcessNetPlugin::HoverTick() {
             } else {
                 GetWindowRect(tm_wnd, &anchor);
             }
+            m_popup.SetAnchorHwnd(tm_wnd);
             ShowPopupAt(anchor);
         }
     } else if (!over_popup) {
@@ -1107,7 +1108,12 @@ void CProcessNetPlugin::HoverTick() {
         }
         if (!EqualRect(&anchor, &m_popup_anchor)) {
             m_popup_anchor = anchor;
-            m_popup.UpdateAndShow(procs, m_cached_up, m_cached_down, anchor, EtwPopupStatus(&m_etw_cap));
+            m_popup.SetAnchorHwnd(m_hover_target);
+            m_popup.UpdateAndShow(procs, m_cached_up, m_cached_down, anchor, EtwPopupStatus(&m_etw_cap), m_hover_target);
+        } else if (m_popup.RepositionIfTooltipsChanged()) {
+            // Native tooltip has appeared/moved; popup was already repositioned.
+            // Just refresh data without another layout pass.
+            m_popup.UpdateData(procs, m_cached_up, m_cached_down, EtwPopupStatus(&m_etw_cap));
         } else {
             m_popup.UpdateData(procs, m_cached_up, m_cached_down, EtwPopupStatus(&m_etw_cap));
         }

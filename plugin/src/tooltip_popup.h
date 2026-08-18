@@ -34,19 +34,30 @@ public:
     // Update data and show/hide popup
     // anchor_rect: screen rect the popup should attach to (TM window or click area)
     // status: optional one-line status/warning shown under the total speed (may be nullptr)
+    // anchor_hwnd: the TrafficMonitor window this popup is anchored to, used to locate
+    //               its native tooltip window so we can avoid overlapping it.
     void UpdateAndShow(const std::vector<ProcDisplayInfo>& procs,
                        double total_up, double total_down,
                        const RECT& anchor_rect,
-                       const wchar_t* status = nullptr);
+                       const wchar_t* status = nullptr,
+                       HWND anchor_hwnd = nullptr);
     // Update data only (no reposition); used while popup stays visible
     void UpdateData(const std::vector<ProcDisplayInfo>& procs,
                     double total_up, double total_down,
                     const wchar_t* status = nullptr);
+
+    // Re-run tooltip avoidance if the native tooltip has appeared/moved.
+    // Returns true if the popup was repositioned.
+    bool RepositionIfTooltipsChanged();
     void Hide();
 
     bool IsVisible() const { return m_visible; }
     bool IsHovering() const { return m_hovering; }
     HWND GetHwnd() const { return m_hwnd; }
+
+    // Set the TrafficMonitor window handle so the popup can detect its native
+    // tooltip window and avoid overlapping it.
+    void SetAnchorHwnd(HWND hwnd) { m_anchor_hwnd = hwnd; }
 
     std::wstring m_status;   // status/warning line (empty = none)
 
@@ -82,6 +93,7 @@ private:
     // State
     HWND m_hwnd = nullptr;
     HINSTANCE m_hinst = nullptr;
+    HWND m_anchor_hwnd = nullptr;  // TrafficMonitor window we are anchored to
     bool m_visible = false;
     bool m_hovering = false;  // mouse is over the popup itself
     bool m_dark_mode = true;
@@ -91,6 +103,7 @@ private:
     double m_total_up = 0;
     double m_total_down = 0;
     RECT m_last_anchor = {};  // anchor rect used for the current show session
+    std::vector<RECT> m_last_tooltips;  // tooltips detected during last positioning
 
     // Icon cache: exe_path -> HICON
     std::unordered_map<std::wstring, HICON> m_icon_cache;
