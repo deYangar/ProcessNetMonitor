@@ -55,6 +55,7 @@ public:
     static wchar_t s_top_speed[2][32];  // top-process speed string (custom draw)
     static COLORREF s_value_color;      // text color passed by TM (EI_VALUE_TEXT_COLOR)
     static bool s_has_value_color;
+    static bool s_show_speed_items;     // master switch: show Up/Down items in TM
     std::unordered_map<DWORD, RecentProc> m_recent;
     static const int MAX_SHOW = 5;
     static const int MAX_IDLE_ROUNDS = 30;  // keep historical processes longer (~30 seconds)

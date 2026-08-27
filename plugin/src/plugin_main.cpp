@@ -253,6 +253,7 @@ wchar_t CProcessNetItem::s_top_name[2][48] = { L"-", L"-" };
 wchar_t CProcessNetItem::s_top_speed[2][32] = { L"0 B/s", L"0 B/s" };
 COLORREF CProcessNetItem::s_value_color = 0;
 bool CProcessNetItem::s_has_value_color = false;
+bool CProcessNetItem::s_show_speed_items = true;
 
 static void FmtSpeed(double bps, wchar_t* buf, int n) {
     FormatSpeed(bps, buf, n);
@@ -756,13 +757,19 @@ const wchar_t* CProcessNetPlugin::GetInfo(PluginInfoIndex i) {
     case TMI_DESCRIPTION: return L"Per-process network speed";
     case TMI_AUTHOR: return L"Aemeath";
     case TMI_COPYRIGHT: return L"MIT";
-    case TMI_VERSION: return L"1.13.0";
+    case TMI_VERSION: return L"1.14.0";
     case TMI_URL: return L"https://github.com/deYangar/ProcessNetMonitor";
     default: return L"";
     }
 }
 
-const wchar_t* CProcessNetPlugin::GetTooltipInfo() { return m_tooltip; }
+const wchar_t* CProcessNetPlugin::GetTooltipInfo() {
+    // When the Up/Down items are hidden, also stay out of TM's native
+    // hover tooltip - the plugin's own popup already shows the process
+    // list (issue #9).
+    if (!CProcessNetItem::s_show_speed_items) return L"";
+    return m_tooltip;
+}
 
 void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
     m_app = p;
@@ -796,6 +803,8 @@ void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
     m_detail.LoadSettings();
     // Sync transparent width from settings to static member
     CProcessNetItem::s_transparent_width = m_detail.GetTransparentWidth();
+    // Sync Up/Down items visibility master switch (issue #9)
+    CProcessNetItem::s_show_speed_items = m_detail.GetShowSpeedItems();
 
     // IP 归属地库: 检查 DLL 同目录, 缺失则后台自动下载 (不阻塞 UI)
     {
@@ -1190,7 +1199,7 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         CreateWindowW(L"BUTTON", L"\u7ACB\u5373\u66F4\u65B0",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 325, 152, 95, 24, hwnd, (HMENU)1009, nullptr, nullptr);
 
-        // Debug-log checkbox (default OFF, 最后一行)
+        // Debug-log checkbox (default OFF)
         CreateWindowW(L"BUTTON",
             L"\u8C03\u8BD5\u65E5\u5FD7\uFF08\u5199\u5165\u63D2\u4EF6\u76EE\u5F55 debug\\\uFF09",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
@@ -1198,12 +1207,23 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         if (CProcessNetPlugin::Instance().m_detail.GetDebugLogs())
             SendMessageW(GetDlgItem(hwnd, 1006), BM_SETCHECK, BST_CHECKED, 0);
 
+        // Show/hide the plugin's section in TM's native hover tooltip
+        // (issue #9: the plugin already has its own popup/detail window).
+        // Only controls GetTooltipInfo(); the resident Up/Down items are
+        // unaffected.
+        CreateWindowW(L"BUTTON",
+            L"\u5728 TrafficMonitor \u9F20\u6807\u60AC\u505C\u63D0\u793A\u4E2D\u663E\u793A\u8FDB\u7A0B\u7F51\u901F\u4FE1\u606F",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            10, 214, 460, 22, hwnd, (HMENU)1013, nullptr, nullptr);
+        if (CProcessNetItem::s_show_speed_items)
+            SendMessageW(GetDlgItem(hwnd, 1013), BM_SETCHECK, BST_CHECKED, 0);
+
         // OK button
         CreateWindowW(L"BUTTON", L"OK",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 230, 216, 65, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 230, 248, 65, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
         // Cancel button
         CreateWindowW(L"BUTTON", L"Cancel",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 305, 216, 65, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 305, 248, 65, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
         // Use the proper UI font (Segoe UI 9pt) on every child control -
         // default is the bitmap 'System' font (jagged, ugly).
         EnumChildWindows(hwnd, OptionsSetFontProc, (LPARAM)GetStockObject(DEFAULT_GUI_FONT));
@@ -1233,6 +1253,11 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             // Debug-log checkbox
             bool dbg_logs = (SendMessageW(GetDlgItem(hwnd, 1006), BM_GETCHECK, 0, 0) == BST_CHECKED);
             plugin.m_detail.SetDebugLogs(dbg_logs);
+
+            // Show/hide Up/Down items master switch (issue #9)
+            bool show_speed = (SendMessageW(GetDlgItem(hwnd, 1013), BM_GETCHECK, 0, 0) == BST_CHECKED);
+            CProcessNetItem::s_show_speed_items = show_speed;
+            plugin.m_detail.SetShowSpeedItems(show_speed);
 
             // IP 库代理
             wchar_t proxy_buf[512] = {};
@@ -1295,7 +1320,7 @@ ITMPlugin::OptionReturn CProcessNetPlugin::ShowOptionsDialog(void* hParent) {
         L"ProcessNetMonitorOptionsDlg",
         L"\x63D2\x4EF6\x8BBE\x7F6E",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        0, 0, 500, 330,
+        0, 0, 500, 370,
         (HWND)hParent, nullptr, GetModuleHandleW(NULL), nullptr
     );
     

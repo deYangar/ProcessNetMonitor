@@ -43,6 +43,7 @@ YOLO_PLAN.md
 *.dmp
 # Backup files
 *.backup_*
+*.bak_*
 # IP geo database (downloaded at runtime)
 *.xdb
 # Research scratch

@@ -41,6 +41,9 @@ public:
     void SetTransparentWidth(int w) { m_transparent_width = w; }
     int GetRefreshMs() const { return m_refresh_ms; }
     void SetRefreshMs(int v) { m_refresh_ms = v; }
+    // Master switch for the Up/Down plugin items in TM's main window / taskbar
+    bool GetShowSpeedItems() const { return m_show_speed_items; }
+    void SetShowSpeedItems(bool v) { m_show_speed_items = v; }
     
     // 设置 PacketCapture 指针（用于获取连接详情）
     void SetCapture(PacketCapture* capture) { m_capture = capture; }
@@ -48,8 +51,8 @@ public:
     void SetDebugLogs(bool on);
 
 
-    // History time range
-    enum TimeRange { TR_24H = 0, TR_3D, TR_7D, TR_30D };
+    // History time range (natural-day aligned, local midnight)
+    enum TimeRange { TR_TODAY = 0, TR_YESTERDAY, TR_3D, TR_7D, TR_30D };
 
     // History data types (public for persistence helpers)
     struct HistorySnapshot {
@@ -173,7 +176,7 @@ private:
     };
 
     void CompressHistory();
-    void GetMergedSnapshots(const ProcessHistory& h, std::vector<const HistorySnapshot*>& out, ULONGLONG cutoff) const;
+    void GetMergedSnapshots(const ProcessHistory& h, std::vector<const HistorySnapshot*>& out, ULONGLONG start_ms, ULONGLONG end_ms) const;
     uint64_t m_hist_total_recv = 0;  // summary for current time range
     uint64_t m_hist_total_sent = 0;
 
@@ -217,7 +220,7 @@ private:
     static constexpr ULONGLONG MS_PER_YEAR  = 365ULL * 24 * 3600 * 1000;
 
     // Time range filter (history tab)
-    TimeRange m_time_range = TR_24H;
+    TimeRange m_time_range = TR_TODAY;
 
     // Table state (per-tab sort)
     int m_sort_col[2] = { 3, 3 };     // default sort by download/total_down
@@ -240,6 +243,7 @@ private:
 
     int m_transparent_width = 100;  // transparent area width in pixels
     int m_refresh_ms = 500;         // plugin data refresh interval (ms)
+    bool m_show_speed_items = true; // show Up/Down items in TM main window/taskbar
 
     // Columns - real-time
     enum ColIndex { COL_ICON, COL_NAME, COL_CATEGORY, COL_DOWN, COL_UP, COL_CONN, COL_ACTION };
@@ -359,7 +363,7 @@ private:
     RECT m_rcMin = {};
     RECT m_rcTab0 = {};
     RECT m_rcTab1 = {};
-    RECT m_rcTRButtons[4] = {};  // time range buttons
+    RECT m_rcTRButtons[5] = {};  // time range buttons
     RECT m_rcClearBtn = {};       // clear history button
     RECT m_rcTableHeader = {};
     RECT m_rcScrollbar = {};

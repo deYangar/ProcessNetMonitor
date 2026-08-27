@@ -29,6 +29,25 @@ static LRESULT CALLBACK DetailStaticWndProc(HWND hwnd, UINT msg, WPARAM wp, LPAR
 
 static ULONGLONG WallClockMs() { return (ULONGLONG)time(NULL) * 1000; }
 
+// Local midnight (00:00:00) of (today + day_offset) as a UTC Unix-ms timestamp.
+// day_offset: 0 = today, -1 = yesterday, -2 = day before yesterday, ...
+// WallClockMs() stores UTC Unix-ms; history tabs are aligned to the user's
+// local calendar day (issue #9: "24h" rolls across two calendar days, which
+// nobody reads naturally).
+static ULONGLONG LocalDayStartUnixMs(int day_offset) {
+    time_t now = time(NULL);
+    struct tm local_tm;
+    localtime_s(&local_tm, &now);
+    local_tm.tm_hour = 0;
+    local_tm.tm_min = 0;
+    local_tm.tm_sec = 0;
+    // _mkgmtime treats the tm fields as UTC and returns a UTC time_t; since
+    // the fields hold LOCAL wall-clock time, the result is the UTC instant
+    // at which local midnight occurs.
+    time_t midnight = _mkgmtime(&local_tm);
+    return (ULONGLONG)(midnight + (time_t)day_offset * 86400) * 1000ULL;
+}
+
 CDetailWindow::CDetailWindow() {
     s_instance = this;
     m_dark_mode = IsDarkMode();
@@ -490,12 +509,18 @@ void CDetailWindow::CompressHistory() {
 }
 
 void CDetailWindow::GetMergedSnapshots(const ProcessHistory& h,
-    std::vector<const HistorySnapshot*>& out, ULONGLONG cutoff) const {
-    // Binary search: deques are sorted by tick, skip entries before cutoff
+    std::vector<const HistorySnapshot*>& out, ULONGLONG start_ms, ULONGLONG end_ms) const {
+    // Binary search: deques are sorted by tick; collect entries in
+    // [start_ms, end_ms). Each tier (day/hour/min/raw) covers a disjoint
+    // time span after compression, so the same instant is never counted
+    // twice.
     auto collect = [&](const std::deque<HistorySnapshot>& dq) {
-        auto it = std::lower_bound(dq.begin(), dq.end(), cutoff,
+        auto it = std::lower_bound(dq.begin(), dq.end(), start_ms,
             [](const HistorySnapshot& s, ULONGLONG c) { return s.tick < c; });
-        for (; it != dq.end(); ++it) out.push_back(&(*it));
+        for (; it != dq.end(); ++it) {
+            if (it->tick >= end_ms) break;
+            out.push_back(&(*it));
+        }
     };
     collect(h.day);
     collect(h.hour);
@@ -514,34 +539,59 @@ void CDetailWindow::BuildHistoryRows() {
     m_hist_total_sent = 0;
 
     ULONGLONG now = WallClockMs();
-    ULONGLONG range_ms = 0;
+    // Natural-day ranges, aligned to local midnight (00:00:00) - issue #9:
+    //   今日    = today 00:00 .. now
+    //   昨日    = yesterday 00:00 .. today 00:00 (exclusive)
+    //   近3天   = day-before-yesterday 00:00 .. now (3 calendar days)
+    //   近7天   = 6 days ago 00:00 .. now (7 calendar days)
+    //   近30天  = 29 days ago 00:00 .. now (30 calendar days)
+    ULONGLONG start_ms = 0, end_ms = now;
+    double span_sec = 0;  // nominal span for average speed
     switch (m_time_range) {
-    case TR_24H: range_ms = 24ULL * 3600 * 1000; break;
-    case TR_3D:  range_ms = 3ULL * 24 * 3600 * 1000; break;
-    case TR_7D:  range_ms = 7ULL * 24 * 3600 * 1000; break;
-    case TR_30D: range_ms = 30ULL * 24 * 3600 * 1000; break;
+    case TR_TODAY:
+        start_ms = LocalDayStartUnixMs(0);
+        end_ms = now;
+        span_sec = (double)(now - start_ms) / 1000.0;
+        break;
+    case TR_YESTERDAY:
+        start_ms = LocalDayStartUnixMs(-1);
+        end_ms = LocalDayStartUnixMs(0);  // today 00:00, exclusive
+        span_sec = 86400.0;               // a full calendar day
+        break;
+    case TR_3D:
+        start_ms = LocalDayStartUnixMs(-2);
+        end_ms = now;
+        span_sec = (double)(now - start_ms) / 1000.0;
+        break;
+    case TR_7D:
+        start_ms = LocalDayStartUnixMs(-6);
+        end_ms = now;
+        span_sec = (double)(now - start_ms) / 1000.0;
+        break;
+    case TR_30D:
+        start_ms = LocalDayStartUnixMs(-29);
+        end_ms = now;
+        span_sec = (double)(now - start_ms) / 1000.0;
+        break;
     }
-    ULONGLONG cutoff = (now > range_ms) ? (now - range_ms) : 0;
-    if (cutoff < m_history_start_tick) cutoff = m_history_start_tick;
+    if (start_ms < m_history_start_tick) start_ms = m_history_start_tick;
+    if (span_sec < 1.0) span_sec = 1.0;
 
     for (auto& [name, hist] : m_history) {
         std::vector<const HistorySnapshot*> snaps;
-        GetMergedSnapshots(hist, snaps, cutoff);
+        GetMergedSnapshots(hist, snaps, start_ms, end_ms);
         if (snaps.empty()) continue;
 
         // Data is stored as deltas (bytes per interval). Sum all deltas in range.
         uint64_t total_recv = 0, total_sent = 0;
-        ULONGLONG first_tick = snaps[0]->tick;
-        ULONGLONG last_tick = snaps[0]->tick;
         for (auto* s : snaps) {
             total_recv += s->cum_recv;  // cum_recv is actually delta_recv
             total_sent += s->cum_sent;  // cum_sent is actually delta_sent
-            if (s->tick < first_tick) first_tick = s->tick;
-            if (s->tick > last_tick) last_tick = s->tick;
         }
 
-        double elapsed_sec = (double)(last_tick - first_tick) / 1000.0;
-        if (elapsed_sec < 1.0) elapsed_sec = 1.0;
+        // Average speed over the whole calendar range (e.g. yesterday is
+        // always /86400s), not just the span between first/last samples.
+        double elapsed_sec = span_sec;
 
         m_hist_total_recv += total_recv;
         m_hist_total_sent += total_sent;
@@ -1025,6 +1075,7 @@ void CDetailWindow::SaveSettings() {
         fprintf(f, "  \"geo_update_days\": %d,\n", IpGeo::Instance().GetUpdateDays());
         fprintf(f, "  \"geo_enabled\": %s,\n", IpGeo::Instance().IsEnabled() ? "true" : "false");
     }
+    fprintf(f, "  \"show_speed_items\": %s,\n", m_show_speed_items ? "true" : "false");
     fprintf(f, "  \"debug_logs\": %s\n", m_debug_logs ? "true" : "false");
     fprintf(f, "}\n");
     fclose(f);
@@ -1092,6 +1143,17 @@ void CDetailWindow::LoadSettings() {
             if (pos != std::string::npos) {
                 int v = atoi(json.c_str() + pos + 1);
                 if (v >= 100 && v <= 2000) m_refresh_ms = v;
+            }
+        }
+    }
+    // Parse show_speed_items (default ON - master switch for Up/Down items)
+    {
+        size_t pos = json.find("\"show_speed_items\"");
+        if (pos != std::string::npos) {
+            pos = json.find(':', pos);
+            if (pos != std::string::npos) {
+                std::string sub = json.substr(pos + 1, 16);
+                m_show_speed_items = (sub.find("true") != std::string::npos);
             }
         }
     }
@@ -1525,7 +1587,7 @@ void CDetailWindow::OnLButtonDown(int x, int y) {
 
     // Time range buttons (history tab only)
     if (m_active_tab == 1) {
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < 5; i++) {
             if (PtInRect(&m_rcTRButtons[i], { x, y })) {
                 if (m_time_range != (TimeRange)i) {
                     m_time_range = (TimeRange)i;
@@ -1840,9 +1902,15 @@ void CDetailWindow::DrawTimeRangeButtons(HDC hdc, int w, int y) {
     HFONT hOldFont = (HFONT)SelectObject(hdc, m_font_time);
     SetBkMode(hdc, TRANSPARENT);
 
-    const wchar_t* labels[4] = { L"24\u5C0F\u65F6", L"3\u5929", L"7\u5929", L"30\u5929" };
+    const wchar_t* labels[5] = {
+        L"\u4ECA\u65E5",        // 今日
+        L"\u6628\u65E5",        // 昨日
+        L"\u8FD13\u5929",       // 近3天
+        L"\u8FD17\u5929",       // 近7天
+        L"\u8FD130\u5929"       // 近30天
+    };
     int x = PADDING;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 5; i++) {
         SIZE sz;
         GetTextExtentPoint32W(hdc, labels[i], (int)wcslen(labels[i]), &sz);
         int bw = sz.cx + 16;
