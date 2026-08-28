@@ -1432,7 +1432,7 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
     case WM_CREATE: {
         // Transparent area width label
         CreateWindowW(L"STATIC", TR(L"\x900F\x660E\x533A\x57DF\x5BBD\x5EA6\xFF08px\xFF09:"),
-            WS_CHILD | WS_VISIBLE | SS_ENDELLIPSIS, 10, 12, 260, 20, hwnd, (HMENU)1002, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 10, 12, 260, 20, hwnd, (HMENU)1002, nullptr, nullptr);
         // Width edit
         wchar_t width_buf[16];
         swprintf_s(width_buf, L"%d", CProcessNetItem::s_transparent_width);
@@ -1442,7 +1442,7 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
 
         // Refresh interval label + combo (100/250/500/1000 ms)
         CreateWindowW(L"STATIC", TR(L"\x5237\x65B0\x95F4\x9694\xFF08ms\xFF09:"),
-            WS_CHILD | WS_VISIBLE | SS_ENDELLIPSIS, 10, 44, 260, 20, hwnd, (HMENU)1005, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 10, 44, 260, 20, hwnd, (HMENU)1005, nullptr, nullptr);
         HWND hCombo = CreateWindowW(L"COMBOBOX", L"",
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
             190, 42, 130, 120, hwnd, (HMENU)1004, nullptr, nullptr);
@@ -1465,7 +1465,7 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         // ---- IP 库设置 ----
         // 代理服务器 label + edit (placeholder 提示)
         CreateWindowW(L"STATIC", TR(L"IP\u5E93\u4E0B\u8F7D\u8D70\u4EE3\u7406\u5730\u5740\uFF08\u652F\u6301 http/socks5\uFF0C\u7559\u7A7A=\u76F4\u8FDE\uFF09"),
-            WS_CHILD | WS_VISIBLE | SS_ENDELLIPSIS, 10, 100, 610, 20, hwnd, (HMENU)1010, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 10, 100, 610, 20, hwnd, (HMENU)1010, nullptr, nullptr);
         HWND hProxyEdit = CreateWindowW(L"EDIT", IpGeo::Instance().GetProxy().c_str(),
             WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
             10, 122, 610, 24, hwnd, (HMENU)1007, nullptr, nullptr);
@@ -1474,7 +1474,7 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
 
         // 更新间隔 label + edit
         CreateWindowW(L"STATIC", TR(L"IP\u5E93\u81EA\u52A8\u66F4\u65B0\u95F4\u9694\uFF08\u5929\uFF0C\u9ED8\u8BA47\uFF09"),
-            WS_CHILD | WS_VISIBLE | SS_ENDELLIPSIS, 10, 154, 500, 20, hwnd, (HMENU)1011, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 10, 154, 500, 20, hwnd, (HMENU)1011, nullptr, nullptr);
         wchar_t days_buf[16];
         swprintf_s(days_buf, L"%d", IpGeo::Instance().GetUpdateDays());
         CreateWindowW(L"EDIT", days_buf,
@@ -1506,7 +1506,7 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
 
         // 界面语言 label + combo (跟随系统 + 扫描到的语言)
         CreateWindowW(L"STATIC", TR(L"\u754C\u9762\u8BED\u8A00"),
-            WS_CHILD | WS_VISIBLE | SS_ENDELLIPSIS, 10, 242, 90, 20, hwnd, (HMENU)1015, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 10, 242, 90, 20, hwnd, (HMENU)1015, nullptr, nullptr);
         HWND hLangCombo = CreateWindowW(L"COMBOBOX", L"",
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
             90, 240, 190, 200, hwnd, (HMENU)1014, nullptr, nullptr);
