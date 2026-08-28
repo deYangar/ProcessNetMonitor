@@ -25,7 +25,13 @@ public:
     bool Initialize(HINSTANCE hInst);
     // 本地化：列头文本在 I18n::Load 之后初始化（类内初始化器不能调用函数）
     void InitColumns();
-    void AutoSizeColumns();
+    // 按当前语言字体实测列宽：shrink=true 先重置到 DPI 基准再测量（语言切换双向适配），
+    // shrink=false 只扩展不收缩（首次创建后调用）
+    void AutoSizeColumns(bool shrink = false);
+    // 内容所需最小窗口宽度：最宽 tab 的列宽总和 + 内边距 + 滚动条
+    int ComputeMinWidth() const;
+    // 窗口宽度跟随内容：用户手动拉伸过则只保底不收缩，否则完全跟随
+    void FitWindowWidth();
     bool m_cols_sized = false;  // one-shot flag for AutoSizeColumns
     void Show(HWND parent_wnd);
     void Hide();
@@ -336,6 +342,15 @@ private:
         { L"\u5F52\u5C5E\u5730",     150 },
         { L"\u72B6\u6001",    90  },
     };
+
+    // 列宽基准（DPI 缩放后）：AutoSizeColumns 收缩时的下限
+    int m_base_rt_widths[NUM_COLS] = {};
+    int m_base_hist_widths[NUM_COLS] = {};
+    int m_base_conn_widths[NUM_CONN_COLS] = {};
+    // 用户手动确定的窗口宽高（WM_EXITSIZEMOVE 保存 / LoadSettings 恢复）；
+    // >0 表示用户拉伸过窗口 → 语言切换时窗口宽度只保底不收缩
+    int m_saved_w = 0;
+    int m_saved_h = 0;
 
     // Icon cache
     std::unordered_map<std::wstring, HICON> m_icon_cache;

@@ -1229,71 +1229,107 @@ static void OptionsApplyLanguageChange(HWND hwnd) {
     plugin.m_detail.SaveSettings();
     I18n::SetLang(mode);
     I18n::Reload();
-    // 详情窗口：列头重取翻译 + 重绘
-    plugin.m_detail.InitColumns();
-    if (plugin.m_detail.GetHwnd()) InvalidateRect(plugin.m_detail.GetHwnd(), NULL, FALSE);
-    // 悬浮提示窗重绘
-    if (plugin.m_popup.GetHwnd()) InvalidateRect(plugin.m_popup.GetHwnd(), NULL, FALSE);
+    // 详情窗口/悬浮提示：统一走 WM_PNM_LANG_CHANGED（列头重取翻译 + 双向重测列宽 + 窗口宽跟随）
+    if (plugin.m_detail.GetHwnd()) PostMessage(plugin.m_detail.GetHwnd(), WM_PNM_LANG_CHANGED, 0, 0);
+    if (plugin.m_popup.GetHwnd()) PostMessage(plugin.m_popup.GetHwnd(), WM_PNM_LANG_CHANGED, 0, 0);
     // 选项对话框自身文本
     OptionsApplyLang(hwnd);
 }
 
-// Measure text width in pixels using the dialog's current font.
-static int MeasureTextWidth(HWND hwnd, const wchar_t* text) {
-    HDC hdc = GetDC(hwnd);
-    HFONT hFont = (HFONT)SendMessageW(hwnd, WM_GETFONT, 0, 0);
-    HFONT hOld = hFont ? (HFONT)SelectObject(hdc, hFont) : nullptr;
-    SIZE sz = {};
-    GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &sz);
-    if (hOld) SelectObject(hdc, hOld);
-    ReleaseDC(hwnd, hdc);
-    return sz.cx;
-}
-
-// Auto-resize controls and dialog to fit translated text.
+// Auto-resize controls and dialog to fit translated text (bi-directional:
+// language switch shrinks back as well as expands).
+// STATIC/BUTTON: fit to measured text; EDIT/COMBOBOX: keep creation width
+// (combos handled separately below).
 // Called after WM_CREATE and after runtime language changes.
 static void OptionsAdjustLayout(HWND hwnd) {
     const int MARGIN = 20;
     const int CTRL_PAD = 8;
     const int CHK_PAD = 28;   // checkbox/radio internal offset
-    const int BTN_PAD = 20;   // push button padding
+    const int MIN_CTRL_W = 60; // 收缩下限，防止极端译文把控件缩没
+
+    HFONT hDlgFont = (HFONT)SendMessageW(hwnd, WM_GETFONT, 0, 0);
+    HDC hdc = GetDC(hwnd);
+    HFONT hOld = hDlgFont ? (HFONT)SelectObject(hdc, hDlgFont) : nullptr;
 
     int max_right = 0;
 
-    // Step 1: Walk ALL child controls, resize to fit text, track max_right
+    // Step 1: fit STATIC / BUTTON controls to their text (expand or shrink)
     HWND hChild = GetWindow(hwnd, GW_CHILD);
     while (hChild) {
-        wchar_t buf[512] = {};
-        GetWindowTextW(hChild, buf, 512);
-        if (buf[0]) {
-            DWORD style = (DWORD)GetWindowLongPtrW(hChild, GWL_STYLE);
-            bool is_push = (style & BS_PUSHBUTTON) != 0;
-            bool is_chk = (style & (BS_AUTOCHECKBOX | BS_AUTORADIOBUTTON)) != 0;
-            bool is_static = (style & 0xFF) == SS_SIMPLE || (style & 0xFF) == SS_LEFT || (style & 0xFF) == 0;
-            int pad = (is_push || is_chk) ? CHK_PAD : 0;
-            int text_w = MeasureTextWidth(hwnd, buf);
-            int needed = text_w + pad + CTRL_PAD;
+        wchar_t cls[16] = {};
+        GetClassNameW(hChild, cls, 16);
+        bool is_button = (lstrcmpW(cls, L"Button") == 0);
+        bool is_static = (lstrcmpW(cls, L"Static") == 0);
+        if (is_button || is_static) {
+            wchar_t buf[512] = {};
+            GetWindowTextW(hChild, buf, 512);
+            int needed = MIN_CTRL_W;
+            if (buf[0]) {
+                DWORD style = (DWORD)GetWindowLongPtrW(hChild, GWL_STYLE);
+                bool is_push = (style & BS_PUSHBUTTON) != 0;
+                bool is_chk = (style & (BS_AUTOCHECKBOX | BS_AUTORADIOBUTTON)) != 0;
+                int pad = (is_push || is_chk) ? CHK_PAD : CTRL_PAD;
+                int text_w = PNM_MeasureText(hdc, hDlgFont, buf);
+                needed = text_w + pad;
+                if (needed < MIN_CTRL_W) needed = MIN_CTRL_W;
+            }
 
             RECT rc;
             GetWindowRect(hChild, &rc);
             MapWindowPoints(HWND_DESKTOP, hwnd, (LPPOINT)&rc, 2);
             int cur_w = rc.right - rc.left;
-
-            if (needed > cur_w) {
+            if (needed != cur_w) {
                 SetWindowPos(hChild, nullptr, 0, 0, needed, rc.bottom - rc.top,
                              SWP_NOMOVE | SWP_NOZORDER);
             }
-            int right = rc.left + max(cur_w, needed);
+            int right = rc.left + needed;
             if (right > max_right) max_right = right;
+        } else if (lstrcmpW(cls, L"Edit") == 0 || lstrcmpW(cls, L"ComboBox") == 0) {
+            // EDIT/COMBOBOX 宽度不随文本调整，但右边缘计入对话框最小宽度，
+            // 防止对话框收缩后宽编辑框（如代理地址）溢出
+            RECT rc;
+            GetWindowRect(hChild, &rc);
+            MapWindowPoints(HWND_DESKTOP, hwnd, (LPPOINT)&rc, 2);
+            if (rc.right > max_right) max_right = rc.right;
         }
         hChild = GetWindow(hChild, GW_HWNDNEXT);
     }
 
-    // Step 2: Expand dialog if controls overflow
+    // Step 1.5: language combo (1014) fits the longest language name
+    HWND hLangCombo = GetDlgItem(hwnd, 1014);
+    if (hLangCombo) {
+        int max_item_w = 0;
+        int cnt = (int)SendMessageW(hLangCombo, CB_GETCOUNT, 0, 0);
+        for (int i = 0; i < cnt; i++) {
+            int len = (int)SendMessageW(hLangCombo, CB_GETLBTEXTLEN, i, 0);
+            if (len <= 0) continue;
+            std::vector<wchar_t> tmp(len + 1);
+            SendMessageW(hLangCombo, CB_GETLBTEXT, i, (LPARAM)tmp.data());
+            int w = PNM_MeasureText(hdc, hDlgFont, tmp.data());
+            if (w > max_item_w) max_item_w = w;
+        }
+        int combo_w = max_item_w + 36;  // 文本 + 下拉箭头 + 边距
+        if (combo_w < 120) combo_w = 120;
+        SendMessageW(hLangCombo, CB_SETDROPPEDWIDTH, (WPARAM)(combo_w - 6), 0);
+        RECT rc;
+        GetWindowRect(hLangCombo, &rc);
+        MapWindowPoints(HWND_DESKTOP, hwnd, (LPPOINT)&rc, 2);
+        if (combo_w != rc.right - rc.left) {
+            SetWindowPos(hLangCombo, nullptr, 0, 0, combo_w, rc.bottom - rc.top,
+                         SWP_NOMOVE | SWP_NOZORDER);
+        }
+        int right = rc.left + combo_w;
+        if (right > max_right) max_right = right;
+    }
+
+    if (hOld) SelectObject(hdc, hOld);
+    ReleaseDC(hwnd, hdc);
+
+    // Step 2: Fit dialog width to controls (expand or shrink)
     RECT rcClient;
     GetClientRect(hwnd, &rcClient);
     int desired_cx = max(500, max_right + MARGIN);
-    if (desired_cx > rcClient.right) {
+    if (desired_cx != rcClient.right) {
         RECT rcWnd = { 0, 0, desired_cx, rcClient.bottom };
         DWORD dlgStyle = (DWORD)GetWindowLongPtrW(hwnd, GWL_STYLE);
         DWORD dlgEx = (DWORD)GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
@@ -1337,23 +1373,24 @@ static void OptionsAdjustLayout(HWND hwnd) {
         int new_x = dlg_w - 15 - edit_w;
         SetWindowPos(hWidthEdit, nullptr, new_x, rc.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
     }
-    // Days edit (1008): anchor to right of label
+    // Update Now button (1009): anchor to right; measure its actual width first
+    HWND hUpdateBtn = GetDlgItem(hwnd, 1009);
+    int update_btn_w = 0;
+    if (hUpdateBtn) {
+        RECT rc; GetWindowRect(hUpdateBtn, &rc);
+        MapWindowPoints(HWND_DESKTOP, hwnd, (LPPOINT)&rc, 2);
+        update_btn_w = rc.right - rc.left;
+        int new_x = dlg_w - 15 - update_btn_w;
+        SetWindowPos(hUpdateBtn, nullptr, new_x, rc.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+    }
+    // Days edit (1008): anchor to left of Update button (use its actual width)
     HWND hDaysEdit = GetDlgItem(hwnd, 1008);
     if (hDaysEdit) {
         RECT rc; GetWindowRect(hDaysEdit, &rc);
         MapWindowPoints(HWND_DESKTOP, hwnd, (LPPOINT)&rc, 2);
         int edit_w = rc.right - rc.left;
-        int new_x = dlg_w - 15 - 110 - 10 - edit_w;  // space for Update btn + gap + edit
+        int new_x = dlg_w - 15 - update_btn_w - 10 - edit_w;
         SetWindowPos(hDaysEdit, nullptr, new_x, rc.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
-    }
-    // Update Now button (1009): anchor to right
-    HWND hUpdateBtn = GetDlgItem(hwnd, 1009);
-    if (hUpdateBtn) {
-        RECT rc; GetWindowRect(hUpdateBtn, &rc);
-        MapWindowPoints(HWND_DESKTOP, hwnd, (LPPOINT)&rc, 2);
-        int btn_w = rc.right - rc.left;
-        int new_x = dlg_w - 15 - btn_w;
-        SetWindowPos(hUpdateBtn, nullptr, new_x, rc.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
     }
 
     // Step 4: Right-align OK/Cancel with max_right

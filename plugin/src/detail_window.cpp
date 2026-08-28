@@ -159,29 +159,74 @@ COLORREF CDetailWindow::GetBorderColor() {
 
 // FormatSpeed / FormatBytes delegated to shared utils.h
 
-// Measure header text and expand column widths if needed.
-// Safe to call multiple times - only expands, never shrinks, and skips
-// work if already sized for the current language.
-void CDetailWindow::AutoSizeColumns() {
+// Measure header text and fit column widths to the current language.
+// shrink=true : reset to DPI baseline first, then expand - language switch
+//               shrinks back columns of a shorter language (bi-directional).
+// shrink=false: expand only, never shrink (safe one-shot after font creation).
+void CDetailWindow::AutoSizeColumns(bool shrink) {
     if (!m_font_header) return;
     HDC hdc = GetDC(m_hwnd);
     HFONT hOld = (HFONT)SelectObject(hdc, m_font_header);
 
-    auto adjust = [&](Column* cols, int count) {
+    // 主表列（rt/hist）：标题 + 内边距 + 排序箭头余量
+    auto adjust = [&](Column* cols, const int* bases, int count) {
         for (int i = 1; i < count; i++) {
             if (!cols[i].title || !cols[i].title[0]) continue;
-            SIZE sz = {};
-            GetTextExtentPoint32W(hdc, cols[i].title, (int)wcslen(cols[i].title), &sz);
-            int needed = sz.cx + 12 + 20;  // padding + sort arrow
+            int measured = PNM_MeasureText(hdc, m_font_header, cols[i].title);
+            int needed = measured + 12 + 20;  // padding + sort arrow
+            if (shrink && bases) cols[i].width = bases[i];
             if (needed > cols[i].width) cols[i].width = needed;
         }
     };
-    adjust(m_rt_cols, NUM_COLS);
-    adjust(m_hist_cols, NUM_COLS);
+    adjust(m_rt_cols, m_base_rt_widths, NUM_COLS);
+    adjust(m_hist_cols, m_base_hist_widths, NUM_COLS);
+
+    // 连接表：协议(0)/状态(4)是固定列，按标题实测；地址类弹性列由 UpdateConnColWidths 每帧分配
+    for (int i : { 0, 4 }) {
+        if (!m_conn_cols[i].title || !m_conn_cols[i].title[0]) continue;
+        int measured = PNM_MeasureText(hdc, m_font_header, m_conn_cols[i].title);
+        int needed = measured + 16;  // 无排序箭头，左右边距
+        if (shrink) m_conn_cols[i].width = m_base_conn_widths[i];
+        if (needed > m_conn_cols[i].width) m_conn_cols[i].width = needed;
+    }
 
     SelectObject(hdc, hOld);
     ReleaseDC(m_hwnd, hdc);
     m_cols_sized = true;
+}
+
+// 内容所需最小窗口宽度：最宽 tab 的列宽总和 + 内边距 + 滚动条
+int CDetailWindow::ComputeMinWidth() const {
+    int rt_sum = 0, hist_sum = 0;
+    for (int i = 0; i < NUM_COLS; i++) {
+        rt_sum += m_rt_cols[i].width;
+        hist_sum += m_hist_cols[i].width;
+    }
+    int need = (rt_sum > hist_sum ? rt_sum : hist_sum) + PADDING * 2 + SCROLL_W + 2;
+    if (need < MIN_WIDTH) need = MIN_WIDTH;
+    return need;
+}
+
+// 窗口宽度跟随内容：
+// - 用户拉伸过窗口（m_saved_w > 0）→ 只保底不收缩（新语言需要更宽才扩展）
+// - 从未拉伸过 → 完全跟随当前语言内容（语言切换可收缩/扩展）
+void CDetailWindow::FitWindowWidth() {
+    if (!m_hwnd || !IsWindow(m_hwnd)) return;
+    RECT rc;
+    GetWindowRect(m_hwnd, &rc);
+    int cur_w = rc.right - rc.left;
+    int need = ComputeMinWidth();
+    int target = need;
+    if (m_saved_w > 0 && m_saved_w > target) target = m_saved_w;
+    // 不超出所在显示器工作区
+    RECT work, mon;
+    PNM_GetWorkAreaForRect(rc, work, mon);
+    int max_w = (work.right - work.left) - 20;
+    if (target > max_w) target = max_w;
+    if (target != cur_w) {
+        SetWindowPos(m_hwnd, nullptr, 0, 0, target, rc.bottom - rc.top,
+                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
 }
 
 void CDetailWindow::InitColumns() {
@@ -306,11 +351,14 @@ void CDetailWindow::ApplyLayoutScale() {
     static const int BASE_HIST_WIDTHS[NUM_COLS] = {42, 140, 70, 90, 90, 85, 85};
     static const int BASE_CONN_WIDTHS[NUM_CONN_COLS] = {50, 150, 150, 150, 110};
     for (int i = 0; i < NUM_COLS; i++) {
-        m_rt_cols[i].width = (int)(BASE_RT_WIDTHS[i] * m_dpi_scale);
-        m_hist_cols[i].width = (int)(BASE_HIST_WIDTHS[i] * m_dpi_scale);
+        m_base_rt_widths[i] = (int)(BASE_RT_WIDTHS[i] * m_dpi_scale);
+        m_base_hist_widths[i] = (int)(BASE_HIST_WIDTHS[i] * m_dpi_scale);
+        m_rt_cols[i].width = m_base_rt_widths[i];
+        m_hist_cols[i].width = m_base_hist_widths[i];
     }
     for (int i = 0; i < NUM_CONN_COLS; i++) {
-        m_conn_cols[i].width = (int)(BASE_CONN_WIDTHS[i] * m_dpi_scale);
+        m_base_conn_widths[i] = (int)(BASE_CONN_WIDTHS[i] * m_dpi_scale);
+        m_conn_cols[i].width = m_base_conn_widths[i];
     }
 }
 
@@ -416,8 +464,14 @@ void CDetailWindow::Show(HWND parent_wnd) {
 
     int aw = work.right - work.left;
     int ah = work.bottom - work.top;
-    int w = min((int)(720 * m_dpi_scale), aw - 40);
-    int h = min((int)(560 * m_dpi_scale), ah - 40);
+    // 窗口宽度跟随当前语言内容（用户拉伸过则保底），高度用用户保存值或默认
+    AutoSizeColumns(true);
+    FitWindowWidth();
+    RECT rc;
+    GetWindowRect(m_hwnd, &rc);
+    int w = rc.right - rc.left;
+    int h = m_saved_h > 0 ? m_saved_h : (int)(560 * m_dpi_scale);
+    if (h > ah - 40) h = ah - 40;
     int x = work.left + (aw - w) / 2;
     int y = work.top + (ah - h) / 2;
 
@@ -1255,6 +1309,9 @@ void CDetailWindow::LoadSettings() {
         if (ww >= MIN_WIDTH && wh >= MIN_HEIGHT && m_hwnd) {
             SetWindowPos(m_hwnd, NULL, 0, 0, ww, wh, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
         }
+        // 同步成员：保存的宽高即用户确定的尺寸（语言切换窗口宽度只保底不收缩）
+        if (ww >= MIN_WIDTH) m_saved_w = ww;
+        if (wh >= MIN_HEIGHT) m_saved_h = wh;
     }
     // IP 归属地设置: geo_proxy / geo_update_days / geo_enabled
     {
@@ -1518,6 +1575,9 @@ LRESULT CDetailWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
         SetWindowPos(m_hwnd, NULL, prc->left, prc->top,
             prc->right - prc->left, prc->bottom - prc->top,
             SWP_NOZORDER | SWP_NOACTIVATE);
+        // 列宽基准已按新 DPI 重算，重新实测列头 + 窗口宽度
+        AutoSizeColumns(true);
+        FitWindowWidth();
         InvalidateRect(m_hwnd, NULL, FALSE);
         return 0;
     }
@@ -1557,10 +1617,15 @@ LRESULT CDetailWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
 
-    case WM_EXITSIZEMOVE:
-        // 拖拽调整大小结束 - 保存窗口宽高
+    case WM_EXITSIZEMOVE: {
+        // 用户拖拽调整结束：记录用户确定的窗口宽高（语言切换不再收缩）
+        RECT rc;
+        GetWindowRect(m_hwnd, &rc);
+        m_saved_w = rc.right - rc.left;
+        m_saved_h = rc.bottom - rc.top;
         SaveSettings();
         return 0;
+    }
 
     case WM_SYSCOMMAND:
         if ((wp & 0xFFF0) == SC_CLOSE) { Hide(); return 0; }
@@ -1584,8 +1649,11 @@ LRESULT CDetailWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
 
     case WM_PNM_LANG_CHANGED:
-        // 运行期语言变化：列头重取翻译 + 重建行（分类文本等）+ 重绘
+        // 运行期语言变化：列头重取翻译，双向重测列宽，窗口宽度跟随内容
+        // （用户拉伸过窗口则只保底不收缩），最后重建行（分类文本等）+ 重绘
         InitColumns();
+        AutoSizeColumns(true);
+        FitWindowWidth();
         CProcessNetPlugin::Instance().DetailRefreshFromSnapshot();
         InvalidateRect(m_hwnd, NULL, FALSE);
         return 0;

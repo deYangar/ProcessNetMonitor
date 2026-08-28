@@ -45,6 +45,18 @@ inline bool PNM_GetDebugDir(wchar_t* buf, size_t cap) {
 #define WM_PNM_REFRESH (WM_APP + 1)
 #define WM_PNM_LANG_CHANGED (WM_APP + 6)
 
+// 用指定字体测量文本宽度（像素），实测即真实像素，天然适配 DPI。
+// hdc 必须有效；hFont 为 nullptr 时用 DC 当前字体。
+// 语言切换自动适配布局的统一测量入口（详情窗口/选项对话框共用）。
+inline int PNM_MeasureText(HDC hdc, HFONT hFont, const wchar_t* text) {
+    if (!text || !text[0]) return 0;
+    HFONT hOld = hFont ? (HFONT)SelectObject(hdc, hFont) : nullptr;
+    SIZE sz = {};
+    GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &sz);
+    if (hOld) SelectObject(hdc, hOld);
+    return sz.cx;
+}
+
 // Shared speed/byte formatting utilities
 inline void FormatSpeed(double bps, wchar_t* buf, int n) {
     if (bps < 0.01) wcsncpy_s(buf, n, L"0 B/s", _TRUNCATE);
