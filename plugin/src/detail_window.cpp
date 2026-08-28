@@ -41,11 +41,23 @@ static ULONGLONG LocalDayStartUnixMs(int day_offset) {
     local_tm.tm_hour = 0;
     local_tm.tm_min = 0;
     local_tm.tm_sec = 0;
-    // _mkgmtime treats the tm fields as UTC and returns a UTC time_t; since
-    // the fields hold LOCAL wall-clock time, the result is the UTC instant
-    // at which local midnight occurs.
-    time_t midnight = _mkgmtime(&local_tm);
+    // mktime 把 tm 字段当本地时间 → 返回本地午夜的 UTC 时间戳。
+    // （以前误用 _mkgmtime：字段被当 UTC，结果偏移了时区，
+    //   凌晨时段“今日”区间倒置，永远查不到数据）
+    time_t midnight = mktime(&local_tm);
     return (ULONGLONG)(midnight + (time_t)day_offset * 86400) * 1000ULL;
+}
+
+// 任意 wall-clock 毫秒所在自然日的本地 00:00（UTC 毫秒）
+static ULONGLONG LocalDayStartOf(ULONGLONG wall_ms) {
+    time_t t = (time_t)(wall_ms / 1000);
+    struct tm local_tm;
+    localtime_s(&local_tm, &t);
+    local_tm.tm_hour = 0;
+    local_tm.tm_min = 0;
+    local_tm.tm_sec = 0;
+    time_t midnight = mktime(&local_tm);
+    return (ULONGLONG)midnight * 1000ULL;
 }
 
 CDetailWindow::CDetailWindow() {
@@ -598,12 +610,13 @@ void CDetailWindow::CompressHistory() {
         while ((int)h.hour.size() > MAX_HOUR) h.hour.pop_front();
 
         // hour → day: SUM deltas within 1-day windows
+        // SUM deltas within natural days (local midnight aligned)
         ULONGLONG day_cutoff = now - 172800000;
         while (!h.hour.empty() && h.hour.front().tick < day_cutoff) {
-            ULONGLONG win_end = h.hour.front().tick + 86400000;
-            HistorySnapshot acc = { 0, 0, 0, false };
+            ULONGLONG day_start = LocalDayStartOf(h.hour.front().tick);
+            ULONGLONG win_end = day_start + 86400000;
+            HistorySnapshot acc = { day_start, 0, 0, false };
             while (!h.hour.empty() && h.hour.front().tick < win_end && h.hour.front().tick < day_cutoff) {
-                acc.tick = h.hour.front().tick;
                 acc.cum_recv += h.hour.front().cum_recv;
                 acc.cum_sent += h.hour.front().cum_sent;
                 h.hour.pop_front();
@@ -886,11 +899,13 @@ void CDetailWindow::LoadHistory() {
         while ((int)h.hour.size() > MAX_HOUR) h.hour.pop_front();
 
         // hour → day: SUM deltas per day
+        // hour 鈫?day: SUM deltas per natural day (local midnight aligned),
+        // matching the query ranges (Today = local 00:00 .. now)
         while (!h.hour.empty()) {
-            ULONGLONG win_end = h.hour.front().tick + 86400000;
-            HistorySnapshot acc = { 0, 0, 0, false };
+            ULONGLONG day_start = LocalDayStartOf(h.hour.front().tick);
+            ULONGLONG win_end = day_start + 86400000;
+            HistorySnapshot acc = { day_start, 0, 0, false };
             while (!h.hour.empty() && h.hour.front().tick < win_end) {
-                acc.tick = h.hour.front().tick;
                 acc.cum_recv += h.hour.front().cum_recv;
                 acc.cum_sent += h.hour.front().cum_sent;
                 h.hour.pop_front();
