@@ -7,6 +7,7 @@
 #include <set>
 #include <functional>
 #include "capture.h"
+#include "i18n.h"
 
 // Huorong-style detail window with sortable table, tabs, history, context menu
 class CDetailWindow {
@@ -22,6 +23,8 @@ public:
     ~CDetailWindow();
 
     bool Initialize(HINSTANCE hInst);
+    // 本地化：列头文本在 I18n::Load 之后初始化（类内初始化器不能调用函数）
+    void InitColumns();
     void Show(HWND parent_wnd);
     void Hide();
     void UpdateData(const std::vector<ProcTraffic>& stats, double total_up, double total_down);

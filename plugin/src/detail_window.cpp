@@ -159,12 +159,35 @@ COLORREF CDetailWindow::GetBorderColor() {
 
 // FormatSpeed / FormatBytes delegated to shared utils.h
 
+void CDetailWindow::InitColumns() {
+    static const wchar_t* rt_titles[NUM_COLS] = {
+        L"", TR(L"\u7A0B\u5E8F\u540D\u79F0"), TR(L"\u7A0B\u5E8F\u7C7B\u522B"),
+        TR(L"\u4E0B\u8F7D\u901F\u5EA6"), TR(L"\u4E0A\u4F20\u901F\u5EA6"),
+        TR(L"\u8FDE\u63A5\u6570"), TR(L"\u64CD\u4F5C")
+    };
+    for (int i = 0; i < NUM_COLS; i++) m_rt_cols[i].title = rt_titles[i];
+
+    static const wchar_t* hist_titles[NUM_COLS] = {
+        L"", TR(L"\u7A0B\u5E8F\u540D\u79F0"), TR(L"\u7A0B\u5E8F\u7C7B\u522B"),
+        TR(L"\u603B\u4E0B\u8F7D"), TR(L"\u603B\u4E0A\u4F20"),
+        TR(L"\u5E73\u5747\u4E0B\u8F7D"), TR(L"\u5E73\u5747\u4E0A\u4F20")
+    };
+    for (int i = 0; i < NUM_COLS; i++) m_hist_cols[i].title = hist_titles[i];
+
+    static const wchar_t* conn_titles[NUM_CONN_COLS] = {
+        TR(L"\u534F\u8BAE"), TR(L"\u672C\u5730\u5730\u5740"),
+        TR(L"\u8FDC\u7A0B\u5730\u5740"), TR(L"\u5F52\u5C5E\u5730"), TR(L"\u72B6\u6001")
+    };
+    for (int i = 0; i < NUM_CONN_COLS; i++) m_conn_cols[i].title = conn_titles[i];
+}
+
 // ============================================================
 // Window creation
 // ============================================================
 
 bool CDetailWindow::Initialize(HINSTANCE hInst) {
     m_hinst = hInst;
+    InitColumns();
 
     // Declare per-monitor DPI awareness (v2 if available)
     HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
@@ -607,7 +630,7 @@ void CDetailWindow::BuildHistoryRows() {
         std::wstring lower = hist.name;
         for (auto& c : lower) c = towlower(c);
         if (!hist.name.empty() && hist.name[0] == L'<') {
-            row.category = L"\u672A\u77E5";
+            row.category = TR(L"\u672A\u77E5");
         } else {
             // signature-based classification (background worker + cache)
             SigClass sc = SignatureCache::Instance().Check(row.exe_path);
@@ -618,15 +641,15 @@ void CDetailWindow::BuildHistoryRows() {
                     lower.find(L"registry") != std::wstring::npos ||
                     lower.find(L"idle") != std::wstring::npos ||
                     lower.find(L"memory compression") != std::wstring::npos)
-                    row.category = L"\u7CFB\u7EDF\u8FDB\u7A0B";
+                    row.category = TR(L"\u7CFB\u7EDF\u8FDB\u7A0B");
                 else
-                    row.category = L"\u672A\u77E5";
+                    row.category = TR(L"\u672A\u77E5");
             } else {
                 switch (sc) {
-                case SigClass::System:     row.category = L"\u7CFB\u7EDF\u8FDB\u7A0B"; break;
-                case SigClass::ThirdParty: row.category = L"\u7B2C\u4E09\u65B9\u7A0B\u5E8F"; break;
-                case SigClass::Unsigned:   row.category = L"\u672A\u7B7E\u540D"; break;
-                default:                   row.category = L"\u672A\u77E5"; break;
+                case SigClass::System:     row.category = TR(L"\u7CFB\u7EDF\u8FDB\u7A0B"); break;
+                case SigClass::ThirdParty: row.category = TR(L"\u7B2C\u4E09\u65B9\u7A0B\u5E8F"); break;
+                case SigClass::Unsigned:   row.category = TR(L"\u672A\u7B7E\u540D"); break;
+                default:                   row.category = TR(L"\u672A\u77E5"); break;
                 }
             }
         }
@@ -903,7 +926,7 @@ void CDetailWindow::RebuildRows() {
         std::wstring lower = name;
         for (auto& c : lower) c = towlower(c);
         if (!name.empty() && name[0] == L'<') {
-            row.category = L"\u672A\u77E5";  // unresolved pid - can't classify
+            row.category = TR(L"\u672A\u77E5");  // unresolved pid - can't classify
         } else {
             // signature-based classification (background worker + cache)
             SigClass sc = SignatureCache::Instance().Check(row.exe_path);
@@ -914,15 +937,15 @@ void CDetailWindow::RebuildRows() {
                     lower.find(L"registry") != std::wstring::npos ||
                     lower.find(L"idle") != std::wstring::npos ||
                     lower.find(L"memory compression") != std::wstring::npos)
-                    row.category = L"\u7CFB\u7EDF\u8FDB\u7A0B";
+                    row.category = TR(L"\u7CFB\u7EDF\u8FDB\u7A0B");
                 else
-                    row.category = L"\u672A\u77E5";
+                    row.category = TR(L"\u672A\u77E5");
             } else {
                 switch (sc) {
-                case SigClass::System:     row.category = L"\u7CFB\u7EDF\u8FDB\u7A0B"; break;
-                case SigClass::ThirdParty: row.category = L"\u7B2C\u4E09\u65B9\u7A0B\u5E8F"; break;
-                case SigClass::Unsigned:   row.category = L"\u672A\u7B7E\u540D"; break;
-                default:                   row.category = L"\u672A\u77E5"; break;
+                case SigClass::System:     row.category = TR(L"\u7CFB\u7EDF\u8FDB\u7A0B"); break;
+                case SigClass::ThirdParty: row.category = TR(L"\u7B2C\u4E09\u65B9\u7A0B\u5E8F"); break;
+                case SigClass::Unsigned:   row.category = TR(L"\u672A\u7B7E\u540D"); break;
+                default:                   row.category = TR(L"\u672A\u77E5"); break;
                 }
             }
         }
@@ -1367,15 +1390,15 @@ void CDetailWindow::ShowContextMenu(int row, int x, int y) {
     m_context_menu_open = true;
 
     HMENU hMenu = CreatePopupMenu();
-    AppendMenuW(hMenu, MF_STRING, 1, L"\u5B9A\u4F4D\u6587\u4EF6");
-    AppendMenuW(hMenu, MF_STRING, 2, L"\u6587\u4EF6\u5C5E\u6027");
+    AppendMenuW(hMenu, MF_STRING, 1, TR(L"\u5B9A\u4F4D\u6587\u4EF6"));
+    AppendMenuW(hMenu, MF_STRING, 2, TR(L"\u6587\u4EF6\u5C5E\u6027"));
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hMenu, MF_STRING, 3, L"\u7ED3\u675F\u8FDB\u7A0B");
+    AppendMenuW(hMenu, MF_STRING, 3, TR(L"\u7ED3\u675F\u8FDB\u7A0B"));
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     // Debug-log master switch (default OFF; crash diagnostics stay ON)
     AppendMenuW(hMenu, MF_STRING, 100,
-                m_debug_logs ? L"\u8C03\u8BD5\u65E5\u5FD7: \u5F00 (\u70B9\u51FB\u5173\u95ED)"
-                             : L"\u8C03\u8BD5\u65E5\u5FD7: \u5173 (\u70B9\u51FB\u5F00\u542F)");
+                m_debug_logs ? TR(L"\u8C03\u8BD5\u65E5\u5FD7: \u5F00 (\u70B9\u51FB\u5173\u95ED)")
+                             : TR(L"\u8C03\u8BD5\u65E5\u5FD7: \u5173 (\u70B9\u51FB\u5F00\u542F)"));
 
     int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y, 0, m_hwnd, NULL);
     DestroyMenu(hMenu);
@@ -1521,7 +1544,7 @@ LRESULT CDetailWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_APP + 5:
         // IP 库首次下载失败提示
         MessageBoxW(m_hwnd,
-            L"IP \u5F52\u5C5E\u5730\u6570\u636E\u5E93\u4E0B\u8F7D\u5931\u8D25\u3002\n\u53EF\u5728 \u63D2\u4EF6\u8BBE\u7F6E \u4E2D\u914D\u7F6E\u4EE3\u7406\u670D\u52A1\u5668\uFF0C\u6216\u5173\u95ED\u201C\u542F\u7528\u8FDE\u63A5\u5F52\u5C5E\u5730\u663E\u793A\u201D\u3002",
+            TR(L"IP \u5F52\u5C5E\u5730\u6570\u636E\u5E93\u4E0B\u8F7D\u5931\u8D25\u3002\n\u53EF\u5728 \u63D2\u4EF6\u8BBE\u7F6E \u4E2D\u914D\u7F6E\u4EE3\u7406\u670D\u52A1\u5668\uFF0C\u6216\u5173\u95ED\u201C\u542F\u7528\u8FDE\u63A5\u5F52\u5C5E\u5730\u663E\u793A\u201D\u3002"),
             L"ProcessNetMonitor", MB_OK | MB_ICONWARNING);
         return 0;
 
@@ -1601,7 +1624,7 @@ void CDetailWindow::OnLButtonDown(int x, int y) {
         }
         // Clear history button
         if (PtInRect(&m_rcClearBtn, { x, y })) {
-            int ret = MessageBoxW(m_hwnd, L"\u786E\u5B9A\u8981\u6E05\u9664\u6240\u6709\u5386\u53F2\u6D41\u91CF\u6570\u636E\u5417\uFF1F", L"\u6E05\u9664\u6570\u636E", MB_YESNO | MB_ICONQUESTION);
+            int ret = MessageBoxW(m_hwnd, TR(L"\u786E\u5B9A\u8981\u6E05\u9664\u6240\u6709\u5386\u53F2\u6D41\u91CF\u6570\u636E\u5417\uFF1F"), TR(L"\u6E05\u9664\u6570\u636E"), MB_YESNO | MB_ICONQUESTION);
             if (ret == IDYES) {
                 ClearHistory();
             }
@@ -1860,7 +1883,7 @@ void CDetailWindow::DrawTabs(HDC hdc, int w, int y) {
     SetBkMode(hdc, TRANSPARENT);
 
     SIZE sz;
-    const wchar_t* tab0 = L"\u5B9E\u65F6\u6D41\u91CF";
+    const wchar_t* tab0 = TR(L"\u5B9E\u65F6\u6D41\u91CF");
     GetTextExtentPoint32W(hdc, tab0, (int)wcslen(tab0), &sz);
     m_rcTab0 = { PADDING, y + 4, PADDING + sz.cx + 16, y + TAB_BAR_H - 4 };
     SetTextColor(hdc, m_active_tab == 0 ? GetAccentColor(false) : GetSecondaryTextColor());
@@ -1874,7 +1897,7 @@ void CDetailWindow::DrawTabs(HDC hdc, int w, int y) {
         DeleteObject(hPen);
     }
 
-    const wchar_t* tab1 = L"\u5386\u53F2\u6D41\u91CF";
+    const wchar_t* tab1 = TR(L"\u5386\u53F2\u6D41\u91CF");
     GetTextExtentPoint32W(hdc, tab1, (int)wcslen(tab1), &sz);
     m_rcTab1 = { m_rcTab0.right + 12, y + 4, m_rcTab0.right + 12 + sz.cx + 16, y + TAB_BAR_H - 4 };
     SetTextColor(hdc, m_active_tab == 1 ? GetAccentColor(false) : GetSecondaryTextColor());
@@ -1903,11 +1926,11 @@ void CDetailWindow::DrawTimeRangeButtons(HDC hdc, int w, int y) {
     SetBkMode(hdc, TRANSPARENT);
 
     const wchar_t* labels[5] = {
-        L"\u4ECA\u65E5",        // 今日
-        L"\u6628\u65E5",        // 昨日
-        L"\u8FD13\u5929",       // 近3天
-        L"\u8FD17\u5929",       // 近7天
-        L"\u8FD130\u5929"       // 近30天
+        TR(L"\u4ECA\u65E5"),        // 今日
+        TR(L"\u6628\u65E5"),        // 昨日
+        TR(L"\u8FD13\u5929"),       // 近3天
+        TR(L"\u8FD17\u5929"),       // 近7天
+        TR(L"\u8FD130\u5929")       // 近30天
     };
     int x = PADDING;
     for (int i = 0; i < 5; i++) {
@@ -1936,7 +1959,7 @@ void CDetailWindow::DrawTimeRangeButtons(HDC hdc, int w, int y) {
     }
 
     // Clear history button (right-aligned)
-    const wchar_t* clear_label = L"\u6E05\u9664\u6570\u636E";
+    const wchar_t* clear_label = TR(L"\u6E05\u9664\u6570\u636E");
     SIZE clear_sz;
     GetTextExtentPoint32W(hdc, clear_label, (int)wcslen(clear_label), &clear_sz);
     int clear_bw = clear_sz.cx + 16;
@@ -1978,7 +2001,7 @@ void CDetailWindow::DrawSpeedSummary(HDC hdc, int w, int y) {
 
         SetTextColor(hdc, GetSecondaryTextColor());
         RECT l1 = { x, y, x + 80, y + SUMMARY_H };
-        DrawTextW(hdc, L"\u603B\u4E0B\u8F7D\uFF1A", -1, &l1, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        DrawTextW(hdc, TR(L"\u603B\u4E0B\u8F7D\uFF1A"), -1, &l1, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
         x += 55;
         SetTextColor(hdc, GetAccentColor(false));
         RECT v1 = { x, y, x + 100, y + SUMMARY_H };
@@ -1987,7 +2010,7 @@ void CDetailWindow::DrawSpeedSummary(HDC hdc, int w, int y) {
 
         SetTextColor(hdc, GetSecondaryTextColor());
         RECT l2 = { x, y, x + 80, y + SUMMARY_H };
-        DrawTextW(hdc, L"\u603B\u4E0A\u4F20\uFF1A", -1, &l2, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        DrawTextW(hdc, TR(L"\u603B\u4E0A\u4F20\uFF1A"), -1, &l2, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
         x += 55;
         SetTextColor(hdc, GetAccentColor(true));
         RECT v2 = { x, y, x + 100, y + SUMMARY_H };
@@ -2000,7 +2023,7 @@ void CDetailWindow::DrawSpeedSummary(HDC hdc, int w, int y) {
 
         SetTextColor(hdc, GetSecondaryTextColor());
         RECT l1 = { x, y, x + 80, y + SUMMARY_H };
-        DrawTextW(hdc, L"\u4E0B\u8F7D\u603B\u901F\u5EA6\uFF1A", -1, &l1, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        DrawTextW(hdc, TR(L"\u4E0B\u8F7D\u603B\u901F\u5EA6\uFF1A"), -1, &l1, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
         x += 80;
         SetTextColor(hdc, GetAccentColor(false));
         wchar_t d_full[64]; swprintf_s(d_full, 64, L"\u2193 %s", down_str);
@@ -2010,7 +2033,7 @@ void CDetailWindow::DrawSpeedSummary(HDC hdc, int w, int y) {
 
         SetTextColor(hdc, GetSecondaryTextColor());
         RECT l2 = { x, y, x + 80, y + SUMMARY_H };
-        DrawTextW(hdc, L"\u4E0A\u4F20\u603B\u901F\u5EA6\uFF1A", -1, &l2, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        DrawTextW(hdc, TR(L"\u4E0A\u4F20\u603B\u901F\u5EA6\uFF1A"), -1, &l2, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
         x += 80;
         SetTextColor(hdc, GetAccentColor(true));
         wchar_t u_full[64]; swprintf_s(u_full, 64, L"\u2191 %s", up_str);
@@ -2103,8 +2126,8 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
         SetTextColor(hdc, GetSecondaryTextColor());
         RECT rc = { PADDING, y, w - PADDING, y + 60 };
         const wchar_t* msg = is_hist
-            ? L"\u6682\u65E0\u5386\u53F2\u6570\u636E\n\u4F7F\u7528\u4E00\u6BB5\u65F6\u95F4\u540E\u8FD9\u91CC\u5C06\u663E\u793A\u6D41\u91CF\u7EDF\u8BA1"
-            : L"\u65E0\u6D3B\u8DC3\u8FDB\u7A0B\n\u6B63\u5728\u76D1\u63A7\u7F51\u7EDC\u6D41\u91CF...";
+            ? TR(L"\u6682\u65E0\u5386\u53F2\u6570\u636E\n\u4F7F\u7528\u4E00\u6BB5\u65F6\u95F4\u540E\u8FD9\u91CC\u5C06\u663E\u793A\u6D41\u91CF\u7EDF\u8BA1")
+            : TR(L"\u65E0\u6D3B\u8DC3\u8FDB\u7A0B\n\u6B63\u5728\u76D1\u63A7\u7F51\u7EDC\u6D41\u91CF...");
         DrawTextW(hdc, msg, -1, &rc, DT_CENTER | DT_VCENTER | DT_WORDBREAK);
         SelectObject(hdc, hOldFont);
         return;
@@ -2265,9 +2288,9 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
                 FillRect(hdc, &pid_rc, m_br_child);
                 wchar_t pid_text[64];
                 if (row.pid > 0)
-                    swprintf_s(pid_text, 64, L"\u8FDB\u7A0BID: %u", row.pid);
+                    swprintf_s(pid_text, 64, TR(L"\u8FDB\u7A0BID: %u"), row.pid);
                 else
-                    swprintf_s(pid_text, 64, L"\u5386\u53F2\u8BB0\u5F55");
+                    swprintf_s(pid_text, 64, TR(L"\u5386\u53F2\u8BB0\u5F55"));
                 DrawTextW(hdc, pid_text, -1, &pid_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
                 HPEN hOldPen2 = (HPEN)SelectObject(hdc, m_pen_border_exp);
                 MoveToEx(hdc, PADDING, child_y + CHILD_ROW_H - 1, NULL);
@@ -2303,7 +2326,7 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
                 FillRect(hdc, &sp_rc, m_br_child);
                 wchar_t sp_text[128];
                 if (row.sub_processes.size() > 1)
-                    swprintf_s(sp_text, 128, L"\u8FDB\u7A0B%d (PID: %u)", sp_idx, sp.pid);
+                    swprintf_s(sp_text, 128, TR(L"\u8FDB\u7A0B%d (PID: %u)"), sp_idx, sp.pid);
                 else
                     swprintf_s(sp_text, 128, L"PID: %u", sp.pid);
                 SetTextColor(hdc, GetAccentColor(false));
@@ -2346,7 +2369,7 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
                     RECT title_rc = { PADDING + (int)(32 * m_dpi_scale) + SUBPROC_INDENT, child_y, w - PADDING, child_y + CHILD_ROW_H };
                     FillRect(hdc, &title_rc, m_br_child);
                     SetTextColor(hdc, GetSecondaryTextColor());
-                    DrawTextW(hdc, L"\u8FDE\u63A5\u5217\u8868:", -1, &title_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+                    DrawTextW(hdc, TR(L"\u8FDE\u63A5\u5217\u8868:"), -1, &title_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
                     child_y += CHILD_ROW_H;
 
                     // Table header
@@ -2429,9 +2452,9 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
                         RECT more_rc = { PADDING + (int)(32 * m_dpi_scale) + SUBPROC_INDENT, child_y, w - PADDING, child_y + CONN_ROW_H };
                         wchar_t more_text[64];
                         if (sp.conn_expanded) {
-                            swprintf_s(more_text, L"\u6536\u7F29\u8FDE\u63A5\u5217\u8868 (\u70B9\u51FB\u6536\u8D77, \u5171 %d \u4E2A\u8FDE\u63A5)", (int)sp.connections.size());
+                            swprintf_s(more_text, TR(L"\u6536\u7F29\u8FDE\u63A5\u5217\u8868 (\u70B9\u51FB\u6536\u8D77, \u5171 %d \u4E2A\u8FDE\u63A5)"), (int)sp.connections.size());
                         } else {
-                            swprintf_s(more_text, L"... \u8FD8\u6709 %d \u4E2A\u8FDE\u63A5 (\u70B9\u51FB\u5C55\u5F00)", (int)sp.connections.size() - MAX_CONN_ROWS);
+                            swprintf_s(more_text, TR(L"... \u8FD8\u6709 %d \u4E2A\u8FDE\u63A5 (\u70B9\u51FB\u5C55\u5F00)"), (int)sp.connections.size() - MAX_CONN_ROWS);
                         }
                         DrawTextW(hdc, more_text, -1, &more_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
                         child_y += CONN_ROW_H;

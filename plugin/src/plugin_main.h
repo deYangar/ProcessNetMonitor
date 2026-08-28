@@ -6,6 +6,7 @@
 #include "etw_capture.h"
 #include "tooltip_popup.h"
 #include "detail_window.h"
+#include "i18n.h"
 #include <unordered_map>
 #include <deque>
 #include <map>

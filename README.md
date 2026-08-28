@@ -125,6 +125,8 @@ ProcessNetMonitor/
 │   │   ├── plugin_main.h / .cpp # 插件主体（3个item：Up/Down/透明区域）
 │   │   ├── tooltip_popup.h/.cpp # 富文本悬浮信息窗口
 │   │   ├── detail_window.h/.cpp # 火绒风格详情窗口
+│   │   ├── i18n.h / .cpp        # 轻量本地化模块（多语言支持）
+│   │   ├── lang/English.ini     # 英文语言文件（与 TM 语言文件同格式）
 │   │   ├── resource.rc          # 资源文件（图标）
 │   │   ├── app.ico              # 插件图标
 │   ├── ProcessNetMonitor.dll         # 64 位编译输出
@@ -134,6 +136,27 @@ ProcessNetMonitor/
 │       └── plugins/             # 插件DLL放这里
 └── README.md
 ```
+
+## 多语言（Localization）
+
+插件 UI 默认中文，支持跟随 TrafficMonitor 主程序语言自动切换（v1.15.0+）：
+
+- 语言文件位于 `plugins/lang/`（与 DLL 同目录），格式与 TM 的 `language/*.ini` 完全一致
+  （UTF-8 BOM，`[text]` section，`KEY = "value"`）
+- 中文为内置兜底：未找到语言文件或 key 未翻译时，自动显示中文原文，不影响使用
+- 目前内置 **English**；**Indonesian** 等语言由社区贡献（见下）
+- IP 归属地国家名（ip2region 数据）暂未翻译，属二期计划
+
+### 贡献翻译
+
+无需编译，只需提交一个 ini 文件：
+
+1. 复制 `plugins/lang/English.ini` 为 `plugins/lang/<语言名>.ini`
+2. 修改 `[general]` 的 `BCP_47`（如 `id-ID`）与 `DISPLAY_NAME`，并在 `TRANSLATOR` 署名
+3. 把 `[text]` 中每个 `"英文"` 翻译成你的语言（**key 保持中文原文不变**）
+4. 放到 `plugin/src/lang/` 目录并提交 PR
+
+语言文件命名与 `BCP_47` 的对应关系见 `plugin/src/i18n.cpp` 的 `LangFileFromBcp47()`。
 
 ## TM 配置
 
@@ -169,6 +192,10 @@ ProcessNetMonitor/
 - **遇到闪退时**：把 `debug/` 目录（含 crash.log、werdumps 下的 .dmp）连同 DLL 版本一起反馈即可定位。
 
 ## 版本历史
+
+### v1.15.0 (2026-08-28)
+- **多语言支持**（issue #10）：插件 UI 跟随 TM 主程序语言自动切换，内置 English，中文为默认兜底；语言文件 `plugins/lang/*.ini` 与 TM 同格式，社区可无编译贡献翻译（欢迎 Indonesian）
+- **本地化基础设施**：新增 `i18n.h/.cpp` 轻量本地化模块（UTF-8 ini 解析 + `TR()` 宏 + BCP-47 语言检测），83 个用户可见字符串全部接入
 
 ### v1.14.0 (2026-08-27)
 - **历史流量自然日统计**（issue #9）：原「24小时/3天/7天/30天」滑动窗口跨两个自然日、不符合日常习惯，改为按本地时间 0 点对齐的「今日/昨日/近3天/近7天/近30天」5 档；昨日为完整自然日，平均速度固定按 86400 秒计算

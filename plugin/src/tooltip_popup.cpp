@@ -541,7 +541,7 @@ void CTooltipPopup::OnPaint() {
     }
 
     // === Upload section ===
-    DrawSectionTitle(memDC, y, L"\u25B2 \u5B9E\u65F6\u4E0A\u4F20", true);
+    DrawSectionTitle(memDC, y, TR(L"\u25B2 \u5B9E\u65F6\u4E0A\u4F20"), true);
     y += SECTION_H;
 
     // Upload section: show processes with upload activity first, then fill with historical
@@ -564,13 +564,13 @@ void CTooltipPopup::OnPaint() {
     if (up_count == 0) {
         SetTextColor(memDC, m_dark_mode ? RGB(120, 120, 120) : RGB(160, 160, 160));
         RECT rc = { PADDING + 2, y, w - PADDING, y + ROW_HEIGHT };
-        DrawTextW(memDC, L"\u65E0\u4E0A\u4F20\u6D41\u91CF", -1, &rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        DrawTextW(memDC, TR(L"\u65E0\u4E0A\u4F20\u6D41\u91CF"), -1, &rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
         y += ROW_HEIGHT;
     }
     y += GAP_H;
 
     // === Download section ===
-    DrawSectionTitle(memDC, y, L"\u25BC \u5B9E\u65F6\u4E0B\u8F7D", false);
+    DrawSectionTitle(memDC, y, TR(L"\u25BC \u5B9E\u65F6\u4E0B\u8F7D"), false);
     y += SECTION_H;
 
     // Download section: show processes with download activity first, then fill
@@ -592,7 +592,7 @@ void CTooltipPopup::OnPaint() {
     if (down_count == 0) {
         SetTextColor(memDC, m_dark_mode ? RGB(120, 120, 120) : RGB(160, 160, 160));
         RECT rc = { PADDING + 2, y, w - PADDING, y + ROW_HEIGHT };
-        DrawTextW(memDC, L"\u65E0\u4E0B\u8F7D\u6D41\u91CF", -1, &rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        DrawTextW(memDC, TR(L"\u65E0\u4E0B\u8F7D\u6D41\u91CF"), -1, &rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
         y += ROW_HEIGHT;
     }
     y += BTN_AREA_H - BTN_H;
@@ -612,7 +612,7 @@ void CTooltipPopup::OnPaint() {
 
     HFONT hOldBtnFont = (HFONT)SelectObject(memDC, m_font_small);
     SetTextColor(memDC, m_dark_mode ? RGB(255, 165, 0) : RGB(230, 126, 34));
-    DrawTextW(memDC, L"\u67E5\u770B\u8BE6\u7EC6", -1, &m_rcDetailBtn, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+    DrawTextW(memDC, TR(L"\u67E5\u770B\u8BE6\u7EC6"), -1, &m_rcDetailBtn, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
     SelectObject(memDC, hOldBtnFont);
 
     // Cleanup

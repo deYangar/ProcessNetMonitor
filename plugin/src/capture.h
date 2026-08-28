@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <functional>
 #include <set>
+#include "i18n.h"
 
 struct ProcTraffic {
     DWORD pid = 0;

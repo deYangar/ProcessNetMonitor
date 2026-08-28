@@ -1,6 +1,7 @@
 #include "plugin_main.h"
 #include "utils.h"
 #include "ip_geo.h"
+#include "i18n.h"
 #include <algorithm>
 #include <shellapi.h>
 #include <dbghelp.h>
@@ -223,14 +224,14 @@ static const wchar_t* EtwPopupStatus(const EtwCapture* cap) {
         if (st && wcsstr(st, L"attach") != nullptr) {
             const wchar_t* owner = cap->OwnerText();
             if (owner && owner[0]) {
-                swprintf_s(buf, 512, L"\u26a0 \u9644\u52a0\u6a21\u5f0f\uff1aNT Kernel Logger \u7591\u4f3c\u88ab %s \u5360\u7528\uff0c\u5927\u6d41\u91cf\u65f6\u53ef\u80fd\u4e22\u4e8b\u4ef6\uff0c\u5efa\u8bae\u5173\u95ed\u540e\u91cd\u542f TM", owner);
+                swprintf_s(buf, 512, TR(L"\u26a0 \u9644\u52a0\u6a21\u5f0f\uff1aNT Kernel Logger \u7591\u4f3c\u88ab %s \u5360\u7528\uff0c\u5927\u6d41\u91cf\u65f6\u53ef\u80fd\u4e22\u4e8b\u4ef6\uff0c\u5efa\u8bae\u5173\u95ed\u540e\u91cd\u542f TM"), owner);
             } else {
-                swprintf_s(buf, 512, L"\u26a0 \u9644\u52a0\u6a21\u5f0f\uff1aNT Kernel Logger \u88ab\u5176\u4ed6\u7a0b\u5e8f\u5360\u7528\uff0c\u5927\u6d41\u91cf\u65f6\u53ef\u80fd\u4e22\u4e8b\u4ef6\uff0c\u5efa\u8bae\u5173\u95ed AppNetworkCounter \u540e\u91cd\u542f TM");
+                swprintf_s(buf, 512, TR(L"\u26a0 \u9644\u52a0\u6a21\u5f0f\uff1aNT Kernel Logger \u88ab\u5176\u4ed6\u7a0b\u5e8f\u5360\u7528\uff0c\u5927\u6d41\u91cf\u65f6\u53ef\u80fd\u4e22\u4e8b\u4ef6\uff0c\u5efa\u8bae\u5173\u95ed AppNetworkCounter \u540e\u91cd\u542f TM"));
             }
             return buf;
         }
     } else if (cap->IsRunning()) {
-        return L"\u26a0 ETW \u4e0d\u53ef\u7528\uff0c\u5df2\u56de\u9000\u65e7\u91c7\u96c6\uff0c\u6570\u636e\u53ef\u80fd\u51c6\u786e\u964d\u4f4e";
+        return TR(L"\u26a0 ETW \u4e0d\u53ef\u7528\uff0c\u5df2\u56de\u9000\u65e7\u91c7\u96c6\uff0c\u6570\u636e\u53ef\u80fd\u51c6\u786e\u964d\u4f4e");
     }
     return nullptr;
 }
@@ -260,7 +261,7 @@ static void FmtSpeed(double bps, wchar_t* buf, int n) {
 }
 
 const wchar_t* CProcessNetItem::GetItemName() const {
-    if (m_dir == DIR_TRANSPARENT) return L"\u900F\u660E\u533A\u57DF";
+    if (m_dir == DIR_TRANSPARENT) return TR(L"\u900F\u660E\u533A\u57DF");
     return m_dir == DIR_UPLOAD ? L"Up" : L"Down";
 }
 const wchar_t* CProcessNetItem::GetItemId() const {
@@ -275,7 +276,7 @@ const wchar_t* CProcessNetItem::GetItemValueText() const {
     return s_value_buf[m_dir];
 }
 const wchar_t* CProcessNetItem::GetItemValueSampleText() const {
-    if (m_dir == DIR_TRANSPARENT) return L"\u900F\u660E\u533A\u57DF";
+    if (m_dir == DIR_TRANSPARENT) return TR(L"\u900F\u660E\u533A\u57DF");
     return m_dir == DIR_UPLOAD ? L"U:chrome.exe 5.6KB/s" : L"D:mihomo 1.4KB/s";
 }
 
@@ -491,7 +492,7 @@ void CProcessNetPlugin::DataRequired() {
             }
             swprintf_s(CProcessNetItem::s_value_buf[0], 256, L"ERR: %s", m_capture.GetLastError());
             swprintf_s(CProcessNetItem::s_value_buf[1], 256, L"ERR: %s", m_capture.GetLastError());
-            swprintf_s(m_tooltip, 2048, L"Process Net Monitor\n\u26a0 \u542f\u52a8\u5931\u8d25\uff1a%s\n\n%s",
+            swprintf_s(m_tooltip, 2048, TR(L"Process Net Monitor\n\u26a0 \u542f\u52a8\u5931\u8d25\uff1a%s\n\n%s"),
                        m_capture.GetLastError(), m_capture.GetErrorDetail());
         }
         return;
@@ -566,9 +567,9 @@ void CProcessNetPlugin::BuildTooltip(bool etw_active, const std::vector<ProcTraf
             wchar_t warn[600];
             const wchar_t* owner = m_etw_cap.OwnerText();
             if (owner && owner[0])
-                swprintf_s(warn, 600, L"Process Net Monitor (ETW-attach)\n\u26a0 \u9644\u52a0\u6a21\u5f0f\uff1aNT Kernel Logger \u7591\u4f3c\u88ab %s \u5360\u7528\uff0c\u5927\u6d41\u91cf\u65f6\u53ef\u80fd\u4e22\u4e8b\u4ef6\uff0c\u5efa\u8bae\u5173\u95ed\u540e\u91cd\u542f TM\n", owner);
+                swprintf_s(warn, 600, TR(L"Process Net Monitor (ETW-attach)\n\u26a0 \u9644\u52a0\u6a21\u5f0f\uff1aNT Kernel Logger \u7591\u4f3c\u88ab %s \u5360\u7528\uff0c\u5927\u6d41\u91cf\u65f6\u53ef\u80fd\u4e22\u4e8b\u4ef6\uff0c\u5efa\u8bae\u5173\u95ed\u540e\u91cd\u542f TM\n"), owner);
             else
-                swprintf_s(warn, 600, L"Process Net Monitor (ETW-attach)\n\u26a0 \u9644\u52a0\u6a21\u5f0f\uff1aNT Kernel Logger \u88ab\u5176\u4ed6\u7a0b\u5e8f\u5360\u7528\uff0c\u5927\u6d41\u91cf\u65f6\u53ef\u80fd\u4e22\u4e8b\u4ef6\uff0c\u5efa\u8bae\u5173\u95ed AppNetworkCounter \u540e\u91cd\u542f TM\n");
+                swprintf_s(warn, 600, TR(L"Process Net Monitor (ETW-attach)\n\u26a0 \u9644\u52a0\u6a21\u5f0f\uff1aNT Kernel Logger \u88ab\u5176\u4ed6\u7a0b\u5e8f\u5360\u7528\uff0c\u5927\u6d41\u91cf\u65f6\u53ef\u80fd\u4e22\u4e8b\u4ef6\uff0c\u5efa\u8bae\u5173\u95ed AppNetworkCounter \u540e\u91cd\u542f TM\n"));
             wcscpy_s(m_tooltip, 2048, warn);
         } else {
             wcscpy_s(m_tooltip, 2048, L"Process Net Monitor (ETW)\n");
@@ -773,6 +774,27 @@ const wchar_t* CProcessNetPlugin::GetTooltipInfo() {
 
 void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
     m_app = p;
+
+    // ---- 本地化：检测 TM 当前语言，加载插件语言文件（DLL 同目录 lang\） ----
+    // 语言文件与 TM 的 language\*.ini 同格式（UTF-8 BOM + [text] section）。
+    // 加载失败/无对应文件时 TR() 返回中文原文兜底，不影响使用。
+    {
+        wchar_t dll_path[MAX_PATH] = {};
+        GetModuleFileNameW(s_dll_hinst ? s_dll_hinst : (HINSTANCE)GetModuleHandleW(NULL), dll_path, MAX_PATH);
+        std::wstring dll_dir(dll_path);
+        size_t slash = dll_dir.find_last_of(L"\\");
+        if (slash != std::wstring::npos) {
+            dll_dir = dll_dir.substr(0, slash);
+            std::wstring lang_file = L"Simplified_Chinese.ini";
+            const wchar_t* bcp = (m_app ? m_app->GetStringRes(L"BCP_47", L"general") : nullptr);
+            if (bcp && bcp[0]) {
+                lang_file = I18n::LangFileFromBcp47(bcp);
+            }
+            std::wstring lang_path = dll_dir + L"\\lang\\" + lang_file;
+            I18n::Load(lang_path);
+        }
+    }
+
     // Crash diagnostics: the filter catches normal unhandled exceptions;
     // the vectored handler also has a chance to catch failfast termination
     // (e.g. heap corruption 0xc0000374), which bypasses the filter.
@@ -1145,7 +1167,7 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
     switch (msg) {
     case WM_CREATE: {
         // Transparent area width label
-        CreateWindowW(L"STATIC", L"\x900F\x660E\x533A\x57DF\x5BBD\x5EA6\xFF08px\xFF09:",
+        CreateWindowW(L"STATIC", TR(L"\x900F\x660E\x533A\x57DF\x5BBD\x5EA6\xFF08px\xFF09:"),
             WS_CHILD | WS_VISIBLE, 10, 12, 200, 20, hwnd, (HMENU)1002, nullptr, nullptr);
         // Width edit
         wchar_t width_buf[16];
@@ -1155,7 +1177,7 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             260, 10, 110, 24, hwnd, (HMENU)1003, nullptr, nullptr);
 
         // Refresh interval label + combo (100/250/500/1000 ms)
-        CreateWindowW(L"STATIC", L"\x5237\x65B0\x95F4\x9694\xFF08ms\xFF09:",
+        CreateWindowW(L"STATIC", TR(L"\x5237\x65B0\x95F4\x9694\xFF08ms\xFF09:"),
             WS_CHILD | WS_VISIBLE, 10, 44, 130, 20, hwnd, (HMENU)1005, nullptr, nullptr);
         HWND hCombo = CreateWindowW(L"COMBOBOX", L"",
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
@@ -1170,7 +1192,7 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         }
 
         // 启用归属地显示 checkbox (第3行)
-        CreateWindowW(L"BUTTON", L"\u542F\u7528\u8FDE\u63A5\u5F52\u5C5E\u5730\u663E\u793A\uFF08\u5173\u95ED\u540E\u4E0D\u4E0B\u8F7D\u5E93\uFF09",
+        CreateWindowW(L"BUTTON", TR(L"\u542F\u7528\u8FDE\u63A5\u5F52\u5C5E\u5730\u663E\u793A\uFF08\u5173\u95ED\u540E\u4E0D\u4E0B\u8F7D\u5E93\uFF09"),
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
             10, 70, 340, 22, hwnd, (HMENU)1012, nullptr, nullptr);
         if (IpGeo::Instance().IsEnabled())
@@ -1178,16 +1200,16 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
 
         // ---- IP 库设置 ----
         // 代理服务器 label + edit (placeholder 提示)
-        CreateWindowW(L"STATIC", L"IP\u5E93\u4E0B\u8F7D\u8D70\u4EE3\u7406\u5730\u5740\uFF08\u652F\u6301 http/socks5\uFF0C\u7559\u7A7A=\u76F4\u8FDE\uFF09",
+        CreateWindowW(L"STATIC", TR(L"IP\u5E93\u4E0B\u8F7D\u8D70\u4EE3\u7406\u5730\u5740\uFF08\u652F\u6301 http/socks5\uFF0C\u7559\u7A7A=\u76F4\u8FDE\uFF09"),
             WS_CHILD | WS_VISIBLE, 10, 100, 470, 20, hwnd, (HMENU)1010, nullptr, nullptr);
         HWND hProxyEdit = CreateWindowW(L"EDIT", IpGeo::Instance().GetProxy().c_str(),
             WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
             10, 122, 460, 24, hwnd, (HMENU)1007, nullptr, nullptr);
         // 占位提示 (EM_SETCUEBANNER 由 comctl32 处理, 无需额外样式; 注意 0x2000 是 ES_NUMBER 不能加!)
-        SendMessageW(hProxyEdit, EM_SETCUEBANNER, TRUE, (LPARAM)L"http://127.0.0.1:7890 \u6216 socks5://127.0.0.1:1080 \u7B49");
+        SendMessageW(hProxyEdit, EM_SETCUEBANNER, TRUE, (LPARAM)TR(L"http://127.0.0.1:7890 \u6216 socks5://127.0.0.1:1080 \u7B49"));
 
         // 更新间隔 label + edit
-        CreateWindowW(L"STATIC", L"IP\u5E93\u81EA\u52A8\u66F4\u65B0\u95F4\u9694\uFF08\u5929\uFF0C\u9ED8\u8BA47\uFF09",
+        CreateWindowW(L"STATIC", TR(L"IP\u5E93\u81EA\u52A8\u66F4\u65B0\u95F4\u9694\uFF08\u5929\uFF0C\u9ED8\u8BA47\uFF09"),
             WS_CHILD | WS_VISIBLE, 10, 154, 250, 20, hwnd, (HMENU)1011, nullptr, nullptr);
         wchar_t days_buf[16];
         swprintf_s(days_buf, L"%d", IpGeo::Instance().GetUpdateDays());
@@ -1196,12 +1218,12 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             265, 152, 50, 24, hwnd, (HMENU)1008, nullptr, nullptr);
 
         // 立即更新按钮
-        CreateWindowW(L"BUTTON", L"\u7ACB\u5373\u66F4\u65B0",
+        CreateWindowW(L"BUTTON", TR(L"\u7ACB\u5373\u66F4\u65B0"),
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 325, 152, 95, 24, hwnd, (HMENU)1009, nullptr, nullptr);
 
         // Debug-log checkbox (default OFF)
         CreateWindowW(L"BUTTON",
-            L"\u8C03\u8BD5\u65E5\u5FD7\uFF08\u5199\u5165\u63D2\u4EF6\u76EE\u5F55 debug\\\uFF09",
+            TR(L"\u8C03\u8BD5\u65E5\u5FD7\uFF08\u5199\u5165\u63D2\u4EF6\u76EE\u5F55 debug\\\uFF09"),
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
             10, 186, 460, 22, hwnd, (HMENU)1006, nullptr, nullptr);
         if (CProcessNetPlugin::Instance().m_detail.GetDebugLogs())
@@ -1212,7 +1234,7 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         // Only controls GetTooltipInfo(); the resident Up/Down items are
         // unaffected.
         CreateWindowW(L"BUTTON",
-            L"\u5728 TrafficMonitor \u9F20\u6807\u60AC\u505C\u63D0\u793A\u4E2D\u663E\u793A\u8FDB\u7A0B\u7F51\u901F\u4FE1\u606F",
+            TR(L"\u5728 TrafficMonitor \u9F20\u6807\u60AC\u505C\u63D0\u793A\u4E2D\u663E\u793A\u8FDB\u7A0B\u7F51\u901F\u4FE1\u606F"),
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
             10, 214, 460, 22, hwnd, (HMENU)1013, nullptr, nullptr);
         if (CProcessNetItem::s_show_speed_items)
@@ -1289,7 +1311,7 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         if (LOWORD(wp) == 1009) {
             IpGeo::Instance().ForceUpdate();
             EnableWindow(GetDlgItem(hwnd, 1009), FALSE);
-            SetWindowTextW(GetDlgItem(hwnd, 1009), L"\u66F4\u65B0\u4E2D...");  // 更新中...
+            SetWindowTextW(GetDlgItem(hwnd, 1009), TR(L"\u66F4\u65B0\u4E2D..."));  // 更新中...
             return 0;
         }
         break;
@@ -1318,7 +1340,7 @@ ITMPlugin::OptionReturn CProcessNetPlugin::ShowOptionsDialog(void* hParent) {
     HWND hwnd = CreateWindowExW(
         WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
         L"ProcessNetMonitorOptionsDlg",
-        L"\x63D2\x4EF6\x8BBE\x7F6E",
+        TR(L"\x63D2\x4EF6\x8BBE\x7F6E"),
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
         0, 0, 500, 370,
         (HWND)hParent, nullptr, GetModuleHandleW(NULL), nullptr
