@@ -229,6 +229,12 @@ void SetLang(const std::wstring& bcp47_or_auto) {
 
 const std::wstring& GetLang() { return g_mode; }
 
+bool IsChinese() {
+    std::wstring lang = (g_mode == L"auto") ? g_tm_lang : g_mode;
+    if (lang.empty()) lang = L"zh-CN";
+    return MainLang(lang) == L"zh";
+}
+
 void SetTmLang(const std::wstring& bcp47) {
     g_tm_lang = bcp47;
 }

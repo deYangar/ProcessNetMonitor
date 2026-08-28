@@ -57,6 +57,10 @@ std::wstring LangFileFromBcp47(const std::wstring& bcp47);
 // 由插件的刷新定时器周期性调用（低频），返回 true 表示语言已变化需要刷新 UI。
 bool CheckAndReload(const std::wstring& tm_lang);
 
+// 当前生效语言是否中文（主语言 zh）：auto 模式看 TM 语言，手动模式看所选 BCP-47。
+// IP 归属地等模块按语言选择数据展示格式（中文映射表 vs 数据原文）。
+bool IsChinese();
+
 } // namespace I18n
 
 // TR = Translate：包装用户可见字符串。

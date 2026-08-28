@@ -1,6 +1,7 @@
 ﻿// ip_geo.cpp - 离线 IP 归属地查询 (ip2region xdb v3) + 自动下载
 #include "ip_geo.h"
 #include "detail_window.h"
+#include "i18n.h"
 #include <ws2tcpip.h>
 #include <cstring>
 
@@ -179,19 +180,32 @@ std::wstring IpGeo::FormatRegion(const std::string& region) {
         return w;
     };
 
-    if (iso == "CN") {
-        out = L"\u4E2D\u56FD";  // 中国
-        std::wstring wp = utf8_to_wide(prov), wc = utf8_to_wide(city), wi = utf8_to_wide(isp);
-        if (!wp.empty()) out += L" " + wp;
-        if (!wc.empty()) out += L" " + wc;
-        if (!wi.empty()) out += L" " + wi;
+    if (I18n::IsChinese()) {
+        if (iso == "CN") {
+            out = L"\u4E2D\u56FD";  // 中国
+            std::wstring wp = utf8_to_wide(prov), wc = utf8_to_wide(city), wi = utf8_to_wide(isp);
+            if (!wp.empty()) out += L" " + wp;
+            if (!wc.empty()) out += L" " + wc;
+            if (!wi.empty()) out += L" " + wi;
+        } else {
+            std::wstring cn = GetCountryName(iso);
+            if (!cn.empty()) out = cn; else out = utf8_to_wide(country);
+            std::wstring wp = utf8_to_wide(prov), wc = utf8_to_wide(city), wi = utf8_to_wide(isp);
+            if (!wp.empty()) out += L" " + wp;
+            if (!wc.empty()) out += L" " + wc;
+            if (!wi.empty()) out += L" " + wi;
+        }
     } else {
-        std::wstring cn = GetCountryName(iso);
-        if (!cn.empty()) out = cn; else out = utf8_to_wide(country);
-        std::wstring wp = utf8_to_wide(prov), wc = utf8_to_wide(city), wi = utf8_to_wide(isp);
-        if (!wp.empty()) out += L" " + wp;
-        if (!wc.empty()) out += L" " + wc;
-        if (!wi.empty()) out += L" " + wi;
+        // 非中文界面：直接用 xdb 数据原文（ip2region_v4 数据国外字段为英文国家/省/市）
+        if (iso == "CN") {
+            out = TR(L"\u4E2D\u56FD");  // 国内段数据是中文，非中文界面只显示国家名
+        } else {
+            out = utf8_to_wide(country);
+            std::wstring wp = utf8_to_wide(prov), wc = utf8_to_wide(city), wi = utf8_to_wide(isp);
+            if (!wp.empty()) out += L" " + wp;
+            if (!wc.empty()) out += L" " + wc;
+            if (!wi.empty()) out += L" " + wi;
+        }
     }
     return out;
 }
@@ -208,9 +222,9 @@ IpGeo::~IpGeo() {
 
 const wchar_t* IpGeo::StateText() const {
     switch (m_state.load()) {
-    case DbState::Downloading: return L"\u4E0B\u8F7DIP\u5E93\u2026";  // 下载IP库…
-    case DbState::Failed:      return L"IP\u5E93\u5931\u8D25";        // IP库失败
-    case DbState::NoDb:        return L"IP\u5E93\u672A\u5C31\u7EEA";  // IP库未就绪
+    case DbState::Downloading: return TR(L"\u4E0B\u8F7DIP\u5E93\u2026");  // 下载IP库…
+    case DbState::Failed:      return TR(L"IP\u5E93\u5931\u8D25");        // IP库失败
+    case DbState::NoDb:        return TR(L"IP\u5E93\u672A\u5C31\u7EEA");  // IP库未就绪
     default:                   return L"";
     }
 }
@@ -569,14 +583,14 @@ std::wstring IpGeo::Lookup(const std::wstring& ip) {
         if ((v4 & 0xFFC00000) == 0x64400000) return L"";         // 100.64.0.0/10 电信级NAT
         if ((v4 & 0xF0000000) == 0xE0000000) return L"";         // 224.0.0.0/4 组播
         // 特殊保留段: 显示 "保留地址"
-        if ((v4 & 0xFFFFFF00) == 0xC0000000) return L"\u4FDD\u7559\u5730\u5740";  // 192.0.0.0/24 IANA
-        if ((v4 & 0xFFFFFF00) == 0xC0000200) return L"\u4FDD\u7559\u5730\u5740";  // 192.0.2.0/24 TEST-NET
-        if ((v4 & 0xFFFFFF00) == 0xC0586300) return L"\u4FDD\u7559\u5730\u5740";  // 192.88.99.0/24 6to4
-        if ((v4 & 0xFFFE0000) == 0xC6120000) return L"\u4FDD\u7559\u5730\u5740";  // 198.18.0.0/15 基准测试
-        if ((v4 & 0xFFFFFF00) == 0xC6336400) return L"\u4FDD\u7559\u5730\u5740";  // 198.51.100.0/24 TEST-NET-2
-        if ((v4 & 0xFFFFFF00) == 0xCB007100) return L"\u4FDD\u7559\u5730\u5740";  // 203.0.113.0/24 TEST-NET-3
-        if ((v4 & 0xFFFFFF00) == 0xE9FC0000) return L"\u4FDD\u7559\u5730\u5740";  // 233.252.0.0/24 MCAST-TEST-NET
-        if ((v4 & 0xF0000000) == 0xF0000000) return L"\u4FDD\u7559\u5730\u5740";  // 240.0.0.0/4 保留
+        if ((v4 & 0xFFFFFF00) == 0xC0000000) return TR(L"\u4FDD\u7559\u5730\u5740");  // 192.0.0.0/24 IANA
+        if ((v4 & 0xFFFFFF00) == 0xC0000200) return TR(L"\u4FDD\u7559\u5730\u5740");  // 192.0.2.0/24 TEST-NET
+        if ((v4 & 0xFFFFFF00) == 0xC0586300) return TR(L"\u4FDD\u7559\u5730\u5740");  // 192.88.99.0/24 6to4
+        if ((v4 & 0xFFFE0000) == 0xC6120000) return TR(L"\u4FDD\u7559\u5730\u5740");  // 198.18.0.0/15 基准测试
+        if ((v4 & 0xFFFFFF00) == 0xC6336400) return TR(L"\u4FDD\u7559\u5730\u5740");  // 198.51.100.0/24 TEST-NET-2
+        if ((v4 & 0xFFFFFF00) == 0xCB007100) return TR(L"\u4FDD\u7559\u5730\u5740");  // 203.0.113.0/24 TEST-NET-3
+        if ((v4 & 0xFFFFFF00) == 0xE9FC0000) return TR(L"\u4FDD\u7559\u5730\u5740");  // 233.252.0.0/24 MCAST-TEST-NET
+        if ((v4 & 0xF0000000) == 0xF0000000) return TR(L"\u4FDD\u7559\u5730\u5740");  // 240.0.0.0/4 保留
 
         std::string region = XdbSearch(m_buf, v4);
         if (region.empty()) return L"";
@@ -601,18 +615,18 @@ std::wstring IpGeo::Lookup(const std::wstring& ip) {
     {
         bool all_zero = true;
         for (int i = 0; i < 16; i++) if (b6[i] != 0) { all_zero = false; break; }
-        if (all_zero) return L"\u4FDD\u7559\u5730\u5740";                    // ::/128 未指定
+        if (all_zero) return TR(L"\u4FDD\u7559\u5730\u5740");                    // ::/128 未指定
         bool loopback = true;
         for (int i = 0; i < 15; i++) if (b6[i] != 0) { loopback = false; break; }
         if (loopback && b6[15] == 1) return L"";                             // ::1/128 环回
         if ((b6[0] & 0xFE) == 0xFC) return L"";                              // fc00::/7 专用网络
         if (b6[0] == 0xFE && (b6[1] & 0xC0) == 0x80) return L"";             // fe80::/10 链路本地
-        if (b6[0] == 0xFF) return L"\u4FDD\u7559\u5730\u5740";             // ff00::/8 组播
-        if (b6[0] == 0x01 && b6[1] == 0x00 && b6[2] == 0x00 && b6[3] == 0x00) return L"\u4FDD\u7559\u5730\u5740";  // 100::/64 黑洞
-        if (b6[0] == 0x64 && b6[1] == 0xFF && b6[2] == 0x9B && b6[3] == 0x00) return L"\u4FDD\u7559\u5730\u5740";  // 64:ff9b::/96 NAT64
-        if (b6[0] == 0x20 && b6[1] == 0x01 && b6[2] == 0x0D && b6[3] == 0xB8) return L"\u4FDD\u7559\u5730\u5740";  // 2001:db8::/32 文档
-        if (b6[0] == 0x20 && b6[1] == 0x01 && b6[2] == 0x00 && b6[3] == 0x00) return L"\u4FDD\u7559\u5730\u5740";  // 2001::/32 Teredo
-        if (b6[0] == 0x20 && b6[1] == 0x02) return L"\u4FDD\u7559\u5730\u5740";  // 2002::/16 6to4
+        if (b6[0] == 0xFF) return TR(L"\u4FDD\u7559\u5730\u5740");             // ff00::/8 组播
+        if (b6[0] == 0x01 && b6[1] == 0x00 && b6[2] == 0x00 && b6[3] == 0x00) return TR(L"\u4FDD\u7559\u5730\u5740");  // 100::/64 黑洞
+        if (b6[0] == 0x64 && b6[1] == 0xFF && b6[2] == 0x9B && b6[3] == 0x00) return TR(L"\u4FDD\u7559\u5730\u5740");  // 64:ff9b::/96 NAT64
+        if (b6[0] == 0x20 && b6[1] == 0x01 && b6[2] == 0x0D && b6[3] == 0xB8) return TR(L"\u4FDD\u7559\u5730\u5740");  // 2001:db8::/32 文档
+        if (b6[0] == 0x20 && b6[1] == 0x01 && b6[2] == 0x00 && b6[3] == 0x00) return TR(L"\u4FDD\u7559\u5730\u5740");  // 2001::/32 Teredo
+        if (b6[0] == 0x20 && b6[1] == 0x02) return TR(L"\u4FDD\u7559\u5730\u5740");  // 2002::/16 6to4
     }
     if (m_buf6.empty()) return L"";
     std::string region = XdbSearchV6(m_buf6, b6);
