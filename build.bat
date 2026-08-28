@@ -39,7 +39,7 @@ set PATH=%MSVC%\VC\Tools\MSVC\14.44.35207\bin\Hostx86\x86;%PATH%
 
 cl %COMMON_FLAGS% /FeProcessNetMonitor_x86.dll src\capture.cpp src\plugin_main.cpp src\tooltip_popup.cpp src\detail_window.cpp src\etw_capture.cpp src\ip_geo.cpp src\signature.cpp src\i18n.cpp /link %COMMON_LINK% /OUT:ProcessNetMonitor_x86.dll
 if %ERRORLEVEL% NEQ 0 (
-    echo BUILD FAILED (x86)
+    echo BUILD FAILED [x86]
     exit /b 1
 )
 echo === x86 Build OK ===
@@ -53,7 +53,7 @@ set PATH=%MSVC%\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64;%PATH%
 
 cl %COMMON_FLAGS% /FeProcessNetMonitor.dll src\capture.cpp src\plugin_main.cpp src\tooltip_popup.cpp src\detail_window.cpp src\etw_capture.cpp src\ip_geo.cpp src\signature.cpp src\i18n.cpp /link %COMMON_LINK% /OUT:ProcessNetMonitor.dll
 if %ERRORLEVEL% NEQ 0 (
-    echo BUILD FAILED (x64)
+    echo BUILD FAILED [x64]
     exit /b 1
 )
 echo === x64 Build OK ===
