@@ -464,7 +464,8 @@ void CDetailWindow::Show(HWND parent_wnd) {
 
     int aw = work.right - work.left;
     int ah = work.bottom - work.top;
-    // 窗口宽度跟随当前语言内容（用户拉伸过则保底），高度用用户保存值或默认
+    // 窗口宽度跟随当前语言内容（用户拉伸过则保底），高度不自动：
+    // 没手动拉过 → 固定默认 560*DPI；手动拉过 → 记住拉过的值
     AutoSizeColumns(true);
     FitWindowWidth();
     RECT rc;
@@ -1163,8 +1164,15 @@ void CDetailWindow::SaveSettings() {
     fprintf(f, "  \"transparent_width\": %d,\n", m_transparent_width);
     RECT rc;
     GetWindowRect(m_hwnd, &rc);
-    fprintf(f, "  \"win_w\": %d,\n", rc.right - rc.left);
-    fprintf(f, "  \"win_h\": %d,\n", rc.bottom - rc.top);
+    int ww = rc.right - rc.left, wh = rc.bottom - rc.top;
+    // 最小化/异常状态时 GetWindowRect 返回垃圾尺寸，改用上次用户确定的尺寸；
+    // 从未拉伸过（0）则不写，下次打开回退固定默认值
+    if (IsIconic(m_hwnd)) {
+        ww = m_saved_w;
+        wh = m_saved_h;
+    }
+    fprintf(f, "  \"win_w\": %d,\n", ww);
+    fprintf(f, "  \"win_h\": %d,\n", wh);
     // IP 归属地设置 (proxy / update_days / enabled)
     {
         const std::wstring& proxy = IpGeo::Instance().GetProxy();
