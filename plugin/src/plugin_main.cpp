@@ -1243,8 +1243,9 @@ static void OptionsApplyLanguageChange(HWND hwnd) {
 // Called after WM_CREATE and after runtime language changes.
 static void OptionsAdjustLayout(HWND hwnd) {
     const int MARGIN = 20;
-    const int CTRL_PAD = 8;
-    const int CHK_PAD = 28;   // checkbox/radio internal offset
+    const int CTRL_PAD = 12;
+    const int CHK_PAD = 32;   // checkbox/radio: 图标 + 内边距
+    const int BTN_PAD = 32;   // push button: 两侧内边距
     const int MIN_CTRL_W = 60; // 收缩下限，防止极端译文把控件缩没
 
     HFONT hDlgFont = (HFONT)SendMessageW(hwnd, WM_GETFONT, 0, 0);
@@ -1266,15 +1267,20 @@ static void OptionsAdjustLayout(HWND hwnd) {
             int needed = MIN_CTRL_W;
             if (buf[0]) {
                 DWORD style = (DWORD)GetWindowLongPtrW(hChild, GWL_STYLE);
-                bool is_push = (style & BS_PUSHBUTTON) != 0;
-                bool is_chk = (style & (BS_AUTOCHECKBOX | BS_AUTORADIOBUTTON)) != 0;
-                int pad = (is_push || is_chk) ? CHK_PAD : CTRL_PAD;
+                // BS_PUSHBUTTON == 0，不能直接用 style & BS_PUSHBUTTON 判断，
+                // 必须用 BS_TYPEMASK 比较（否则按钮永远拿不到内边距，文本被省略）
+                DWORD type = style & BS_TYPEMASK;
+                bool is_push = (type == BS_PUSHBUTTON);
+                bool is_chk = (type == BS_AUTOCHECKBOX || type == BS_AUTORADIOBUTTON);
+                int pad = is_push ? BTN_PAD : (is_chk ? CHK_PAD : CTRL_PAD);
                 // 用控件自身的字体测量（WM_CREATE 时已统一设为 DEFAULT_GUI_FONT），
                 // 不能用对话框字体——对话框本身没设字体，口径不一致会导致实测偏窄、文本折行
                 HFONT hCtrlFont = (HFONT)SendMessageW(hChild, WM_GETFONT, 0, 0);
                 if (!hCtrlFont) hCtrlFont = hDlgFont;
                 int text_w = PNM_MeasureText(hdc, hCtrlFont, buf);
-                needed = text_w + pad;
+                // 加 10% 冗余，抵消 GetTextExtent 与主题绘制（DrawThemeText）的舍入差异，
+                // 避免"刚好差 1-2px"触发省略号
+                needed = text_w + pad + text_w / 10 + 2;
                 if (needed < MIN_CTRL_W) needed = MIN_CTRL_W;
             }
 
@@ -1314,7 +1320,7 @@ static void OptionsAdjustLayout(HWND hwnd) {
             int w = PNM_MeasureText(hdc, hComboFont, tmp.data());
             if (w > max_item_w) max_item_w = w;
         }
-        int combo_w = max_item_w + 36;  // 文本 + 下拉箭头 + 边距
+        int combo_w = max_item_w + 40;  // 文本 + 下拉箭头 + 边距（含 10% 冗余）
         if (combo_w < 120) combo_w = 120;
         SendMessageW(hLangCombo, CB_SETDROPPEDWIDTH, (WPARAM)(combo_w - 6), 0);
         RECT rc;
