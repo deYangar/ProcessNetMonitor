@@ -775,26 +775,6 @@ const wchar_t* CProcessNetPlugin::GetTooltipInfo() {
 void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
     m_app = p;
 
-    // ---- 本地化：检测 TM 当前语言，加载插件语言文件（DLL 同目录 lang\） ----
-    // 语言文件与 TM 的 language\*.ini 同格式（UTF-8 BOM + [text] section）。
-    // 加载失败/无对应文件时 TR() 返回中文原文兜底，不影响使用。
-    {
-        wchar_t dll_path[MAX_PATH] = {};
-        GetModuleFileNameW(s_dll_hinst ? s_dll_hinst : (HINSTANCE)GetModuleHandleW(NULL), dll_path, MAX_PATH);
-        std::wstring dll_dir(dll_path);
-        size_t slash = dll_dir.find_last_of(L"\\");
-        if (slash != std::wstring::npos) {
-            dll_dir = dll_dir.substr(0, slash);
-            std::wstring lang_file = L"Simplified_Chinese.ini";
-            const wchar_t* bcp = (m_app ? m_app->GetStringRes(L"BCP_47", L"general") : nullptr);
-            if (bcp && bcp[0]) {
-                lang_file = I18n::LangFileFromBcp47(bcp);
-            }
-            std::wstring lang_path = dll_dir + L"\\lang\\" + lang_file;
-            I18n::Load(lang_path);
-        }
-    }
-
     // Crash diagnostics: the filter catches normal unhandled exceptions;
     // the vectored handler also has a chance to catch failfast termination
     // (e.g. heap corruption 0xc0000374), which bypasses the filter.
@@ -805,10 +785,6 @@ void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
     // Use DLL's HINSTANCE (not EXE's) so resource loading (icons, etc.) works
     HINSTANCE hInst = s_dll_hinst ? s_dll_hinst : (HINSTANCE)GetModuleHandleW(NULL);
     m_popup_created = m_popup.Initialize(hInst);
-    m_detail_created = m_detail.Initialize(hInst);
-    
-    // Set PacketCapture pointer for connection details
-    m_detail.SetCapture(&m_capture);
 
     // Use TM's plugin config dir + plugin name (GetPluginConfigDir returns the plugins/ folder)
     const wchar_t* cfg_base = p->GetPluginConfigDir();
@@ -822,7 +798,34 @@ void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
         m_etw_cap.Start();
     }
     m_detail.LoadHistory();
-    m_detail.LoadSettings();
+    m_detail.LoadSettings();   // 读取界面语言等设置（lang 字段）
+
+    // ---- 本地化：扫描 lang\ 目录，按设置加载语言文件（DLL 同目录） ----
+    // 语言文件与 TM 的 language\*.ini 同格式（UTF-8 BOM + [text] section）。
+    // 模式：auto=跟随 TM 主程序语言；手动=用户在下拉框选择的 BCP-47。
+    // 加载失败/无对应文件时 TR() 返回中文原文兜底，不影响使用。
+    {
+        wchar_t dll_path[MAX_PATH] = {};
+        GetModuleFileNameW(s_dll_hinst ? s_dll_hinst : (HINSTANCE)GetModuleHandleW(NULL), dll_path, MAX_PATH);
+        std::wstring dll_dir(dll_path);
+        size_t slash = dll_dir.find_last_of(L"\\");
+        if (slash != std::wstring::npos) {
+            dll_dir = dll_dir.substr(0, slash);
+            std::wstring lang_dir = dll_dir + L"\\lang";
+            I18n::ScanLangFiles(lang_dir);
+            // TM 主程序语言（auto 模式匹配用）
+            const wchar_t* bcp = (m_app ? m_app->GetStringRes(L"BCP_47", L"general") : nullptr);
+            I18n::SetTmLang(bcp && bcp[0] ? bcp : L"zh-CN");
+            // 用户设置：auto 或具体 BCP-47
+            I18n::SetLang(m_detail.GetLangSetting());
+            I18n::Reload();
+        }
+    }
+
+    m_detail_created = m_detail.Initialize(hInst);  // InitColumns 使用已加载的语言
+
+    // Set PacketCapture pointer for connection details
+    m_detail.SetCapture(&m_capture);
     // Sync transparent width from settings to static member
     CProcessNetItem::s_transparent_width = m_detail.GetTransparentWidth();
     // Sync Up/Down items visibility master switch (issue #9)
@@ -1163,6 +1166,55 @@ static BOOL CALLBACK OptionsSetFontProc(HWND h, LPARAM lp) {
     return TRUE;
 }
 
+// 语言切换后刷新选项对话框全部文本（控件文本是创建时用 TR() 固化的）
+static void OptionsApplyLang(HWND hwnd) {
+    if (!hwnd) return;
+    SetWindowTextW(hwnd, TR(L"\x63D2\x4EF6\x8BBE\x7F6E"));
+    SetWindowTextW(GetDlgItem(hwnd, 1002), TR(L"\x900F\x660E\x533A\x57DF\x5BBD\x5EA6\xFF08px\xFF09:"));
+    SetWindowTextW(GetDlgItem(hwnd, 1005), TR(L"\x5237\x65B0\x95F4\x9694\xFF08ms\xFF09:"));
+    SetWindowTextW(GetDlgItem(hwnd, 1012), TR(L"\u542F\u7528\u8FDE\u63A5\u5F52\u5C5E\u5730\u663E\u793A\uFF08\u5173\u95ED\u540E\u4E0D\u4E0B\u8F7D\u5E93\uFF09"));
+    SetWindowTextW(GetDlgItem(hwnd, 1010), TR(L"IP\u5E93\u4E0B\u8F7D\u8D70\u4EE3\u7406\u5730\u5740\uFF08\u652F\u6301 http/socks5\uFF0C\u7559\u7A7A=\u76F4\u8FDE\uFF09"));
+    SetWindowTextW(GetDlgItem(hwnd, 1011), TR(L"IP\u5E93\u81EA\u52A8\u66F4\u65B0\u95F4\u9694\uFF08\u5929\uFF0C\u9ED8\u8BA47\uFF09"));
+    SetWindowTextW(GetDlgItem(hwnd, 1009), TR(L"\u7ACB\u5373\u66F4\u65B0"));
+    SetWindowTextW(GetDlgItem(hwnd, 1006), TR(L"\u8C03\u8BD5\u65E5\u5FD7\uFF08\u5199\u5165\u63D2\u4EF6\u76EE\u5F55 debug\\\uFF09"));
+    SetWindowTextW(GetDlgItem(hwnd, 1013), TR(L"\u5728 TrafficMonitor \u9F20\u6807\u60AC\u505C\u63D0\u793A\u4E2D\u663E\u793A\u8FDB\u7A0B\u7F51\u901F\u4FE1\u606F"));
+    SetWindowTextW(GetDlgItem(hwnd, 1015), TR(L"\u754C\u9762\u8BED\u8A00"));
+    // 重填语言下拉：item0 = 跟随系统，其余为扫描到的语言（保持当前选择）
+    HWND hCombo = GetDlgItem(hwnd, 1014);
+    if (hCombo) {
+        int cur = (int)SendMessageW(hCombo, CB_GETCURSEL, 0, 0);
+        SendMessageW(hCombo, CB_RESETCONTENT, 0, 0);
+        SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"\u8DDF\u968F\u7CFB\u7EDF"));
+        for (const auto& lang : I18n::GetLangList()) {
+            SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)lang.display_name.c_str());
+        }
+        SendMessageW(hCombo, CB_SETCURSEL, cur < 0 ? 0 : cur, 0);
+    }
+}
+
+// 语言选择变化：保存设置 + 重载语言表 + 刷新所有窗口
+static void OptionsApplyLanguageChange(HWND hwnd) {
+    HWND hCombo = GetDlgItem(hwnd, 1014);
+    int sel = hCombo ? (int)SendMessageW(hCombo, CB_GETCURSEL, 0, 0) : 0;
+    std::wstring mode = L"auto";
+    const auto& langs = I18n::GetLangList();
+    if (sel > 0 && sel - 1 < (int)langs.size()) {
+        mode = langs[sel - 1].bcp47;
+    }
+    auto& plugin = CProcessNetPlugin::Instance();
+    plugin.m_detail.SetLangSetting(mode);
+    plugin.m_detail.SaveSettings();
+    I18n::SetLang(mode);
+    I18n::Reload();
+    // 详情窗口：列头重取翻译 + 重绘
+    plugin.m_detail.InitColumns();
+    if (plugin.m_detail.GetHwnd()) InvalidateRect(plugin.m_detail.GetHwnd(), NULL, FALSE);
+    // 悬浮提示窗重绘
+    if (plugin.m_popup.GetHwnd()) InvalidateRect(plugin.m_popup.GetHwnd(), NULL, FALSE);
+    // 选项对话框自身文本
+    OptionsApplyLang(hwnd);
+}
+
 static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE: {
@@ -1240,12 +1292,34 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         if (CProcessNetItem::s_show_speed_items)
             SendMessageW(GetDlgItem(hwnd, 1013), BM_SETCHECK, BST_CHECKED, 0);
 
+        // 界面语言 label + combo (跟随系统 + 扫描到的语言)
+        CreateWindowW(L"STATIC", TR(L"\u754C\u9762\u8BED\u8A00"),
+            WS_CHILD | WS_VISIBLE, 10, 242, 70, 20, hwnd, (HMENU)1015, nullptr, nullptr);
+        HWND hLangCombo = CreateWindowW(L"COMBOBOX", L"",
+            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+            90, 240, 190, 200, hwnd, (HMENU)1014, nullptr, nullptr);
+        {
+            SendMessageW(hLangCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"\u8DDF\u968F\u7CFB\u7EDF"));
+            int cur = 0;
+            const auto& langs = I18n::GetLangList();
+            std::wstring cur_lang = CProcessNetPlugin::Instance().m_detail.GetLangSetting();
+            for (size_t i = 0; i < langs.size(); i++) {
+                SendMessageW(hLangCombo, CB_ADDSTRING, 0, (LPARAM)langs[i].display_name.c_str());
+                if (cur_lang != L"auto" &&
+                    (langs[i].bcp47 == cur_lang ||
+                     langs[i].bcp47.substr(0, langs[i].bcp47.find(L'-')) == cur_lang.substr(0, cur_lang.find(L'-')))) {
+                    cur = (int)i + 1;
+                }
+            }
+            SendMessageW(hLangCombo, CB_SETCURSEL, cur, 0);
+        }
+
         // OK button
         CreateWindowW(L"BUTTON", L"OK",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 230, 248, 65, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 230, 276, 65, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
         // Cancel button
         CreateWindowW(L"BUTTON", L"Cancel",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 305, 248, 65, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 305, 276, 65, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
         // Use the proper UI font (Segoe UI 9pt) on every child control -
         // default is the bitmap 'System' font (jagged, ugly).
         EnumChildWindows(hwnd, OptionsSetFontProc, (LPARAM)GetStockObject(DEFAULT_GUI_FONT));
@@ -1305,6 +1379,11 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         if (LOWORD(wp) == IDCANCEL) {
             g_option_changed = false;
             DestroyWindow(hwnd);
+            return 0;
+        }
+        // 界面语言下拉：切换即时生效（保存 + 重载 + 刷新）
+        if (LOWORD(wp) == 1014 && HIWORD(wp) == CBN_SELCHANGE) {
+            OptionsApplyLanguageChange(hwnd);
             return 0;
         }
         // 立即更新 IP 库

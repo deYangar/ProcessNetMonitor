@@ -1099,7 +1099,9 @@ void CDetailWindow::SaveSettings() {
         fprintf(f, "  \"geo_enabled\": %s,\n", IpGeo::Instance().IsEnabled() ? "true" : "false");
     }
     fprintf(f, "  \"show_speed_items\": %s,\n", m_show_speed_items ? "true" : "false");
-    fprintf(f, "  \"debug_logs\": %s\n", m_debug_logs ? "true" : "false");
+    fprintf(f, "  \"debug_logs\": %s,\n", m_debug_logs ? "true" : "false");
+    // 界面语言：auto 或 BCP-47（ASCII，安全直接写）
+    fprintf(f, "  \"lang\": \"%s\"\n", std::string(m_lang.begin(), m_lang.end()).c_str());
     fprintf(f, "}\n");
     fclose(f);
 }
@@ -1188,6 +1190,24 @@ void CDetailWindow::LoadSettings() {
             if (pos != std::string::npos) {
                 std::string sub = json.substr(pos + 1, 16);
                 m_debug_logs = (sub.find("true") != std::string::npos);
+            }
+        }
+    }
+    // Parse lang (default "auto" = follow TM; otherwise a BCP-47 tag)
+    {
+        size_t pos = json.find("\"lang\"");
+        if (pos != std::string::npos) {
+            pos = json.find(':', pos);
+            if (pos != std::string::npos) {
+                size_t b = json.find('"', pos + 1);
+                size_t e = b == std::string::npos ? std::string::npos : json.find('"', b + 1);
+                if (b != std::string::npos && e != std::string::npos && e > b + 1) {
+                    std::string v = json.substr(b + 1, e - b - 1);
+                    if (v.size() <= 32) {
+                        std::wstring wv(v.begin(), v.end());
+                        m_lang = wv;
+                    }
+                }
             }
         }
     }
