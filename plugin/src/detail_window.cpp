@@ -471,7 +471,7 @@ void CDetailWindow::Show(HWND parent_wnd) {
     RECT rc;
     GetWindowRect(m_hwnd, &rc);
     int w = rc.right - rc.left;
-    int h = m_saved_h > 0 ? m_saved_h : (int)(560 * m_dpi_scale);
+    int h = m_saved_h > 0 ? m_saved_h : (int)(800 * m_dpi_scale);
     if (h > ah - 40) h = ah - 40;
     int x = work.left + (aw - w) / 2;
     int y = work.top + (ah - h) / 2;

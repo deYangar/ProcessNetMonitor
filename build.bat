@@ -73,6 +73,9 @@ if %ERRORLEVEL% NEQ 0 (
     echo WARNING: x64 DLL copy failed! Close TrafficMonitor first.
     exit /b 1
 )
+:: Deploy language files to <plugins>\ProcessNetMonitor\lang\
+if not exist "C:\Users\Yang\.openclaw\workspace\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor\plugins\ProcessNetMonitor\lang" mkdir "C:\Users\Yang\.openclaw\workspace\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor\plugins\ProcessNetMonitor\lang"
+copy /y src\lang\*.ini "C:\Users\Yang\.openclaw\workspace\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor\plugins\ProcessNetMonitor\lang\" >nul
 :: Start TM as user Yang (must use working directory for TM to find its config)
 echo @echo off > "%TEMP%\launch_tm.bat"
 echo cd /d "C:\Users\Yang\.openclaw\workspace\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor" >> "%TEMP%\launch_tm.bat"
@@ -94,6 +97,9 @@ if %ERRORLEVEL% NEQ 0 (
     echo WARNING: DLL copy failed! Close TrafficMonitor first.
     exit /b 1
 )
+:: Deploy language files to <plugins>\ProcessNetMonitor\lang\
+if not exist "C:\Users\Yang\.openclaw\workspace\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor\plugins\ProcessNetMonitor\lang" mkdir "C:\Users\Yang\.openclaw\workspace\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor\plugins\ProcessNetMonitor\lang"
+copy /y src\lang\*.ini "C:\Users\Yang\.openclaw\workspace\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor\plugins\ProcessNetMonitor\lang\" >nul
 :: Start TM as user Yang
 echo @echo off > "%TEMP%\launch_tm.bat"
 echo cd /d "C:\Users\Yang\.openclaw\workspace\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor" >> "%TEMP%\launch_tm.bat"

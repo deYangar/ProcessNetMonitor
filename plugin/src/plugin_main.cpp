@@ -818,7 +818,7 @@ void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
     m_detail.LoadHistory();
     m_detail.LoadSettings();   // 读取界面语言等设置（lang 字段）
 
-    // ---- 本地化：扫描 lang\ 目录，按设置加载语言文件（DLL 同目录） ----
+    // ---- 本地化：扫描 <dll dir>\ProcessNetMonitor\lang\ 目录，按设置加载语言文件 ----
     // 语言文件与 TM 的 language\*.ini 同格式（UTF-8 BOM + [text] section）。
     // 模式：auto=跟随 TM 主程序语言；手动=用户在下拉框选择的 BCP-47。
     // 加载失败/无对应文件时 TR() 返回中文原文兜底，不影响使用。
@@ -829,7 +829,9 @@ void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
         size_t slash = dll_dir.find_last_of(L"\\");
         if (slash != std::wstring::npos) {
             dll_dir = dll_dir.substr(0, slash);
-            std::wstring lang_dir = dll_dir + L"\\lang";
+            // 语言文件与插件配置同目录（ProcessNetMonitor\lang\），不占用 plugins 根目录
+            std::wstring lang_dir = dll_dir + L"\\ProcessNetMonitor\\lang";
+            CreateDirectoryW(lang_dir.c_str(), nullptr);
             I18n::ScanLangFiles(lang_dir);
             // TM 主程序语言（auto 模式匹配用）
             const wchar_t* bcp = (m_app ? m_app->GetStringRes(L"BCP_47", L"general") : nullptr);
