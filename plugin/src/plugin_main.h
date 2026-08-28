@@ -117,6 +117,7 @@ public:
     std::map<DWORD, std::deque<WinSample>> m_win;   // rolling 1s window samples
     static void CALLBACK RefreshTimerProc(void* param, BOOLEAN timer_or_wait);
     void RefreshTick();
+    void CheckLanguageChange();  // 运行期语言检测（刷新定时器线程调用）
     void StartRefreshTimer();
     void StopRefreshTimer();
     void ComputeWindowSpeeds(std::vector<ProcTraffic>& stats);

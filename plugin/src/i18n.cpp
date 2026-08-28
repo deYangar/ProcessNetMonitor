@@ -9,10 +9,14 @@
 #include "i18n.h"
 #include <windows.h>
 #include <vector>
+#include <memory>
 
 namespace {
 
 std::map<std::wstring, std::wstring> g_table;
+SRWLOCK g_lock = SRWLOCK_INIT;  // 保护 g_table（定时器线程 Reload vs UI 线程 TR 读）
+// Reload 时旧表不立即析构：保留若干份，避免 Get() 返回的指针在调用方使用期间失效
+std::vector<std::shared_ptr<std::map<std::wstring, std::wstring>>> g_old_tables;
 std::vector<I18n::LangInfo> g_lang_list;   // 扫描到的语言列表
 std::wstring g_lang_dir;                   // 语言文件目录
 std::wstring g_mode = L"auto";             // auto 或具体 BCP-47
@@ -145,7 +149,12 @@ bool Load(const std::wstring& file_path) {
 
     std::map<std::wstring, std::wstring> new_table;
     if (!ParseIni(content, new_table)) return false;
+    AcquireSRWLockExclusive(&g_lock);
+    // 旧表保留（延迟析构），防止其他线程正在使用 Get() 返回的指针
+    g_old_tables.push_back(std::make_shared<std::map<std::wstring, std::wstring>>(std::move(g_table)));
+    if (g_old_tables.size() > 8) g_old_tables.erase(g_old_tables.begin());
     g_table = std::move(new_table);
+    ReleaseSRWLockExclusive(&g_lock);
     return true;
 }
 
@@ -193,6 +202,11 @@ bool ScanLangFiles(const std::wstring& dir) {
         info.bcp47 = bcp47;
         info.display_name = display.empty() ? file_name : display;
         info.file_name = file_name;
+        // 文件修改时间（100ns 间隔，自 1601-01-01）
+        ULARGE_INTEGER li;
+        li.LowPart = fd.ftLastWriteTime.dwLowDateTime;
+        li.HighPart = fd.ftLastWriteTime.dwHighDateTime;
+        info.mtime = li.QuadPart;
         g_lang_list.push_back(info);
     } while (FindNextFileW(hFind, &fd));
     FindClose(hFind);
@@ -243,9 +257,11 @@ bool Reload() {
 const std::vector<LangInfo>& GetLangList() { return g_lang_list; }
 
 const wchar_t* Get(const wchar_t* key) {
+    AcquireSRWLockShared(&g_lock);
     auto it = g_table.find(key);
-    if (it != g_table.end()) return it->second.c_str();
-    return key;  // 中文原文兜底
+    const wchar_t* r = (it != g_table.end()) ? it->second.c_str() : key;  // 中文原文兜底
+    ReleaseSRWLockShared(&g_lock);
+    return r;
 }
 
 std::wstring LangFileFromBcp47(const std::wstring& bcp47) {
@@ -261,6 +277,18 @@ std::wstring LangFileFromBcp47(const std::wstring& bcp47) {
     if (main == L"id" || main == L"ms") return L"Indonesian.ini";
     // 其他语言：默认英文（非中文用户大概率不读中文；找不到文件时 TR 兜底中文）
     return L"English.ini";
+}
+
+bool CheckAndReload(const std::wstring& tm_lang) {
+    // 重新扫描目录，对比语言列表（含文件修改时间）与 TM 语言
+    std::vector<LangInfo> old_list = g_lang_list;
+    bool scanned = ScanLangFiles(g_lang_dir);
+    bool list_changed = (old_list != g_lang_list);
+    bool tm_changed = (ToLower(tm_lang) != ToLower(g_tm_lang));
+    if (!scanned && old_list.empty()) return false;
+    if (!list_changed && !tm_changed) return false;
+    g_tm_lang = tm_lang;
+    return Reload();
 }
 
 } // namespace I18n

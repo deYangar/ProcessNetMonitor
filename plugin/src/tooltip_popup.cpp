@@ -245,6 +245,12 @@ LRESULT CTooltipPopup::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
         CProcessNetPlugin::Instance().PopupRefreshFromSnapshot();
         return 0;
 
+    case WM_PNM_LANG_CHANGED:
+        // 运行期语言变化：刷新快照 + 重绘（文本在绘制时 TR 实时取词）
+        CProcessNetPlugin::Instance().PopupRefreshFromSnapshot();
+        InvalidateRect(m_hwnd, NULL, FALSE);
+        return 0;
+
     case WM_DPICHANGED: {
         RECT* prc = (RECT*)lp;
         if (prc) UpdateDpiScale(*prc);

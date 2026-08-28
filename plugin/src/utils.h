@@ -43,6 +43,7 @@ inline bool PNM_GetDebugDir(wchar_t* buf, size_t cap) {
 // then pulls the latest snapshot on ITS OWN (UI) thread - never touch window
 // members (std::vector etc.) from another thread (heap corruption risk).
 #define WM_PNM_REFRESH (WM_APP + 1)
+#define WM_PNM_LANG_CHANGED (WM_APP + 6)
 
 // Shared speed/byte formatting utilities
 inline void FormatSpeed(double bps, wchar_t* buf, int n) {

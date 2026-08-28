@@ -619,6 +619,9 @@ void CProcessNetPlugin::BuildTooltip(bool etw_active, const std::vector<ProcTraf
 void CProcessNetPlugin::RefreshTick() {
     if (!m_started) return;
 
+    // 运行期语言检测：TM 语言或 lang\ 目录变化 → 重载语言表并通知各窗口刷新
+    CheckLanguageChange();
+
     ULONGLONG now = GetTickCount64();
     double dt = (double)(now - m_last_time) / 1000.0;
     if (dt < 0.05) dt = 0.05;
@@ -734,6 +737,21 @@ void CProcessNetPlugin::ComputeWindowSpeeds(std::vector<ProcTraffic>& stats) {
 
 void CALLBACK CProcessNetPlugin::RefreshTimerProc(void* param, BOOLEAN) {
     ((CProcessNetPlugin*)param)->RefreshTick();
+}
+
+void CProcessNetPlugin::CheckLanguageChange() {
+    const wchar_t* bcp = (m_app ? m_app->GetStringRes(L"BCP_47", L"general") : nullptr);
+    std::wstring tm = bcp && bcp[0] ? bcp : L"zh-CN";
+    bool changed = I18n::CheckAndReload(tm);
+    if (changed) {
+        // 通知 UI 线程刷新（本函数运行在刷新定时器线程，不直接碰窗口）
+        if (m_detail_created && m_detail.GetHwnd())
+            PostMessage(m_detail.GetHwnd(), WM_PNM_LANG_CHANGED, 0, 0);
+        if (m_popup_created && m_popup.GetHwnd())
+            PostMessage(m_popup.GetHwnd(), WM_PNM_LANG_CHANGED, 0, 0);
+        HWND opt = FindWindowW(L"ProcessNetMonitorOptionsDlg", nullptr);
+        if (opt) PostMessage(opt, WM_PNM_LANG_CHANGED, 0, 0);
+    }
 }
 
 void CProcessNetPlugin::StartRefreshTimer() {
@@ -1396,6 +1414,10 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         break;
     case WM_CLOSE:
         DestroyWindow(hwnd);
+        return 0;
+    case WM_PNM_LANG_CHANGED:
+        // 运行期语言变化：刷新选项对话框文本（由定时器线程 PostMessage 而来）
+        OptionsApplyLang(hwnd);
         return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);

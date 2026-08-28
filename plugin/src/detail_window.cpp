@@ -1555,6 +1555,13 @@ LRESULT CDetailWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
         CProcessNetPlugin::Instance().DetailRefreshFromSnapshot();
         return 0;
 
+    case WM_PNM_LANG_CHANGED:
+        // 运行期语言变化：列头重取翻译 + 重建行（分类文本等）+ 重绘
+        InitColumns();
+        CProcessNetPlugin::Instance().DetailRefreshFromSnapshot();
+        InvalidateRect(m_hwnd, NULL, FALSE);
+        return 0;
+
     case WM_APP + 2:
         // background signature verification finished - refresh so the new
         // categories (系统进程/第三方程序/未签名) appear

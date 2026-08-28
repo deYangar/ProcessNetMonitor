@@ -14,6 +14,11 @@ struct LangInfo {
     std::wstring bcp47;        // BCP-47 标签，如 en-US / zh-CN / ja-JP
     std::wstring display_name; // 显示名，如 English / 简体中文 / 日本語
     std::wstring file_name;    // 文件名，如 English.ini
+    unsigned long long mtime = 0;  // 文件修改时间（用于检测内容变化）
+    bool operator==(const LangInfo& o) const {
+        return bcp47 == o.bcp47 && display_name == o.display_name &&
+               file_name == o.file_name && mtime == o.mtime;
+    }
 };
 
 // 扫描语言目录（dir\*.ini），建立语言列表。成功返回 true。
@@ -47,6 +52,10 @@ const wchar_t* Get(const wchar_t* key);
 // 由 BCP-47 语言标签映射到语言文件名（如 "en-US" -> L"English.ini"）。
 // 未知语言一律返回 English.ini（国际用户默认英文）。
 std::wstring LangFileFromBcp47(const std::wstring& bcp47);
+
+// 检测运行期语言变化（TM 语言 / lang 目录文件变化），变化则重载语言表。
+// 由插件的刷新定时器周期性调用（低频），返回 true 表示语言已变化需要刷新 UI。
+bool CheckAndReload(const std::wstring& tm_lang);
 
 } // namespace I18n
 
