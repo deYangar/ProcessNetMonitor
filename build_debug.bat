@@ -32,7 +32,8 @@ echo Building debug DLL (x64)...
 cl /nologo /O2 /EHsc /MT /std:c++17 /utf-8 /Zi /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /D_WINDLL /Isrc ^
    /FeProcessNetMonitor_debug.dll ^
    src\capture.cpp src\plugin_main.cpp src\tooltip_popup.cpp src\detail_window.cpp ^
-   /link /DLL iphlpapi.lib ws2_32.lib gdi32.lib user32.lib shell32.lib dwmapi.lib advapi32.lib ^
+   src\etw_capture.cpp src\ip_geo.cpp src\signature.cpp src\i18n.cpp ^
+   /link /DLL iphlpapi.lib ws2_32.lib gdi32.lib user32.lib shell32.lib dwmapi.lib advapi32.lib tdh.lib ^
    src\resource.res /OUT:ProcessNetMonitor_debug.dll
 
 if %ERRORLEVEL% NEQ 0 (

@@ -1184,6 +1184,9 @@ static BOOL CALLBACK OptionsSetFontProc(HWND h, LPARAM lp) {
     return TRUE;
 }
 
+// Forward declaration: auto-resize controls to fit translated text
+static void OptionsAdjustLayout(HWND hwnd);
+
 // 语言切换后刷新选项对话框全部文本（控件文本是创建时用 TR() 固化的）
 static void OptionsApplyLang(HWND hwnd) {
     if (!hwnd) return;
@@ -1208,6 +1211,8 @@ static void OptionsApplyLang(HWND hwnd) {
         }
         SendMessageW(hCombo, CB_SETCURSEL, cur < 0 ? 0 : cur, 0);
     }
+    // Re-measure and resize controls/dialog for the new language
+    OptionsAdjustLayout(hwnd);
 }
 
 // 语言选择变化：保存设置 + 重载语言表 + 刷新所有窗口
@@ -1233,25 +1238,161 @@ static void OptionsApplyLanguageChange(HWND hwnd) {
     OptionsApplyLang(hwnd);
 }
 
+// Measure text width in pixels using the dialog's current font.
+static int MeasureTextWidth(HWND hwnd, const wchar_t* text) {
+    HDC hdc = GetDC(hwnd);
+    HFONT hFont = (HFONT)SendMessageW(hwnd, WM_GETFONT, 0, 0);
+    HFONT hOld = hFont ? (HFONT)SelectObject(hdc, hFont) : nullptr;
+    SIZE sz = {};
+    GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &sz);
+    if (hOld) SelectObject(hdc, hOld);
+    ReleaseDC(hwnd, hdc);
+    return sz.cx;
+}
+
+// Auto-resize controls and dialog to fit translated text.
+// Called after WM_CREATE and after runtime language changes.
+static void OptionsAdjustLayout(HWND hwnd) {
+    const int MARGIN = 20;
+    const int CTRL_PAD = 8;
+    const int CHK_PAD = 28;   // checkbox/radio internal offset
+    const int BTN_PAD = 20;   // push button padding
+
+    int max_right = 0;
+
+    // Step 1: Walk ALL child controls, resize to fit text, track max_right
+    HWND hChild = GetWindow(hwnd, GW_CHILD);
+    while (hChild) {
+        wchar_t buf[512] = {};
+        GetWindowTextW(hChild, buf, 512);
+        if (buf[0]) {
+            DWORD style = (DWORD)GetWindowLongPtrW(hChild, GWL_STYLE);
+            bool is_push = (style & BS_PUSHBUTTON) != 0;
+            bool is_chk = (style & (BS_AUTOCHECKBOX | BS_AUTORADIOBUTTON)) != 0;
+            bool is_static = (style & 0xFF) == SS_SIMPLE || (style & 0xFF) == SS_LEFT || (style & 0xFF) == 0;
+            int pad = (is_push || is_chk) ? CHK_PAD : 0;
+            int text_w = MeasureTextWidth(hwnd, buf);
+            int needed = text_w + pad + CTRL_PAD;
+
+            RECT rc;
+            GetWindowRect(hChild, &rc);
+            MapWindowPoints(HWND_DESKTOP, hwnd, (LPPOINT)&rc, 2);
+            int cur_w = rc.right - rc.left;
+
+            if (needed > cur_w) {
+                SetWindowPos(hChild, nullptr, 0, 0, needed, rc.bottom - rc.top,
+                             SWP_NOMOVE | SWP_NOZORDER);
+            }
+            int right = rc.left + max(cur_w, needed);
+            if (right > max_right) max_right = right;
+        }
+        hChild = GetWindow(hChild, GW_HWNDNEXT);
+    }
+
+    // Step 2: Expand dialog if controls overflow
+    RECT rcClient;
+    GetClientRect(hwnd, &rcClient);
+    int desired_cx = max(500, max_right + MARGIN);
+    if (desired_cx > rcClient.right) {
+        RECT rcWnd = { 0, 0, desired_cx, rcClient.bottom };
+        DWORD dlgStyle = (DWORD)GetWindowLongPtrW(hwnd, GWL_STYLE);
+        DWORD dlgEx = (DWORD)GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        AdjustWindowRectEx(&rcWnd, dlgStyle, FALSE, dlgEx);
+        int new_w = rcWnd.right - rcWnd.left;
+        int new_h = rcWnd.bottom - rcWnd.top;
+
+        HWND hParent = GetParent(hwnd);
+        if (hParent) {
+            RECT rcP;
+            GetWindowRect(hParent, &rcP);
+            int x = rcP.left + ((rcP.right - rcP.left) - new_w) / 2;
+            int y = rcP.top + ((rcP.bottom - rcP.top) - new_h) / 2;
+            SetWindowPos(hwnd, nullptr, x, y, new_w, new_h, SWP_NOZORDER);
+        } else {
+            int sw = GetSystemMetrics(SM_CXSCREEN);
+            int sh = GetSystemMetrics(SM_CYSCREEN);
+            SetWindowPos(hwnd, nullptr, (sw - new_w) / 2, (sh - new_h) / 2,
+                         new_w, new_h, SWP_NOZORDER);
+        }
+        GetClientRect(hwnd, &rcClient);
+    }
+
+    // Step 3: Anchor right-side controls to dialog width
+    int dlg_w = rcClient.right;
+    // Refresh combo (1004): anchor to right
+    HWND hRefresh = GetDlgItem(hwnd, 1004);
+    if (hRefresh) {
+        RECT rc; GetWindowRect(hRefresh, &rc);
+        MapWindowPoints(HWND_DESKTOP, hwnd, (LPPOINT)&rc, 2);
+        int combo_w = rc.right - rc.left;
+        int new_x = dlg_w - 15 - combo_w;
+        SetWindowPos(hRefresh, nullptr, new_x, rc.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+    }
+    // Width edit (1003): anchor to right
+    HWND hWidthEdit = GetDlgItem(hwnd, 1003);
+    if (hWidthEdit) {
+        RECT rc; GetWindowRect(hWidthEdit, &rc);
+        MapWindowPoints(HWND_DESKTOP, hwnd, (LPPOINT)&rc, 2);
+        int edit_w = rc.right - rc.left;
+        int new_x = dlg_w - 15 - edit_w;
+        SetWindowPos(hWidthEdit, nullptr, new_x, rc.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+    }
+    // Days edit (1008): anchor to right of label
+    HWND hDaysEdit = GetDlgItem(hwnd, 1008);
+    if (hDaysEdit) {
+        RECT rc; GetWindowRect(hDaysEdit, &rc);
+        MapWindowPoints(HWND_DESKTOP, hwnd, (LPPOINT)&rc, 2);
+        int edit_w = rc.right - rc.left;
+        int new_x = dlg_w - 15 - 110 - 10 - edit_w;  // space for Update btn + gap + edit
+        SetWindowPos(hDaysEdit, nullptr, new_x, rc.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+    }
+    // Update Now button (1009): anchor to right
+    HWND hUpdateBtn = GetDlgItem(hwnd, 1009);
+    if (hUpdateBtn) {
+        RECT rc; GetWindowRect(hUpdateBtn, &rc);
+        MapWindowPoints(HWND_DESKTOP, hwnd, (LPPOINT)&rc, 2);
+        int btn_w = rc.right - rc.left;
+        int new_x = dlg_w - 15 - btn_w;
+        SetWindowPos(hUpdateBtn, nullptr, new_x, rc.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+    }
+
+    // Step 4: Right-align OK/Cancel with max_right
+    int btn_y_ok = 0, btn_y_cancel = 0;
+    for (int btn_id : { IDOK, IDCANCEL }) {
+        HWND hBtn = GetDlgItem(hwnd, btn_id);
+        if (!hBtn) continue;
+        RECT rc;
+        GetWindowRect(hBtn, &rc);
+        MapWindowPoints(HWND_DESKTOP, hwnd, (LPPOINT)&rc, 2);
+        int btn_w = rc.right - rc.left;
+        int btn_y = rc.top;
+        int offset = (btn_id == IDOK) ? 80 : 8;
+        int new_x = max_right - btn_w - offset;
+        if (new_x < 10) new_x = 10;
+        SetWindowPos(hBtn, nullptr, new_x, btn_y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+    }
+}
+
+
 static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE: {
         // Transparent area width label
         CreateWindowW(L"STATIC", TR(L"\x900F\x660E\x533A\x57DF\x5BBD\x5EA6\xFF08px\xFF09:"),
-            WS_CHILD | WS_VISIBLE, 10, 12, 200, 20, hwnd, (HMENU)1002, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE, 10, 12, 260, 20, hwnd, (HMENU)1002, nullptr, nullptr);
         // Width edit
         wchar_t width_buf[16];
         swprintf_s(width_buf, L"%d", CProcessNetItem::s_transparent_width);
         CreateWindowW(L"EDIT", width_buf,
             WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
-            260, 10, 110, 24, hwnd, (HMENU)1003, nullptr, nullptr);
+            280, 10, 130, 24, hwnd, (HMENU)1003, nullptr, nullptr);
 
         // Refresh interval label + combo (100/250/500/1000 ms)
         CreateWindowW(L"STATIC", TR(L"\x5237\x65B0\x95F4\x9694\xFF08ms\xFF09:"),
-            WS_CHILD | WS_VISIBLE, 10, 44, 130, 20, hwnd, (HMENU)1005, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE, 10, 44, 260, 20, hwnd, (HMENU)1005, nullptr, nullptr);
         HWND hCombo = CreateWindowW(L"COMBOBOX", L"",
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-            150, 42, 100, 120, hwnd, (HMENU)1004, nullptr, nullptr);
+            190, 42, 130, 120, hwnd, (HMENU)1004, nullptr, nullptr);
         {
             static const wchar_t* items[] = { L"100", L"250", L"500", L"1000" };
             for (int i = 0; i < 4; i++) SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)items[i]);
@@ -1264,23 +1405,23 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         // 启用归属地显示 checkbox (第3行)
         CreateWindowW(L"BUTTON", TR(L"\u542F\u7528\u8FDE\u63A5\u5F52\u5C5E\u5730\u663E\u793A\uFF08\u5173\u95ED\u540E\u4E0D\u4E0B\u8F7D\u5E93\uFF09"),
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            10, 70, 340, 22, hwnd, (HMENU)1012, nullptr, nullptr);
+            10, 70, 580, 22, hwnd, (HMENU)1012, nullptr, nullptr);
         if (IpGeo::Instance().IsEnabled())
             SendMessageW(GetDlgItem(hwnd, 1012), BM_SETCHECK, BST_CHECKED, 0);
 
         // ---- IP 库设置 ----
         // 代理服务器 label + edit (placeholder 提示)
         CreateWindowW(L"STATIC", TR(L"IP\u5E93\u4E0B\u8F7D\u8D70\u4EE3\u7406\u5730\u5740\uFF08\u652F\u6301 http/socks5\uFF0C\u7559\u7A7A=\u76F4\u8FDE\uFF09"),
-            WS_CHILD | WS_VISIBLE, 10, 100, 470, 20, hwnd, (HMENU)1010, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE, 10, 100, 610, 20, hwnd, (HMENU)1010, nullptr, nullptr);
         HWND hProxyEdit = CreateWindowW(L"EDIT", IpGeo::Instance().GetProxy().c_str(),
             WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-            10, 122, 460, 24, hwnd, (HMENU)1007, nullptr, nullptr);
+            10, 122, 610, 24, hwnd, (HMENU)1007, nullptr, nullptr);
         // 占位提示 (EM_SETCUEBANNER 由 comctl32 处理, 无需额外样式; 注意 0x2000 是 ES_NUMBER 不能加!)
         SendMessageW(hProxyEdit, EM_SETCUEBANNER, TRUE, (LPARAM)TR(L"http://127.0.0.1:7890 \u6216 socks5://127.0.0.1:1080 \u7B49"));
 
         // 更新间隔 label + edit
         CreateWindowW(L"STATIC", TR(L"IP\u5E93\u81EA\u52A8\u66F4\u65B0\u95F4\u9694\uFF08\u5929\uFF0C\u9ED8\u8BA47\uFF09"),
-            WS_CHILD | WS_VISIBLE, 10, 154, 250, 20, hwnd, (HMENU)1011, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE, 10, 154, 500, 20, hwnd, (HMENU)1011, nullptr, nullptr);
         wchar_t days_buf[16];
         swprintf_s(days_buf, L"%d", IpGeo::Instance().GetUpdateDays());
         CreateWindowW(L"EDIT", days_buf,
@@ -1289,13 +1430,13 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
 
         // 立即更新按钮
         CreateWindowW(L"BUTTON", TR(L"\u7ACB\u5373\u66F4\u65B0"),
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 325, 152, 95, 24, hwnd, (HMENU)1009, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 460, 152, 110, 24, hwnd, (HMENU)1009, nullptr, nullptr);
 
         // Debug-log checkbox (default OFF)
         CreateWindowW(L"BUTTON",
             TR(L"\u8C03\u8BD5\u65E5\u5FD7\uFF08\u5199\u5165\u63D2\u4EF6\u76EE\u5F55 debug\\\uFF09"),
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            10, 186, 460, 22, hwnd, (HMENU)1006, nullptr, nullptr);
+            10, 186, 610, 22, hwnd, (HMENU)1006, nullptr, nullptr);
         if (CProcessNetPlugin::Instance().m_detail.GetDebugLogs())
             SendMessageW(GetDlgItem(hwnd, 1006), BM_SETCHECK, BST_CHECKED, 0);
 
@@ -1306,13 +1447,13 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         CreateWindowW(L"BUTTON",
             TR(L"\u5728 TrafficMonitor \u9F20\u6807\u60AC\u505C\u63D0\u793A\u4E2D\u663E\u793A\u8FDB\u7A0B\u7F51\u901F\u4FE1\u606F"),
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            10, 214, 460, 22, hwnd, (HMENU)1013, nullptr, nullptr);
+            10, 214, 610, 22, hwnd, (HMENU)1013, nullptr, nullptr);
         if (CProcessNetItem::s_show_speed_items)
             SendMessageW(GetDlgItem(hwnd, 1013), BM_SETCHECK, BST_CHECKED, 0);
 
         // 界面语言 label + combo (跟随系统 + 扫描到的语言)
         CreateWindowW(L"STATIC", TR(L"\u754C\u9762\u8BED\u8A00"),
-            WS_CHILD | WS_VISIBLE, 10, 242, 70, 20, hwnd, (HMENU)1015, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE, 10, 242, 90, 20, hwnd, (HMENU)1015, nullptr, nullptr);
         HWND hLangCombo = CreateWindowW(L"COMBOBOX", L"",
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
             90, 240, 190, 200, hwnd, (HMENU)1014, nullptr, nullptr);
@@ -1334,13 +1475,15 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
 
         // OK button
         CreateWindowW(L"BUTTON", L"OK",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 230, 276, 65, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 380, 276, 75, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
         // Cancel button
         CreateWindowW(L"BUTTON", L"Cancel",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 305, 276, 65, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 465, 276, 75, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
         // Use the proper UI font (Segoe UI 9pt) on every child control -
         // default is the bitmap 'System' font (jagged, ugly).
         EnumChildWindows(hwnd, OptionsSetFontProc, (LPARAM)GetStockObject(DEFAULT_GUI_FONT));
+        // Auto-resize controls and dialog to fit the current language's text
+        OptionsAdjustLayout(hwnd);
         return 0;
     }
     case WM_COMMAND:
@@ -1443,7 +1586,7 @@ ITMPlugin::OptionReturn CProcessNetPlugin::ShowOptionsDialog(void* hParent) {
         L"ProcessNetMonitorOptionsDlg",
         TR(L"\x63D2\x4EF6\x8BBE\x7F6E"),
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        0, 0, 500, 370,
+        0, 0, 650, 370,
         (HWND)hParent, nullptr, GetModuleHandleW(NULL), nullptr
     );
     

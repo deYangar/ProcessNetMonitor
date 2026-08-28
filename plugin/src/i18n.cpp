@@ -111,10 +111,20 @@ bool ParseIni(const std::wstring& content, std::map<std::wstring, std::wstring>&
             section = Trim(line.substr(1, line.size() - 2));
             continue;
         }
-        size_t eq = line.find(L'=');
-        if (eq == std::wstring::npos) continue;
+        // Find ' = ' (with spaces) first; fall back to first '=' if not found.
+        // Keys can contain '=' without spaces (e.g. "留空=直连"), so bare '='
+        // would split inside the key.  The real separator always has spaces.
+        size_t eq = line.find(L" = ");
+        size_t val_start;
+        if (eq != std::wstring::npos) {
+            val_start = eq + 3;  // skip past " = "
+        } else {
+            eq = line.find(L'=');
+            if (eq == std::wstring::npos) continue;
+            val_start = eq + 1;
+        }
         std::wstring key = ParseValue(Trim(line.substr(0, eq)));  // key 同样支持 \n 等转义
-        std::wstring value = ParseValue(line.substr(eq + 1));
+        std::wstring value = ParseValue(line.substr(val_start));
         if (key.empty()) continue;
         if (section.empty() || section == L"text") {
             table[key] = value;

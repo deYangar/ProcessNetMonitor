@@ -25,6 +25,8 @@ public:
     bool Initialize(HINSTANCE hInst);
     // 本地化：列头文本在 I18n::Load 之后初始化（类内初始化器不能调用函数）
     void InitColumns();
+    void AutoSizeColumns();
+    bool m_cols_sized = false;  // one-shot flag for AutoSizeColumns
     void Show(HWND parent_wnd);
     void Hide();
     void UpdateData(const std::vector<ProcTraffic>& stats, double total_up, double total_down);
@@ -261,18 +263,18 @@ private:
         { L"\u7A0B\u5E8F\u7C7B\u522B",    90,  70,  Column::LEFT   },
         { L"\u4E0B\u8F7D\u901F\u5EA6",    100, 80,  Column::RIGHT  },
         { L"\u4E0A\u4F20\u901F\u5EA6",    100, 80,  Column::RIGHT  },
-        { L"\u8FDE\u63A5\u6570",          60,  50,  Column::RIGHT  },
+        { L"\u8FDE\u63A5\u6570",          90,  50,  Column::RIGHT  },
         { L"\u64CD\u4F5C",              80,  60,  Column::CENTER },
     };
     // Columns - history
     Column m_hist_cols[NUM_COLS] = {
         { L"",            42,  42,  Column::CENTER },
         { L"\u7A0B\u5E8F\u540D\u79F0",    140, 80,  Column::LEFT   },
-        { L"\u7A0B\u5E8F\u7C7B\u522B",    70,  50,  Column::LEFT   },
+        { L"\u7A0B\u5E8F\u7C7B\u522B",    90,  50,  Column::LEFT   },
         { L"\u603B\u4E0B\u8F7D",          90,  60,  Column::RIGHT  },
         { L"\u603B\u4E0A\u4F20",          90,  60,  Column::RIGHT  },
-        { L"\u5E73\u5747\u4E0B\u8F7D",    85,  60,  Column::RIGHT  },
-        { L"\u5E73\u5747\u4E0A\u4F20",    85,  60,  Column::RIGHT  },
+        { L"\u5E73\u5747\u4E0B\u8F7D",    90,  60,  Column::RIGHT  },
+        { L"\u5E73\u5747\u4E0A\u4F20",    90,  60,  Column::RIGHT  },
     };
     Column* GetActiveCols() { return (m_active_tab == 0) ? m_rt_cols : m_hist_cols; }
     const Column* GetActiveCols() const { return (m_active_tab == 0) ? m_rt_cols : m_hist_cols; }

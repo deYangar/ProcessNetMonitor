@@ -159,26 +159,53 @@ COLORREF CDetailWindow::GetBorderColor() {
 
 // FormatSpeed / FormatBytes delegated to shared utils.h
 
+// Measure header text and expand column widths if needed.
+// Safe to call multiple times - only expands, never shrinks, and skips
+// work if already sized for the current language.
+void CDetailWindow::AutoSizeColumns() {
+    if (!m_font_header) return;
+    HDC hdc = GetDC(m_hwnd);
+    HFONT hOld = (HFONT)SelectObject(hdc, m_font_header);
+
+    auto adjust = [&](Column* cols, int count) {
+        for (int i = 1; i < count; i++) {
+            if (!cols[i].title || !cols[i].title[0]) continue;
+            SIZE sz = {};
+            GetTextExtentPoint32W(hdc, cols[i].title, (int)wcslen(cols[i].title), &sz);
+            int needed = sz.cx + 12 + 20;  // padding + sort arrow
+            if (needed > cols[i].width) cols[i].width = needed;
+        }
+    };
+    adjust(m_rt_cols, NUM_COLS);
+    adjust(m_hist_cols, NUM_COLS);
+
+    SelectObject(hdc, hOld);
+    ReleaseDC(m_hwnd, hdc);
+    m_cols_sized = true;
+}
+
 void CDetailWindow::InitColumns() {
-    static const wchar_t* rt_titles[NUM_COLS] = {
+    // NOT static - TR() must re-evaluate on every call (language may have changed)
+    const wchar_t* rt_titles[NUM_COLS] = {
         L"", TR(L"\u7A0B\u5E8F\u540D\u79F0"), TR(L"\u7A0B\u5E8F\u7C7B\u522B"),
         TR(L"\u4E0B\u8F7D\u901F\u5EA6"), TR(L"\u4E0A\u4F20\u901F\u5EA6"),
         TR(L"\u8FDE\u63A5\u6570"), TR(L"\u64CD\u4F5C")
     };
     for (int i = 0; i < NUM_COLS; i++) m_rt_cols[i].title = rt_titles[i];
 
-    static const wchar_t* hist_titles[NUM_COLS] = {
+    const wchar_t* hist_titles[NUM_COLS] = {
         L"", TR(L"\u7A0B\u5E8F\u540D\u79F0"), TR(L"\u7A0B\u5E8F\u7C7B\u522B"),
         TR(L"\u603B\u4E0B\u8F7D"), TR(L"\u603B\u4E0A\u4F20"),
         TR(L"\u5E73\u5747\u4E0B\u8F7D"), TR(L"\u5E73\u5747\u4E0A\u4F20")
     };
     for (int i = 0; i < NUM_COLS; i++) m_hist_cols[i].title = hist_titles[i];
 
-    static const wchar_t* conn_titles[NUM_CONN_COLS] = {
+    const wchar_t* conn_titles[NUM_CONN_COLS] = {
         TR(L"\u534F\u8BAE"), TR(L"\u672C\u5730\u5730\u5740"),
         TR(L"\u8FDC\u7A0B\u5730\u5740"), TR(L"\u5F52\u5C5E\u5730"), TR(L"\u72B6\u6001")
     };
     for (int i = 0; i < NUM_CONN_COLS; i++) m_conn_cols[i].title = conn_titles[i];
+    m_cols_sized = false;  // force re-measure on next paint
 }
 
 // ============================================================
@@ -244,6 +271,7 @@ bool CDetailWindow::Initialize(HINSTANCE hInst) {
     DwmSetWindowAttribute(m_hwnd, 33, &corner_pref, sizeof(corner_pref));
 
     CreateFonts();
+    AutoSizeColumns();  // one-shot after fonts exist
     m_pen_border = CreatePen(PS_SOLID, 1, m_dark_mode ? RGB(42, 42, 46) : RGB(238, 238, 238));
     m_pen_border_exp = CreatePen(PS_SOLID, 1, m_dark_mode ? RGB(42, 42, 46) : RGB(238, 238, 238));
     m_br_row[0] = CreateSolidBrush(GetBgColor());
@@ -2020,52 +2048,75 @@ void CDetailWindow::DrawSpeedSummary(HDC hdc, int w, int y) {
 
     int x = PADDING;
 
+    // Helper: measure text width with current font
+    auto measure = [&](const wchar_t* text) -> int {
+        SIZE sz = {};
+        GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &sz);
+        return sz.cx;
+    };
+
     if (m_active_tab == 1) {
         // History: show total traffic for selected range
         wchar_t recv_str[32], sent_str[32];
         FormatBytes(m_hist_total_recv, recv_str, 32);
         FormatBytes(m_hist_total_sent, sent_str, 32);
 
-        SetTextColor(hdc, GetSecondaryTextColor());
-        RECT l1 = { x, y, x + 80, y + SUMMARY_H };
-        DrawTextW(hdc, TR(L"\u603B\u4E0B\u8F7D\uFF1A"), -1, &l1, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-        x += 55;
-        SetTextColor(hdc, GetAccentColor(false));
-        RECT v1 = { x, y, x + 100, y + SUMMARY_H };
-        DrawTextW(hdc, recv_str, -1, &v1, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-        x += 110;
+        const wchar_t* lbl1 = TR(L"\u603B\u4E0B\u8F7D\uFF1A");
+        const wchar_t* lbl2 = TR(L"\u603B\u4E0A\u4F20\uFF1A");
+        int lw1 = measure(lbl1);
+        int vw1 = measure(recv_str);
+        int lw2 = measure(lbl2);
+        int vw2 = measure(sent_str);
+        int gap = (int)(8 * m_dpi_scale);
 
         SetTextColor(hdc, GetSecondaryTextColor());
-        RECT l2 = { x, y, x + 80, y + SUMMARY_H };
-        DrawTextW(hdc, TR(L"\u603B\u4E0A\u4F20\uFF1A"), -1, &l2, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-        x += 55;
+        RECT r1 = { x, y, x + lw1, y + SUMMARY_H };
+        DrawTextW(hdc, lbl1, -1, &r1, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        x += lw1 + gap;
+        SetTextColor(hdc, GetAccentColor(false));
+        RECT rv1 = { x, y, x + vw1 + gap, y + SUMMARY_H };
+        DrawTextW(hdc, recv_str, -1, &rv1, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        x += vw1 + gap * 3;
+
+        SetTextColor(hdc, GetSecondaryTextColor());
+        RECT r2 = { x, y, x + lw2, y + SUMMARY_H };
+        DrawTextW(hdc, lbl2, -1, &r2, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        x += lw2 + gap;
         SetTextColor(hdc, GetAccentColor(true));
-        RECT v2 = { x, y, x + 100, y + SUMMARY_H };
-        DrawTextW(hdc, sent_str, -1, &v2, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        RECT rv2 = { x, y, x + vw2 + gap, y + SUMMARY_H };
+        DrawTextW(hdc, sent_str, -1, &rv2, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
     } else {
         // Real-time: show current speed
         wchar_t down_str[32], up_str[32];
         FormatSpeed(m_total_down, down_str, 32);
         FormatSpeed(m_total_up, up_str, 32);
 
-        SetTextColor(hdc, GetSecondaryTextColor());
-        RECT l1 = { x, y, x + 80, y + SUMMARY_H };
-        DrawTextW(hdc, TR(L"\u4E0B\u8F7D\u603B\u901F\u5EA6\uFF1A"), -1, &l1, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-        x += 80;
-        SetTextColor(hdc, GetAccentColor(false));
+        const wchar_t* lbl1 = TR(L"\u4E0B\u8F7D\u603B\u901F\u5EA6\uFF1A");
+        const wchar_t* lbl2 = TR(L"\u4E0A\u4F20\u603B\u901F\u5EA6\uFF1A");
         wchar_t d_full[64]; swprintf_s(d_full, 64, L"\u2193 %s", down_str);
-        RECT v1 = { x, y, x + 100, y + SUMMARY_H };
-        DrawTextW(hdc, d_full, -1, &v1, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-        x += 120;
+        wchar_t u_full[64]; swprintf_s(u_full, 64, L"\u2191 %s", up_str);
+        int lw1 = measure(lbl1);
+        int vw1 = measure(d_full);
+        int lw2 = measure(lbl2);
+        int vw2 = measure(u_full);
+        int gap = (int)(8 * m_dpi_scale);
 
         SetTextColor(hdc, GetSecondaryTextColor());
-        RECT l2 = { x, y, x + 80, y + SUMMARY_H };
-        DrawTextW(hdc, TR(L"\u4E0A\u4F20\u603B\u901F\u5EA6\uFF1A"), -1, &l2, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-        x += 80;
+        RECT r1 = { x, y, x + lw1, y + SUMMARY_H };
+        DrawTextW(hdc, lbl1, -1, &r1, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        x += lw1 + gap;
+        SetTextColor(hdc, GetAccentColor(false));
+        RECT rv1 = { x, y, x + vw1 + gap, y + SUMMARY_H };
+        DrawTextW(hdc, d_full, -1, &rv1, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        x += vw1 + gap * 3;
+
+        SetTextColor(hdc, GetSecondaryTextColor());
+        RECT r2 = { x, y, x + lw2, y + SUMMARY_H };
+        DrawTextW(hdc, lbl2, -1, &r2, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        x += lw2 + gap;
         SetTextColor(hdc, GetAccentColor(true));
-        wchar_t u_full[64]; swprintf_s(u_full, 64, L"\u2191 %s", up_str);
-        RECT v2 = { x, y, x + 100, y + SUMMARY_H };
-        DrawTextW(hdc, u_full, -1, &v2, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        RECT rv2 = { x, y, x + vw2 + gap, y + SUMMARY_H };
+        DrawTextW(hdc, u_full, -1, &rv2, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
     }
 
     SelectObject(hdc, hOldFont);
@@ -2092,7 +2143,9 @@ void CDetailWindow::DrawTableHeader(HDC hdc, int w, int y) {
     Column* cols = GetActiveCols();
     int cx = PADDING;
     for (int i = 0; i < NUM_COLS; i++) {
-        RECT rc = { cx + 4, y, cx + cols[i].width - 4, y + TABLE_HEADER_H };
+        bool has_arrow = (i == m_sort_col[m_active_tab] && i >= 1);
+        int arrow_w = has_arrow ? 18 : 0;
+        RECT rc = { cx + 4, y, cx + cols[i].width - 4 - arrow_w, y + TABLE_HEADER_H };
         UINT fmt = DT_SINGLELINE | DT_VCENTER;
         switch (cols[i].align) {
         case Column::LEFT: fmt |= DT_LEFT; break;
@@ -2101,10 +2154,10 @@ void CDetailWindow::DrawTableHeader(HDC hdc, int w, int y) {
         }
         DrawTextW(hdc, cols[i].title, -1, &rc, fmt);
 
-        if (i == m_sort_col[m_active_tab] && i >= 1) {
+        if (has_arrow) {
             SetTextColor(hdc, GetAccentColor(false));
-            const wchar_t* arrow = m_sort_asc[m_active_tab] ? L" \u25B2" : L" \u25BC";
-            RECT arrow_rc = { rc.right - 16, y, rc.right + 4, y + TABLE_HEADER_H };
+            const wchar_t* arrow = m_sort_asc[m_active_tab] ? L"\u25B2" : L"\u25BC";
+            RECT arrow_rc = { cx + cols[i].width - 4 - arrow_w + 2, y, cx + cols[i].width - 4, y + TABLE_HEADER_H };
             DrawTextW(hdc, arrow, -1, &arrow_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
             SetTextColor(hdc, GetSecondaryTextColor());
         }
@@ -2526,6 +2579,9 @@ void CDetailWindow::DrawScrollbar(HDC hdc, int w, int h) {
 }
 
 void CDetailWindow::OnPaint() {
+    // Re-measure columns if language changed (before any drawing)
+    if (!m_cols_sized) AutoSizeColumns();
+
     PAINTSTRUCT ps;
     HDC hdc = BeginPaint(m_hwnd, &ps);
 

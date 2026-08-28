@@ -37,7 +37,7 @@ set INCLUDE=%MSVC%\VC\Tools\MSVC\14.44.35207\include;%SDK%\Include\%SDKVER%\um;%
 set LIB=%MSVC%\VC\Tools\MSVC\14.44.35207\lib\x86;%SDK%\Lib\%SDKVER%\um\x86;%SDK%\Lib\%SDKVER%\ucrt\x86
 set PATH=%MSVC%\VC\Tools\MSVC\14.44.35207\bin\Hostx86\x86;%PATH%
 
-cl %COMMON_FLAGS% /FeProcessNetMonitor_x86.dll src\capture.cpp src\plugin_main.cpp src\tooltip_popup.cpp src\detail_window.cpp src\etw_capture.cpp src\ip_geo.cpp src\signature.cpp /link %COMMON_LINK% /OUT:ProcessNetMonitor_x86.dll
+cl %COMMON_FLAGS% /FeProcessNetMonitor_x86.dll src\capture.cpp src\plugin_main.cpp src\tooltip_popup.cpp src\detail_window.cpp src\etw_capture.cpp src\ip_geo.cpp src\signature.cpp src\i18n.cpp /link %COMMON_LINK% /OUT:ProcessNetMonitor_x86.dll
 if %ERRORLEVEL% NEQ 0 (
     echo BUILD FAILED (x86)
     exit /b 1
@@ -51,7 +51,7 @@ set INCLUDE=%MSVC%\VC\Tools\MSVC\14.44.35207\include;%SDK%\Include\%SDKVER%\um;%
 set LIB=%MSVC%\VC\Tools\MSVC\14.44.35207\lib\x64;%SDK%\Lib\%SDKVER%\um\x64;%SDK%\Lib\%SDKVER%\ucrt\x64
 set PATH=%MSVC%\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64;%PATH%
 
-cl %COMMON_FLAGS% /FeProcessNetMonitor.dll src\capture.cpp src\plugin_main.cpp src\tooltip_popup.cpp src\detail_window.cpp src\etw_capture.cpp src\ip_geo.cpp src\signature.cpp /link %COMMON_LINK% /OUT:ProcessNetMonitor.dll
+cl %COMMON_FLAGS% /FeProcessNetMonitor.dll src\capture.cpp src\plugin_main.cpp src\tooltip_popup.cpp src\detail_window.cpp src\etw_capture.cpp src\ip_geo.cpp src\signature.cpp src\i18n.cpp /link %COMMON_LINK% /OUT:ProcessNetMonitor.dll
 if %ERRORLEVEL% NEQ 0 (
     echo BUILD FAILED (x64)
     exit /b 1
