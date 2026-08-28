@@ -1269,7 +1269,11 @@ static void OptionsAdjustLayout(HWND hwnd) {
                 bool is_push = (style & BS_PUSHBUTTON) != 0;
                 bool is_chk = (style & (BS_AUTOCHECKBOX | BS_AUTORADIOBUTTON)) != 0;
                 int pad = (is_push || is_chk) ? CHK_PAD : CTRL_PAD;
-                int text_w = PNM_MeasureText(hdc, hDlgFont, buf);
+                // 用控件自身的字体测量（WM_CREATE 时已统一设为 DEFAULT_GUI_FONT），
+                // 不能用对话框字体——对话框本身没设字体，口径不一致会导致实测偏窄、文本折行
+                HFONT hCtrlFont = (HFONT)SendMessageW(hChild, WM_GETFONT, 0, 0);
+                if (!hCtrlFont) hCtrlFont = hDlgFont;
+                int text_w = PNM_MeasureText(hdc, hCtrlFont, buf);
                 needed = text_w + pad;
                 if (needed < MIN_CTRL_W) needed = MIN_CTRL_W;
             }
@@ -1298,6 +1302,8 @@ static void OptionsAdjustLayout(HWND hwnd) {
     // Step 1.5: language combo (1014) fits the longest language name
     HWND hLangCombo = GetDlgItem(hwnd, 1014);
     if (hLangCombo) {
+        HFONT hComboFont = (HFONT)SendMessageW(hLangCombo, WM_GETFONT, 0, 0);
+        if (!hComboFont) hComboFont = hDlgFont;
         int max_item_w = 0;
         int cnt = (int)SendMessageW(hLangCombo, CB_GETCOUNT, 0, 0);
         for (int i = 0; i < cnt; i++) {
@@ -1305,7 +1311,7 @@ static void OptionsAdjustLayout(HWND hwnd) {
             if (len <= 0) continue;
             std::vector<wchar_t> tmp(len + 1);
             SendMessageW(hLangCombo, CB_GETLBTEXT, i, (LPARAM)tmp.data());
-            int w = PNM_MeasureText(hdc, hDlgFont, tmp.data());
+            int w = PNM_MeasureText(hdc, hComboFont, tmp.data());
             if (w > max_item_w) max_item_w = w;
         }
         int combo_w = max_item_w + 36;  // 文本 + 下拉箭头 + 边距
@@ -1325,10 +1331,14 @@ static void OptionsAdjustLayout(HWND hwnd) {
     if (hOld) SelectObject(hdc, hOld);
     ReleaseDC(hwnd, hdc);
 
-    // Step 2: Fit dialog width to controls (expand or shrink)
+    // Step 2: Fit dialog width to controls (expand or shrink), capped to screen
     RECT rcClient;
     GetClientRect(hwnd, &rcClient);
     int desired_cx = max(500, max_right + MARGIN);
+    {
+        int screen_w = GetSystemMetrics(SM_CXSCREEN);
+        if (desired_cx > screen_w - 40) desired_cx = screen_w - 40;
+    }
     if (desired_cx != rcClient.right) {
         RECT rcWnd = { 0, 0, desired_cx, rcClient.bottom };
         DWORD dlgStyle = (DWORD)GetWindowLongPtrW(hwnd, GWL_STYLE);
@@ -1416,7 +1426,7 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
     case WM_CREATE: {
         // Transparent area width label
         CreateWindowW(L"STATIC", TR(L"\x900F\x660E\x533A\x57DF\x5BBD\x5EA6\xFF08px\xFF09:"),
-            WS_CHILD | WS_VISIBLE, 10, 12, 260, 20, hwnd, (HMENU)1002, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | SS_ENDELLIPSIS, 10, 12, 260, 20, hwnd, (HMENU)1002, nullptr, nullptr);
         // Width edit
         wchar_t width_buf[16];
         swprintf_s(width_buf, L"%d", CProcessNetItem::s_transparent_width);
@@ -1426,7 +1436,7 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
 
         // Refresh interval label + combo (100/250/500/1000 ms)
         CreateWindowW(L"STATIC", TR(L"\x5237\x65B0\x95F4\x9694\xFF08ms\xFF09:"),
-            WS_CHILD | WS_VISIBLE, 10, 44, 260, 20, hwnd, (HMENU)1005, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | SS_ENDELLIPSIS, 10, 44, 260, 20, hwnd, (HMENU)1005, nullptr, nullptr);
         HWND hCombo = CreateWindowW(L"COMBOBOX", L"",
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
             190, 42, 130, 120, hwnd, (HMENU)1004, nullptr, nullptr);
@@ -1449,7 +1459,7 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         // ---- IP 库设置 ----
         // 代理服务器 label + edit (placeholder 提示)
         CreateWindowW(L"STATIC", TR(L"IP\u5E93\u4E0B\u8F7D\u8D70\u4EE3\u7406\u5730\u5740\uFF08\u652F\u6301 http/socks5\uFF0C\u7559\u7A7A=\u76F4\u8FDE\uFF09"),
-            WS_CHILD | WS_VISIBLE, 10, 100, 610, 20, hwnd, (HMENU)1010, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | SS_ENDELLIPSIS, 10, 100, 610, 20, hwnd, (HMENU)1010, nullptr, nullptr);
         HWND hProxyEdit = CreateWindowW(L"EDIT", IpGeo::Instance().GetProxy().c_str(),
             WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
             10, 122, 610, 24, hwnd, (HMENU)1007, nullptr, nullptr);
@@ -1458,7 +1468,7 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
 
         // 更新间隔 label + edit
         CreateWindowW(L"STATIC", TR(L"IP\u5E93\u81EA\u52A8\u66F4\u65B0\u95F4\u9694\uFF08\u5929\uFF0C\u9ED8\u8BA47\uFF09"),
-            WS_CHILD | WS_VISIBLE, 10, 154, 500, 20, hwnd, (HMENU)1011, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | SS_ENDELLIPSIS, 10, 154, 500, 20, hwnd, (HMENU)1011, nullptr, nullptr);
         wchar_t days_buf[16];
         swprintf_s(days_buf, L"%d", IpGeo::Instance().GetUpdateDays());
         CreateWindowW(L"EDIT", days_buf,
@@ -1490,7 +1500,7 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
 
         // 界面语言 label + combo (跟随系统 + 扫描到的语言)
         CreateWindowW(L"STATIC", TR(L"\u754C\u9762\u8BED\u8A00"),
-            WS_CHILD | WS_VISIBLE, 10, 242, 90, 20, hwnd, (HMENU)1015, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | SS_ENDELLIPSIS, 10, 242, 90, 20, hwnd, (HMENU)1015, nullptr, nullptr);
         HWND hLangCombo = CreateWindowW(L"COMBOBOX", L"",
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
             90, 240, 190, 200, hwnd, (HMENU)1014, nullptr, nullptr);
