@@ -81,12 +81,10 @@ CProcessNetPlugin::CProcessNetPlugin() {
 ## 五、调查产物（本目录）
 
 - `parse_dmp.py` / `walk_stack.py`：minidump 解析脚本（异常上下文、模块映射、栈回溯，无需 WinDbg）
+- `elevated_hover_test.py` / `inject_diagnosis.py`：**提权鼠标注入**测试工具（见经验教训 #6——非提权注入对提权前台必被 UIPI 拒；结果经文件回传，`hover_test_result.txt` 为最终回归记录）
 - `ntdll_win.bin`：ntdll 崩溃点附近反汇编窗口（capstone）
-- `tm1851_src/`：TM 1.85.1 官方源码（对比 LoadPlugins / PluginInterface.h 用）
-- `repro/`：四个隔离测试环境（portable 模式），修复后可直接回归
-  - `lite/`（1.86 lite）、`full/`（1.86 全量）、`lite1851/`、`full1851/`
-  - 插件更新后覆盖 `repro/*/TrafficMonitor/plugins/` 里的 DLL 即可重测
 - `img1.png` / `img2.png`：报告者截图
+- ~~`tm1851_src/`（TM 1.85.1 官方源码）~~、~~`repro/`（四个 portable 测试环境）~~：2026-09-08 调查收尾后已删除（回收站）；需要复测时从 `github.com/zhongyang219/TrafficMonitor/releases` 取对应版本安装包/源码，按第三节矩阵重建
 
 ## 六、经验教训
 
@@ -95,6 +93,7 @@ CProcessNetPlugin::CProcessNetPlugin() {
 3. **全零 CRITICAL_SECTION 是隐形炸弹**：无争抢时看起来能用（本例中连第一次 Enter 都会走 Contended），必须靠初始化保证，不能靠运气。可选的更稳做法：改用 SRWLOCK（SRWLOCK_INIT 即全零，零初始化就是合法状态）。
 4. **ITrafficMonitor 新接口（1.86）调用点要集中管理**：所有 `m_app->` 调用集中在 OnInitialize 及其后，用 `m_app == nullptr` 做版本判据，避免 1.85.x 下野指针。
 5. **混淆变量**：lite/全量对比实验中两个变量（版本、形态）未分离，导致第一轮误判。做 A/B 前先确认「两组唯一差异」。
+6. **GUI 自动化验证先证明注入生效**：本轮所有 `SetCursorPos` 鼠标悬浮操作实际全部被 UIPI 静默拒绝（非提权进程 + 提权前台窗口，返回 False 不报错），期间的「hover 弹出/移开隐藏」「1.86 lite 不弹」等观察实为咩咩手动操作的副作用或注入失败假象，险些误导结论（咩咩点破）。正确做法：`Start-Process -Verb RunAs` 提权跑注入脚本，注入后立即 `GetCursorPos` 读回比对确认生效，结果经文件回传。
 
 ## 七、修复实施记录（2026-09-08，v1.15.1）
 
@@ -111,11 +110,11 @@ CProcessNetPlugin::CProcessNetPlugin() {
 | 环境 | 提权 | 结果 |
 |---|---|---|
 | 1.85.1 lite | ✔ | ✅ 稳定 25s+（v1.15.0 同环境 12s 内崩）；`debug\werdumps\` 创建证明 EnsureInitialized 兜底跑通；悬浮窗 "Process Net Monitor (ETW) Total: U/D + 进程列表" 正常（BuildTooltip 原崩溃点产出） |
-| 1.85.1 full | ✔ | ✅ 稳定；**hover 主悬浮窗 popup 正常弹出/移开隐藏**（窗口枚举 PNMTooltip VIS↔hid 实证）；详情窗可见 |
-| 1.86 lite | ✔ | ✅ 稳定 20s+，PNM 窗口全部创建（OnInitialize→InitOnce 主线程路径正常）；hover 交互受首启对话框遮挡未验，由日常环境覆盖 |
-| 1.86 full | — | 咩咩日常环境自行验证（代码路径与 v1.15.0 逐行等价） |
+| 1.85.1 full | ✔ | ✅ 稳定；hover 主悬浮窗 popup 弹出/移开隐藏正常（咩咩手动悬停触发，截图 + 窗口枚举双重确认）；详情窗可见 |
+| 1.86 lite | ✔ | ✅ 稳定 20s+，PNM 窗口全部创建（OnInitialize→InitOnce 主线程路径正常）；hover 未验（当时鼠标注入被 UIPI 拒，属验证手段缺失，非插件问题） |
+| 1.86 full（日常） | ✔ | ✅ **提权注入自动验证 show=PASS hide=PASS**（hover 1.2s 弹出 → 移开 1s 隐藏，`issue12/hover_test_result.txt`）；代码路径与 v1.15.0 逐行等价 |
 
-全程零 dmp / crash.log。
+全程零 dmp / crash.log。修复已提交本地 git（9828e68，未 push）。
 
 ## 八、遗留事项
 
