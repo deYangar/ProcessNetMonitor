@@ -9,6 +9,7 @@
 - **修复日志正文被换行符覆盖**（v1.12.0 回归）：`etw_capture.log`/`capture.log` 的 `LogLine`/`WriteLog` 在格式化完成后从旧偏移写入 `\n`，把整行正文覆盖掉，日志只剩时间戳。改为定位真实末尾追加。此前远程诊断基本失明，issue #11 这类吞吐问题无从取证
 - **修复 capture.log 整个会话不写**：`InitOnce` 中 `LoadSettings`（内含日志目录同步）先于 `SetCapture` 执行，同步落在空指针上。新增 `CDetailWindow::SyncDebugLogs()` 在 `SetCapture` 后补一次同步
 - **修复 raw socket 列表跨线程竞态**：`CaptureLoop` 迭代 `m_socks` 前持锁取快照，`RebindSockets`/`Stop`/字节开关切换的写侧纳入同一把锁
+- **修复设置对话框 OK/Cancel 按钮重叠**：布局函数用固定右偏移对齐两按钮，未算 Cancel 文字适配后的实际宽度，Cancel 左缘压住 OK 约 7px；改为链式定位——Cancel 右缘与「立即更新」同右基线，OK 链在其左侧留 6px，任意语言/DPI 均不重叠
 
 ### v1.15.1 (2026-09-08)
 - **兼容 TM 1.85.x**（issue #12）：1.85.x 从不调用 `OnInitialize`，数据锁在首次 `DataRequired`（工作线程）才初始化导致崩溃 `0xC0000409`，悬浮窗也在无线程消息泵的线程里创建而失效。改为静态构造时初始化锁 + 借 `EI_CONFIG_DIR` 在主线程提前完成一次性初始化；同时修复悬浮窗点击固定失效（popup z-order / 所有权）
