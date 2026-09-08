@@ -1491,19 +1491,32 @@ static void OptionsAdjustLayout(HWND hwnd) {
     }
 
     // Step 4: Right-align OK/Cancel with max_right
-    int btn_y_ok = 0, btn_y_cancel = 0;
-    for (int btn_id : { IDOK, IDCANCEL }) {
-        HWND hBtn = GetDlgItem(hwnd, btn_id);
-        if (!hBtn) continue;
+    // Cancel 右缘对齐 dlg_w-15（与立即更新/刷新下拉同一右基线），OK 右缘贴
+    // Cancel 左缘留 6px 间距。不能给 OK 用固定右偏移：Step 1 已按文字实测
+    // 改了两按钮宽度，固定偏移算出的 OK 右缘会落进 Cancel 左边缘（重叠 ~7px）
+    HWND hCancelBtn = GetDlgItem(hwnd, IDCANCEL);
+    if (hCancelBtn) {
         RECT rc;
-        GetWindowRect(hBtn, &rc);
+        GetWindowRect(hCancelBtn, &rc);
         MapWindowPoints(HWND_DESKTOP, hwnd, (LPPOINT)&rc, 2);
-        int btn_w = rc.right - rc.left;
-        int btn_y = rc.top;
-        int offset = (btn_id == IDOK) ? 80 : 8;
-        int new_x = max_right - btn_w - offset;
+        int new_x = dlg_w - (rc.right - rc.left) - 15;
         if (new_x < 10) new_x = 10;
-        SetWindowPos(hBtn, nullptr, new_x, btn_y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+        SetWindowPos(hCancelBtn, nullptr, new_x, rc.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+    }
+    HWND hOkBtn = GetDlgItem(hwnd, IDOK);
+    if (hOkBtn) {
+        RECT rc;
+        GetWindowRect(hOkBtn, &rc);
+        MapWindowPoints(HWND_DESKTOP, hwnd, (LPPOINT)&rc, 2);
+        int new_x = 10;
+        if (hCancelBtn) {
+            RECT rcC;
+            GetWindowRect(hCancelBtn, &rcC);
+            MapWindowPoints(HWND_DESKTOP, hwnd, (LPPOINT)&rcC, 2);
+            new_x = rcC.left - (rc.right - rc.left) - 6;
+        }
+        if (new_x < 10) new_x = 10;
+        SetWindowPos(hOkBtn, nullptr, new_x, rc.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
     }
 }
 
