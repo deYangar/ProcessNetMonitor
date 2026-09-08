@@ -1,5 +1,5 @@
 @echo off
-cd /d "C:\Users\Yang\.openclaw\workspace\projects\ProcessNetMonitor\plugin"
+cd /d "C:\Users\Yang\.zcode\workspace\default\projects\ProcessNetMonitor\plugin"
 set MSVC=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools
 set SDK=C:\Program Files (x86)\Windows Kits\10
 set SDKVER=10.0.26100.0

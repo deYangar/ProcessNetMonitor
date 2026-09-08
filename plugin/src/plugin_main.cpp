@@ -245,6 +245,16 @@ CProcessNetPlugin::CProcessNetPlugin() {
     m_items[0].Init(CProcessNetItem::DIR_UPLOAD);
     m_items[1].Init(CProcessNetItem::DIR_DOWNLOAD);
     m_items[2].Init(CProcessNetItem::DIR_TRANSPARENT);
+    // The data lock must be valid before ANY code path can touch the cached
+    // stats. v1.15.0 initialized it inside OnInitialize, which TrafficMonitor
+    // 1.85.x never calls (the hook was added in 1.86) - the all-zero
+    // CRITICAL_SECTION then crashed RtlpEnterCriticalSectionContended on the
+    // second DataRequired (issue #12). Static-object construction runs at DLL
+    // load time on every host version.
+    if (!m_lock_inited) {
+        InitializeCriticalSection(&m_data_lock);
+        m_lock_inited = true;
+    }
 }
 
 CProcessNetPlugin CProcessNetPlugin::s_instance;
@@ -459,6 +469,14 @@ IPluginItem* CProcessNetPlugin::GetItem(int i) {
 }
 
 void CProcessNetPlugin::DataRequired() {
+    // Last-resort fallback only: every known host (1.85.x and 1.86 alike)
+    // delivers EI_CONFIG_DIR on the main thread before the first tick, which
+    // already ran the init. If some exotic host never does, initialize here
+    // anyway - note DataRequired may fire on a worker thread in that case
+    // (1.85.x MonitorThreadCallback), where the popup/detail windows would
+    // be created without a message pump (data still works, popup does not).
+    if (!m_inited) EnsureInitialized();
+
     if (!m_started) {
         m_items[0].Init(CProcessNetItem::DIR_UPLOAD);
         m_items[1].Init(CProcessNetItem::DIR_DOWNLOAD);
@@ -776,7 +794,7 @@ const wchar_t* CProcessNetPlugin::GetInfo(PluginInfoIndex i) {
     case TMI_DESCRIPTION: return L"Per-process network speed";
     case TMI_AUTHOR: return L"deYangar";
     case TMI_COPYRIGHT: return L"MIT";
-    case TMI_VERSION: return L"1.15.0";
+    case TMI_VERSION: return L"1.15.1";
     case TMI_URL: return L"https://github.com/deYangar/ProcessNetMonitor";
     default: return L"";
     }
@@ -792,7 +810,32 @@ const wchar_t* CProcessNetPlugin::GetTooltipInfo() {
 
 void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
     m_app = p;
+    if (!m_inited) {
+        m_inited = true;
+        InitOnce(p->GetPluginConfigDir());
+    }
+}
 
+// TrafficMonitor 1.85.x never calls OnInitialize (the hook was added in
+// 1.86, issue #12): run the same one-time init on EI_CONFIG_DIR instead -
+// both hosts deliver it on the MAIN thread during LoadPlugins (see
+// OnExtenedInfo). m_app stays nullptr there, so every m_app-> call site
+// (all null-guarded) falls back to its default - notably GetStringRes-based
+// language detection pins "auto" mode to zh-CN.
+void CProcessNetPlugin::EnsureInitialized() {
+    if (m_inited) return;
+    m_inited = true;   // set first: InitOnce starts the timer thread at its tail
+    // EI_CONFIG_DIR arrives via OnExtenedInfo at load time (1.85.x too) and
+    // carries the same "<config>\plugins\" dir that GetPluginConfigDir()
+    // returns on 1.86 - settings/history keep the same location either way.
+    InitOnce(m_tm_config_dir.empty() ? nullptr : m_tm_config_dir.c_str());
+}
+
+// Full one-time initialization, shared by OnInitialize (1.86+) and
+// EnsureInitialized (first DataRequired under 1.85.x).
+// cfg_base: host-provided plugins\ directory; nullptr => derive it from the
+// DLL's own location as a last resort.
+void CProcessNetPlugin::InitOnce(const wchar_t* cfg_base) {
     // Crash diagnostics: the filter catches normal unhandled exceptions;
     // the vectored handler also has a chance to catch failfast termination
     // (e.g. heap corruption 0xc0000374), which bypasses the filter.
@@ -804,17 +847,28 @@ void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
     HINSTANCE hInst = s_dll_hinst ? s_dll_hinst : (HINSTANCE)GetModuleHandleW(NULL);
     m_popup_created = m_popup.Initialize(hInst);
 
-    // Use TM's plugin config dir + plugin name (GetPluginConfigDir returns the plugins/ folder)
-    const wchar_t* cfg_base = p->GetPluginConfigDir();
+    // Plugin config dir: <plugins>\ProcessNetMonitor (GetPluginConfigDir returns
+    // the plugins/ folder on 1.86). capture.log / etw_capture.log follow the
+    // "debug_logs" setting (default OFF), synced inside LoadSettings. Crash
+    // diagnostics (crash.log / crash.dmp / werdumps) are always enabled.
+    // Production ETW per-process counter (attaches/starts NT Kernel Logger)
+    std::wstring cfg_dir;
     if (cfg_base && cfg_base[0]) {
-        std::wstring cfg_dir = std::wstring(cfg_base) + L"\\ProcessNetMonitor";
-        m_detail.SetConfigDir(cfg_dir.c_str());
-        // capture.log / etw_capture.log follow the "debug_logs" setting
-        // (default OFF), synced inside LoadSettings. Crash diagnostics
-        // (crash.log / crash.dmp / werdumps) are always enabled.
-        // Production ETW per-process counter (attaches/starts NT Kernel Logger)
-        m_etw_cap.Start();
+        cfg_dir = std::wstring(cfg_base) + L"\\ProcessNetMonitor";
+    } else {
+        // Host never delivered a config dir either: fall back to
+        // <dll dir>\ProcessNetMonitor. Standard installs put the DLL right in
+        // plugins\, so this still lands on plugins\ProcessNetMonitor\.
+        wchar_t dll_path[MAX_PATH] = {};
+        GetModuleFileNameW(s_dll_hinst ? s_dll_hinst : (HINSTANCE)GetModuleHandleW(NULL), dll_path, MAX_PATH);
+        std::wstring dll_dir(dll_path);
+        size_t slash = dll_dir.find_last_of(L"\\");
+        if (slash != std::wstring::npos) dll_dir.resize(slash);
+        cfg_dir = dll_dir + L"\\ProcessNetMonitor";
     }
+    m_detail.SetConfigDir(cfg_dir.c_str());
+    m_etw_cap.Start();
+
     m_detail.LoadHistory();
     m_detail.LoadSettings();   // 读取界面语言等设置（lang 字段）
 
@@ -833,7 +887,8 @@ void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
             std::wstring lang_dir = dll_dir + L"\\ProcessNetMonitor\\lang";
             CreateDirectoryW(lang_dir.c_str(), nullptr);
             I18n::ScanLangFiles(lang_dir);
-            // TM 主程序语言（auto 模式匹配用）
+            // TM 主程序语言（auto 模式匹配用）；GetStringRes 是 1.86 接口，
+            // m_app 为空时固定 zh-CN（issue #12 兜底路径）
             const wchar_t* bcp = (m_app ? m_app->GetStringRes(L"BCP_47", L"general") : nullptr);
             I18n::SetTmLang(bcp && bcp[0] ? bcp : L"zh-CN");
             // 用户设置：auto 或具体 BCP-47
@@ -868,7 +923,8 @@ void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
     // OnStats callback - two sources with different cumulative counters
     // (legacy double-counts under TUN) alternate and inflate history deltas.
 
-    // High-frequency data refresh timer (independent of TM's 1s tick)
+    // High-frequency data refresh timer (independent of TM's 1s tick);
+    // the constructor already initialized the lock, this is a no-op guard
     if (!m_lock_inited) {
         InitializeCriticalSection(&m_data_lock);
         m_lock_inited = true;
@@ -888,6 +944,13 @@ void CProcessNetPlugin::OnExtenedInfo(ExtendedInfoIndex index, const wchar_t* da
     if (index == EI_CONFIG_DIR && data && data[0]) {
         m_tm_config_dir = data;
         m_capture.SetTMConfigDir(m_tm_config_dir);
+        // EI_CONFIG_DIR is delivered synchronously on the host's MAIN thread
+        // at load time by both 1.85.x and 1.86 (CPluginManager::LoadPlugins).
+        // Under 1.85.x OnInitialize never runs (issue #12), so run the
+        // one-time init HERE - NOT on the first DataRequired(): that fires on
+        // TM's monitor worker thread (MonitorThreadCallback), and windows
+        // created there get no message pump, killing the hover popup.
+        EnsureInitialized();
     } else if (index == EI_VALUE_TEXT_COLOR && data && data[0]) {
         // TM passes the value text color right before DrawItem (taskbar & main window)
         CProcessNetItem::s_value_color = (COLORREF)wcstoul(data, nullptr, 10);

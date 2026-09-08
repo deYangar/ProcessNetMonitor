@@ -48,3 +48,12 @@ YOLO_PLAN.md
 *.xdb
 # Research scratch
 research_ipdb/
+# Issue12 investigation: large repro environments / TM reference source / run artifacts
+issue12/repro/
+issue12/tm1851_src/
+issue12/__pycache__/
+issue12/hover_test_result.txt
+issue12/ntdll_win.bin
+
+# Issue12 investigation scripts - local only, never pushed
+issue12/

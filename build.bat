@@ -1,5 +1,5 @@
 @echo off
-cd /d "C:\Users\Yang\.openclaw\workspace\projects\ProcessNetMonitor\plugin"
+cd /d "C:\Users\Yang\.zcode\workspace\default\projects\ProcessNetMonitor\plugin"
 
 :: Setup MSVC environment
 set MSVC=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools
@@ -68,17 +68,17 @@ goto :deploy_all
 :: Deploy x64 DLL (use CIM to kill admin-privileged TM, works without elevation)
 powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"name='TrafficMonitor.exe'\" | Invoke-CimMethod -MethodName Terminate | Out-Null"
 timeout /t 2 /nobreak >nul
-copy /y ProcessNetMonitor.dll "C:\Users\Yang\.openclaw\workspace\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor\plugins\ProcessNetMonitor.dll"
+copy /y ProcessNetMonitor.dll "C:\Users\Yang\.zcode\workspace\default\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor\plugins\ProcessNetMonitor.dll"
 if %ERRORLEVEL% NEQ 0 (
     echo WARNING: x64 DLL copy failed! Close TrafficMonitor first.
     exit /b 1
 )
 :: Deploy language files to <plugins>\ProcessNetMonitor\lang\
-if not exist "C:\Users\Yang\.openclaw\workspace\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor\plugins\ProcessNetMonitor\lang" mkdir "C:\Users\Yang\.openclaw\workspace\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor\plugins\ProcessNetMonitor\lang"
-copy /y src\lang\*.ini "C:\Users\Yang\.openclaw\workspace\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor\plugins\ProcessNetMonitor\lang\" >nul
+if not exist "C:\Users\Yang\.zcode\workspace\default\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor\plugins\ProcessNetMonitor\lang" mkdir "C:\Users\Yang\.zcode\workspace\default\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor\plugins\ProcessNetMonitor\lang"
+copy /y src\lang\*.ini "C:\Users\Yang\.zcode\workspace\default\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor\plugins\ProcessNetMonitor\lang\" >nul
 :: Start TM as user Yang (must use working directory for TM to find its config)
 echo @echo off > "%TEMP%\launch_tm.bat"
-echo cd /d "C:\Users\Yang\.openclaw\workspace\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor" >> "%TEMP%\launch_tm.bat"
+echo cd /d "C:\Users\Yang\.zcode\workspace\default\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor" >> "%TEMP%\launch_tm.bat"
 echo start "" TrafficMonitor.exe >> "%TEMP%\launch_tm.bat"
 schtasks /create /tn "LaunchTM" /tr "%TEMP%\launch_tm.bat" /sc once /st 00:00 /ru Yang /f >nul 2>&1
 schtasks /run /tn "LaunchTM" >nul 2>&1
@@ -91,18 +91,18 @@ goto :eof
 :: Deploy both DLLs
 powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"name='TrafficMonitor.exe'\" | Invoke-CimMethod -MethodName Terminate | Out-Null"
 timeout /t 2 /nobreak >nul
-copy /y ProcessNetMonitor.dll "C:\Users\Yang\.openclaw\workspace\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor\plugins\ProcessNetMonitor.dll"
-copy /y ProcessNetMonitor_x86.dll "C:\Users\Yang\.openclaw\workspace\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor\plugins\ProcessNetMonitor_x86.dll"
+copy /y ProcessNetMonitor.dll "C:\Users\Yang\.zcode\workspace\default\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor\plugins\ProcessNetMonitor.dll"
+copy /y ProcessNetMonitor_x86.dll "C:\Users\Yang\.zcode\workspace\default\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor\plugins\ProcessNetMonitor_x86.dll"
 if %ERRORLEVEL% NEQ 0 (
     echo WARNING: DLL copy failed! Close TrafficMonitor first.
     exit /b 1
 )
 :: Deploy language files to <plugins>\ProcessNetMonitor\lang\
-if not exist "C:\Users\Yang\.openclaw\workspace\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor\plugins\ProcessNetMonitor\lang" mkdir "C:\Users\Yang\.openclaw\workspace\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor\plugins\ProcessNetMonitor\lang"
-copy /y src\lang\*.ini "C:\Users\Yang\.openclaw\workspace\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor\plugins\ProcessNetMonitor\lang\" >nul
+if not exist "C:\Users\Yang\.zcode\workspace\default\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor\plugins\ProcessNetMonitor\lang" mkdir "C:\Users\Yang\.zcode\workspace\default\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor\plugins\ProcessNetMonitor\lang"
+copy /y src\lang\*.ini "C:\Users\Yang\.zcode\workspace\default\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor\plugins\ProcessNetMonitor\lang\" >nul
 :: Start TM as user Yang
 echo @echo off > "%TEMP%\launch_tm.bat"
-echo cd /d "C:\Users\Yang\.openclaw\workspace\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor" >> "%TEMP%\launch_tm.bat"
+echo cd /d "C:\Users\Yang\.zcode\workspace\default\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor" >> "%TEMP%\launch_tm.bat"
 echo start "" TrafficMonitor.exe >> "%TEMP%\launch_tm.bat"
 schtasks /create /tn "LaunchTM" /tr "%TEMP%\launch_tm.bat" /sc once /st 00:00 /ru Yang /f >nul 2>&1
 schtasks /run /tn "LaunchTM" >nul 2>&1

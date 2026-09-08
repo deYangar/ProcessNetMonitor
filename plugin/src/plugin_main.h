@@ -114,6 +114,9 @@ public:
     bool m_refresh_timer_ok = false;
     CRITICAL_SECTION m_data_lock;         // guards cached stats + item updates
     bool m_lock_inited = false;
+    bool m_inited = false;                // InitOnce() has run (OnInitialize or first DataRequired)
+    void InitOnce(const wchar_t* cfg_base);   // full one-time init, shared by both entries
+    void EnsureInitialized();                 // issue #12: hosts that never call OnInitialize
     std::map<DWORD, std::deque<WinSample>> m_win;   // rolling 1s window samples
     static void CALLBACK RefreshTimerProc(void* param, BOOLEAN timer_or_wait);
     void RefreshTick();
