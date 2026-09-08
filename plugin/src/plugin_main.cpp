@@ -485,7 +485,12 @@ void CProcessNetPlugin::DataRequired() {
         ULONGLONG now = GetTickCount64();
         if (m_last_start_attempt == 0 || now - m_last_start_attempt >= 10000) {
             m_last_start_attempt = now;
-            m_started = m_capture.Start();
+            // issue #11: while ETW is producing data, start WITHOUT the raw-
+            // socket byte capture - SIO_RCVALL makes the kernel copy every
+            // packet and costs measurable throughput at gigabit line rate.
+            // Only the lightweight connection-table monitor starts; RefreshTick
+            // flips byte capture back on if ETW goes silent.
+            m_started = m_capture.Start(!m_etw_cap.HasData());
             m_last_time = now;
         }
         if (!m_started) {
@@ -540,6 +545,9 @@ void CProcessNetPlugin::DataRequired() {
     if (dt < 0.1) dt = 0.1;
     m_last_time = now;
 
+    // Same byte-capture policy as RefreshTick (this legacy path only runs
+    // when the refresh timer could not be created).
+    m_capture.SetByteCaptureEnabled(!m_etw_cap.HasData());
     auto stats = m_capture.GetStats(dt);
 
     // ETW backend takes priority: more accurate per-process bytes (TCP+UDP,
@@ -636,6 +644,11 @@ void CProcessNetPlugin::BuildTooltip(bool etw_active, const std::vector<ProcTraf
 // High-frequency refresh: runs on a TimerQueueTimer independent of TM's tick.
 void CProcessNetPlugin::RefreshTick() {
     if (!m_started) return;
+
+    // issue #11: ETW primary -> legacy byte capture OFF (no raw socket, no
+    // per-connection EStats polling). ETW silent for >15s (HasData() false)
+    // -> legacy byte capture back ON as fallback. Same-state calls are no-ops.
+    m_capture.SetByteCaptureEnabled(!m_etw_cap.HasData());
 
     // 运行期语言检测：TM 语言或 lang\ 目录变化 → 重载语言表并通知各窗口刷新
     CheckLanguageChange();
@@ -794,7 +807,7 @@ const wchar_t* CProcessNetPlugin::GetInfo(PluginInfoIndex i) {
     case TMI_DESCRIPTION: return L"Per-process network speed";
     case TMI_AUTHOR: return L"deYangar";
     case TMI_COPYRIGHT: return L"MIT";
-    case TMI_VERSION: return L"1.15.1";
+    case TMI_VERSION: return L"1.16.0";
     case TMI_URL: return L"https://github.com/deYangar/ProcessNetMonitor";
     default: return L"";
     }
@@ -901,6 +914,9 @@ void CProcessNetPlugin::InitOnce(const wchar_t* cfg_base) {
 
     // Set PacketCapture pointer for connection details
     m_detail.SetCapture(&m_capture);
+    // LoadSettings ran before SetCapture, so its log-dir sync hit a null
+    // capture pointer - redo it now or capture.log stays empty all session.
+    m_detail.SyncDebugLogs();
     // Sync transparent width from settings to static member
     CProcessNetItem::s_transparent_width = m_detail.GetTransparentWidth();
     // Sync Up/Down items visibility master switch (issue #9)

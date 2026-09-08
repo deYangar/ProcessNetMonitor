@@ -63,6 +63,11 @@ public:
     void SetCapture(PacketCapture* capture) { m_capture = capture; }
     bool GetDebugLogs() const { return m_debug_logs; }
     void SetDebugLogs(bool on);
+    // Push the current debug-log switch + log dir to both capture backends.
+    // Safe to call repeatedly; needed after SetCapture too - LoadSettings runs
+    // BEFORE SetCapture, so its own sync hit a null capture and capture.log
+    // was never written for the whole session (issue #11 diagnostics).
+    void SyncDebugLogs();
 
 
     // History time range (natural-day aligned, local midnight)

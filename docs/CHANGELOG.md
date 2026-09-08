@@ -4,6 +4,15 @@
 
 ## 版本历史
 
+### v1.16.0 (2026-09-08)
+- **ETW 主导时关闭 legacy raw socket 抓包**（issue #11：用户反馈启用插件后千兆带宽只跑到 700M）：此前 ETW 与 legacy 采集双路常驻，`SIO_RCVALL` raw socket 让内核复制每一个数据包（千兆线速 ≈ 8 万+ 包/秒），加上每 500ms 对所有 ESTABLISHED 连接轮询 `GetPerTcpConnectionEStats`（穿透 per-TCB 锁），在核少/中断集中的机器上实测可吃掉 10~30% 吞吐。现在 ETW 就绪后只保留轻量连接表监控（3s 一次，供连接数与连接详情），raw socket 与 EStats 轮询全部关闭；ETW 静默超过 15s（会话丢失且重建失败）自动回退 legacy 全量采集，恢复后再次关闭。启动初期 ETW 未就绪时照旧全量启动，首事件到达后自动切换
+- **修复日志正文被换行符覆盖**（v1.12.0 回归）：`etw_capture.log`/`capture.log` 的 `LogLine`/`WriteLog` 在格式化完成后从旧偏移写入 `\n`，把整行正文覆盖掉，日志只剩时间戳。改为定位真实末尾追加。此前远程诊断基本失明，issue #11 这类吞吐问题无从取证
+- **修复 capture.log 整个会话不写**：`InitOnce` 中 `LoadSettings`（内含日志目录同步）先于 `SetCapture` 执行，同步落在空指针上。新增 `CDetailWindow::SyncDebugLogs()` 在 `SetCapture` 后补一次同步
+- **修复 raw socket 列表跨线程竞态**：`CaptureLoop` 迭代 `m_socks` 前持锁取快照，`RebindSockets`/`Stop`/字节开关切换的写侧纳入同一把锁
+
+### v1.15.1 (2026-09-08)
+- **兼容 TM 1.85.x**（issue #12）：1.85.x 从不调用 `OnInitialize`，数据锁在首次 `DataRequired`（工作线程）才初始化导致崩溃 `0xC0000409`，悬浮窗也在无线程消息泵的线程里创建而失效。改为静态构造时初始化锁 + 借 `EI_CONFIG_DIR` 在主线程提前完成一次性初始化；同时修复悬浮窗点击固定失效（popup z-order / 所有权）
+
 ### v1.15.0 (2026-08-29)
 - **多语言支持**（issue #10）：插件 UI 可跟随 TM 主程序语言自动切换，也可在插件「选项」手动选择；内置 English，中文为默认兜底；语言文件与 TM 同格式（`[text]` section，中文 key），社区可无编译贡献翻译
 - **文字标签全量自动 px 适配**：列头/汇总行/设置页控件按译文实测宽度双向伸缩，切语言不再需要手动适配；详情窗口宽度跟随内容，用户手动拉伸后锁定

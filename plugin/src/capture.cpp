@@ -158,12 +158,16 @@ void PacketCapture::RebindSockets(const std::vector<std::string>& new_ips) {
         m_local_ips.push_back(addr);
     }
 
-    // Close old sockets
-    for (auto& s : m_socks) { if (s != INVALID_SOCKET) closesocket(s); }
-    m_socks.clear();
+    // Close old sockets (under the same lock CaptureLoop snapshots with)
+    {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        for (auto& s : m_socks) { if (s != INVALID_SOCKET) closesocket(s); }
+        m_socks.clear();
+    }
 
     // Create new sockets (track last failure stage + WSA error code)
     int fail_stage = 0, wsa_err = 0;
+    std::vector<SOCKET> new_socks;
     for (auto& ip : new_ips) {
         SOCKET s = socket(AF_INET, SOCK_RAW, IPPROTO_IP);
         if (s == INVALID_SOCKET) { fail_stage = 1; wsa_err = WSAGetLastError(); continue; }
@@ -180,14 +184,17 @@ void PacketCapture::RebindSockets(const std::vector<std::string>& new_ips) {
         }
         int timeout = 500;
         setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
-        m_socks.push_back(s);
+        new_socks.push_back(s);
     }
 
-    if (!m_socks.empty()) {
+    if (!new_socks.empty()) {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        m_socks = std::move(new_socks);
         m_last_bind_key = new_key;  // commit key only on success
         m_fail_stage = 0;
         m_last_wsa_error = 0;
     } else {
+        std::lock_guard<std::mutex> lk(m_mutex);
         m_last_bind_key.clear();    // leave key uncommitted so next round actually retries
         m_fail_stage = fail_stage;
         m_last_wsa_error = wsa_err;
@@ -195,6 +202,7 @@ void PacketCapture::RebindSockets(const std::vector<std::string>& new_ips) {
 }
 
 void PacketCapture::CheckConfigChanged() {
+    if (!m_byte_enabled.load()) return;  // connection-monitor mode: no sockets to rebind
     time_t now = time(NULL);
     if (now - m_last_config_check < 5) return;  // check every 5 seconds
     m_last_config_check = now;
@@ -246,7 +254,7 @@ std::wstring PacketCapture::GetProcessPath(DWORD pid) {
 // Start / Stop
 // ============================================================
 
-bool PacketCapture::Start() {
+bool PacketCapture::Start(bool with_byte_capture) {
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
         SetError(TR(L"\u7f51\u7edc\u521d\u59cb\u5316\u5931\u8d25"), TR(L"WSAStartup \u5931\u8d25\uff08\u9519\u8bef\u7801 %d\uff09\u3002Windows \u7f51\u7edc\u7ec4\u4ef6\u5f02\u5e38\uff0c\u8bf7\u5c1d\u8bd5\u91cd\u542f\u7535\u8111\u3002"), WSAGetLastError());
@@ -254,6 +262,8 @@ bool PacketCapture::Start() {
         return false;
     }
 
+    // Adapter presence check runs in both modes: even without byte capture the
+    // user deserves the "no usable adapter" hint instead of a silent empty UI.
     auto bind_ips = ReadTMAdapterConfig();
     if (bind_ips.empty()) {
         SetError(TR(L"\u672a\u627e\u5230\u53ef\u7528\u7f51\u5361"), TR(L"\u672a\u627e\u5230\u5df2\u542f\u7528\u4e14\u62e5\u6709 IPv4 \u5730\u5740\u7684\u7f51\u7edc\u9002\u914d\u5668\u3002\u8bf7\u68c0\u67e5\u7f51\u7edc\u8fde\u63a5\uff0c\u6216\u67e5\u770b TrafficMonitor \u7684\u300c\u8fde\u63a5\u300d\u8bbe\u7f6e\u3002"));
@@ -261,44 +271,114 @@ bool PacketCapture::Start() {
         WSACleanup(); return false;
     }
 
-    RebindSockets(bind_ips);
-    if (m_socks.empty()) {
-        int wsa = m_last_wsa_error;
-        switch (m_fail_stage) {
-        case 1:  // socket() failed
-            if (wsa == WSAEACCES)
-                SetError(TR(L"\u9700\u8981\u7ba1\u7406\u5458\u6743\u9650"), TR(L"\u521b\u5efa\u539f\u59cb\u5957\u63a5\u5b57\u88ab\u62d2\u7edd\uff08WSAError 10013\uff09\u3002\u672c\u63d2\u4ef6\u901a\u8fc7\u539f\u59cb\u5957\u63a5\u5b57\u6293\u53d6\u6570\u636e\u5305\uff0c\u9700\u8981\u7ba1\u7406\u5458\u6743\u9650\u3002\n\u89e3\u51b3\u65b9\u6cd5\uff1a\u53f3\u952e TrafficMonitor \u2192 \u4ee5\u7ba1\u7406\u5458\u8eab\u4efd\u8fd0\u884c\u3002\n\u82e5\u5df2\u662f\u7ba1\u7406\u5458\u8fd0\u884c\uff0c\u8bf7\u68c0\u67e5\u706b\u7ed2/360 \u7b49\u5b89\u5168\u8f6f\u4ef6\u662f\u5426\u62e6\u622a\u539f\u59cb\u5957\u63a5\u5b57\u3002"));
-            else
-                SetError(TR(L"\u5957\u63a5\u5b57\u521b\u5efa\u5931\u8d25"), TR(L"\u521b\u5efa\u539f\u59cb\u5957\u63a5\u5b57\u5931\u8d25\uff08WSAError %d\uff09\u3002\u8bf7\u5c1d\u8bd5\u4ee5\u7ba1\u7406\u5458\u8eab\u4efd\u8fd0\u884c TrafficMonitor\uff0c\u6216\u68c0\u67e5\u5b89\u5168\u8f6f\u4ef6\u8bbe\u7f6e\u3002"), wsa);
-            break;
-        case 2:  // bind() failed
-            SetError(TR(L"\u7ed1\u5b9a\u7f51\u5361\u5931\u8d25"), TR(L"\u7ed1\u5b9a\u7f51\u5361 IP \u5931\u8d25\uff08WSAError %d\uff09\u3002\u7f51\u5361 IP \u53ef\u80fd\u5df2\u53d8\u5316\uff0c\u63d2\u4ef6\u5c06\u81ea\u52a8\u91cd\u8bd5\u3002"), wsa);
-            break;
-        case 3:  // WSAIoctl(SIO_RCVALL) failed
-            SetError(TR(L"\u6293\u5305\u88ab\u62d2\u7edd"), TR(L"\u5f00\u542f\u6293\u5305\u6a21\u5f0f\u5931\u8d25\uff08SIO_RCVALL\uff0cWSAError %d\uff09\u3002\u901a\u5e38\u662f\u6743\u9650\u4e0d\u8db3\u6216\u88ab\u5b89\u5168\u8f6f\u4ef6\u62e6\u622a\u3002\n\u89e3\u51b3\u65b9\u6cd5\uff1a\u53f3\u952e TrafficMonitor \u2192 \u4ee5\u7ba1\u7406\u5458\u8eab\u4efd\u8fd0\u884c\u3002"), wsa);
-            break;
-        default:
-            SetError(TR(L"\u6293\u5305\u542f\u52a8\u5931\u8d25"), TR(L"\u65e0\u6cd5\u521b\u5efa\u4efb\u4f55\u6293\u5305\u5957\u63a5\u5b57\u3002\u8bf7\u5c1d\u8bd5\u4ee5\u7ba1\u7406\u5458\u8eab\u4efd\u8fd0\u884c TrafficMonitor\u3002"));
-            break;
+    m_byte_enabled.store(with_byte_capture);
+    if (with_byte_capture) {
+        RebindSockets(bind_ips);
+        if (m_socks.empty()) {
+            int wsa = m_last_wsa_error;
+            switch (m_fail_stage) {
+            case 1:  // socket() failed
+                if (wsa == WSAEACCES)
+                    SetError(TR(L"\u9700\u8981\u7ba1\u7406\u5458\u6743\u9650"), TR(L"\u521b\u5efa\u539f\u59cb\u5957\u63a5\u5b57\u88ab\u62d2\u7edd\uff08WSAError 10013\uff09\u3002\u672c\u63d2\u4ef6\u901a\u8fc7\u539f\u59cb\u5957\u63a5\u5b57\u6293\u53d6\u6570\u636e\u5305\uff0c\u9700\u8981\u7ba1\u7406\u5458\u6743\u9650\u3002\n\u89e3\u51b3\u65b9\u6cd5\uff1a\u53f3\u952e TrafficMonitor \u2192 \u4ee5\u7ba1\u7406\u5458\u8eab\u4efd\u8fd0\u884c\u3002\n\u82e5\u5df2\u662f\u7ba1\u7406\u5458\u8fd0\u884c\uff0c\u8bf7\u68c0\u67e5\u706b\u7ed2/360 \u7b49\u5b89\u5168\u8f6f\u4ef6\u662f\u5426\u62e6\u622a\u539f\u59cb\u5957\u63a5\u5b57\u3002"));
+                else
+                    SetError(TR(L"\u5957\u63a5\u5b57\u521b\u5efa\u5931\u8d25"), TR(L"\u521b\u5efa\u539f\u59cb\u5957\u63a5\u5b57\u5931\u8d25\uff08WSAError %d\uff09\u3002\u8bf7\u5c1d\u8bd5\u4ee5\u7ba1\u7406\u5458\u8eab\u4efd\u8fd0\u884c TrafficMonitor\uff0c\u6216\u68c0\u67e5\u5b89\u5168\u8f6f\u4ef6\u8bbe\u7f6e\u3002"), wsa);
+                break;
+            case 2:  // bind() failed
+                SetError(TR(L"\u7ed1\u5b9a\u7f51\u5361\u5931\u8d25"), TR(L"\u7ed1\u5b9a\u7f51\u5361 IP \u5931\u8d25\uff08WSAError %d\uff09\u3002\u7f51\u5361 IP \u53ef\u80fd\u5df2\u53d8\u5316\uff0c\u63d2\u4ef6\u5c06\u81ea\u52a8\u91cd\u8bd5\u3002"), wsa);
+                break;
+            case 3:  // WSAIoctl(SIO_RCVALL) failed
+                SetError(TR(L"\u6293\u5305\u88ab\u62d2\u7edd"), TR(L"\u5f00\u542f\u6293\u5305\u6a21\u5f0f\u5931\u8d25\uff08SIO_RCVALL\uff0cWSAError %d\uff09\u3002\u901a\u5e38\u662f\u6743\u9650\u4e0d\u8db3\u6216\u88ab\u5b89\u5168\u8f6f\u4ef6\u62e6\u622a\u3002\n\u89e3\u51b3\u65b9\u6cd5\uff1a\u53f3\u952e TrafficMonitor \u2192 \u4ee5\u7ba1\u7406\u5458\u8eab\u4efd\u8fd0\u884c\u3002"), wsa);
+                break;
+            default:
+                SetError(TR(L"\u6293\u5305\u542f\u52a8\u5931\u8d25"), TR(L"\u65e0\u6cd5\u521b\u5efa\u4efb\u4f55\u6293\u5305\u5957\u63a5\u5b57\u3002\u8bf7\u5c1d\u8bd5\u4ee5\u7ba1\u7406\u5458\u8eab\u4efd\u8fd0\u884c TrafficMonitor\u3002"));
+                break;
+            }
+            LogStartupFailure();
+            WSACleanup(); return false;
         }
-        LogStartupFailure();
-        WSACleanup(); return false;
     }
 
     m_running = true;
     m_capture_thread = std::thread(&PacketCapture::CaptureLoop, this);
     m_conn_thread = std::thread(&PacketCapture::ConnRefreshLoop, this);
-    wcscpy_s(m_error, L"OK");
+    if (with_byte_capture) {
+        wcscpy_s(m_error, L"OK");
+    } else {
+        // Connection-monitor-only mode (ETW primary): no raw socket was
+        // created, so the Start()-failure error texts do not apply.
+        wcscpy_s(m_error, L"OK");
+        WriteLog("started in connection-monitor-only mode (byte capture OFF: ETW primary)");
+    }
     return true;
 }
 
 void PacketCapture::Stop() {
     m_running = false;
-    for (auto& s : m_socks) { if (s != INVALID_SOCKET) closesocket(s); }
-    m_socks.clear();
+    {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        for (auto& s : m_socks) { if (s != INVALID_SOCKET) closesocket(s); }
+        m_socks.clear();
+    }
     if (m_capture_thread.joinable()) m_capture_thread.join();
     if (m_conn_thread.joinable()) m_conn_thread.join();
     WSACleanup();
+}
+
+// ============================================================
+// Byte-capture runtime toggle (issue #11)
+// The SIO_RCVALL raw socket makes the kernel copy EVERY packet and the
+// capture thread recv()s them one syscall at a time - at gigabit line rate
+// that is ~80k+ packets/sec of avoidable overhead. When the ETW backend is
+// producing data it owns byte counting, so the raw socket and the per-
+// connection EStats polling are switched off; only the lightweight
+// connection-table monitor (GetExtendedTcpTable every 3s) keeps running to
+// supply conn_count and the connection-details view.
+// ============================================================
+
+void PacketCapture::SetByteCaptureEnabled(bool on) {
+    if (m_byte_enabled.load() == on) return;   // per-tick calls are no-ops
+    if (!m_running) {                          // not started: just remember
+        m_byte_enabled.store(on);
+        return;
+    }
+    m_byte_enabled.store(on);
+    if (on) {
+        // Reset delta baselines: counters were frozen while OFF, so the first
+        // snapshot after re-enable must re-baseline instead of reporting the
+        // whole frozen backlog as one huge speed spike.
+        {
+            std::lock_guard<std::mutex> lk(m_mutex);
+            m_tcp_prev.clear();
+            m_udp_prev.clear();
+            m_udp_cum.clear();
+        }
+        EnableByteCapture();
+    } else {
+        DisableByteCapture();
+    }
+    WriteLog(on ? "byte capture ON (ETW lost - legacy fallback)"
+                : "byte capture OFF (ETW primary)");
+}
+
+void PacketCapture::EnableByteCapture() {
+    auto ips = ReadTMAdapterConfig();
+    if (ips.empty()) {
+        WriteLog("byte capture enable: no usable adapter, will retry via config check");
+        return;
+    }
+    RebindSockets(ips);
+    if (m_socks.empty())
+        WriteLog("byte capture enable FAILED stage=" + std::to_string(m_fail_stage) +
+                 " wsa=" + std::to_string(m_last_wsa_error));
+    // m_tcp_stats_enabled survives: EStats collection stays enabled per
+    // connection in the kernel, re-enabling is harmless (idempotent).
+}
+
+void PacketCapture::DisableByteCapture() {
+    std::lock_guard<std::mutex> lk(m_mutex);
+    for (auto& s : m_socks) { if (s != INVALID_SOCKET) closesocket(s); }
+    m_socks.clear();
+    m_last_bind_key.clear();   // force a real rebind on the next enable
 }
 
 // ============================================================
@@ -334,7 +414,10 @@ void PacketCapture::WriteLog(const std::string& text) {
             if (wn > 0) n += wn - 1;
         }
     }
-    if (n < 2048) _snwprintf_s(buf + n, 2048 - n, _TRUNCATE, L"\n");
+    // Append "\n" at the REAL end of the text (same v1.12.0 regression as
+    // etw_capture.cpp LogLine: writing at buf+n wiped the body)
+    size_t body_len = wcsnlen_s(buf, 2048);
+    if (body_len < 2047) _snwprintf_s(buf + body_len, (int)(2048 - body_len), _TRUNCATE, L"\n");
     DWORD wr = 0;
     WriteFile(h, buf, (DWORD)(wcsnlen_s(buf, 2048) * sizeof(wchar_t)), &wr, NULL);
     CloseHandle(h);
@@ -361,15 +444,27 @@ void PacketCapture::LogStartupFailure() {
 void PacketCapture::CaptureLoop() {
     uint8_t buf[65536];
     while (m_running) {
-        if (m_socks.empty()) break;
-        // Use select() to wait on all sockets
+        // Byte capture disabled (ETW primary, issue #11) or sockets not (yet)
+        // bound: idle-wait. The thread stays alive so toggling back ON needs
+        // no thread (re)creation.
+        if (!m_byte_enabled.load() || m_socks.empty()) {
+            Sleep(200);
+            continue;
+        }
+        // Use select() to wait on all sockets. Snapshot under the lock: the
+        // byte-toggle and rebind paths mutate m_socks from other threads.
+        std::vector<SOCKET> socks;
+        {
+            std::lock_guard<std::mutex> lk(m_mutex);
+            socks = m_socks;
+        }
         fd_set readset;
         FD_ZERO(&readset);
-        for (auto& s : m_socks) FD_SET(s, &readset);
+        for (auto s : socks) FD_SET(s, &readset);
         timeval tv = { 0, 500000 }; // 500ms timeout
         int ret = select(0, &readset, NULL, NULL, &tv);
         if (ret <= 0) continue; // timeout or error
-        for (auto& s : m_socks) {
+        for (auto s : socks) {
             if (FD_ISSET(s, &readset)) {
                 int n = recv(s, (char*)buf, sizeof(buf), 0);
                 if (n > 20) ProcessPacket(buf, n);
@@ -481,6 +576,11 @@ void PacketCapture::ProcessPacket(const uint8_t* data, int len) {
 // TCP byte stats via GetPerTcpConnectionEStats
 // ============================================================
 void PacketCapture::QueryTcpStats() {
+    // Byte capture disabled (ETW primary, issue #11): skip the per-connection
+    // EStats round-trips entirely - they cross the per-TCB lock on every
+    // live connection and measurably disturb high-throughput transfers.
+    // conn_count is supplied by the connection-table monitor instead.
+    if (!m_byte_enabled.load()) return;
     // Query all TCP connections and get per-connection byte counters
     ULONG tcpSize = 0;
     GetExtendedTcpTable(NULL, &tcpSize, FALSE, AF_INET, TCP_TABLE_OWNER_MODULE_ALL, 0);

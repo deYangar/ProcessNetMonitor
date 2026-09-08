@@ -1373,6 +1373,10 @@ void CDetailWindow::LoadSettings() {
         }
     }
     // Sync debug-log switch to capture backends (called after SetCapture in OnInitialize)
+    SyncDebugLogs();
+}
+
+void CDetailWindow::SyncDebugLogs() {
     EtwCapture::SetDebugLogs(m_debug_logs);
     if (m_capture) {
         wchar_t dbg[MAX_PATH] = L"";
@@ -1385,11 +1389,7 @@ void CDetailWindow::LoadSettings() {
 void CDetailWindow::SetDebugLogs(bool on) {
     m_debug_logs = on;
     SaveSettings();
-    EtwCapture::SetDebugLogs(m_debug_logs);
-    if (m_capture) {
-        wchar_t dbg[MAX_PATH] = L"";
-        m_capture->SetLogDir(m_debug_logs && PNM_GetDebugDir(dbg, MAX_PATH) ? dbg : L"");
-    }
+    SyncDebugLogs();
 }
 
 // ============================================================

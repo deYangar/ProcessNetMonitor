@@ -208,7 +208,10 @@ void EtwCapture::LogLine(const wchar_t* fmt, ...) {
         _vsnwprintf_s(buf + n, 2048 - n, _TRUNCATE, fmt, ap);
         va_end(ap);
     }
-    if (n < 2048) _snwprintf_s(buf + n, 2048 - n, _TRUNCATE, L"\n");
+    // Append "\n" at the REAL end of the text: writing at buf+n would wipe
+    // the formatted body (v1.12.0 regression - log lines were timestamp-only)
+    size_t body_len = wcsnlen_s(buf, 2048);
+    if (body_len < 2047) _snwprintf_s(buf + body_len, (int)(2048 - body_len), _TRUNCATE, L"\n");
     DWORD wr = 0;
     WriteFile(h, buf, (DWORD)(wcsnlen_s(buf, 2048) * sizeof(wchar_t)), &wr, NULL);
     CloseHandle(h);

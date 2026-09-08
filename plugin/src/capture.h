@@ -40,9 +40,19 @@ class PacketCapture {
 public:
     PacketCapture();
     ~PacketCapture();
-    bool Start();
+    // with_byte_capture=false: start ONLY the lightweight connection-table
+    // monitor (conn_count / connection details). No raw socket (SIO_RCVALL)
+    // and no per-connection EStats polling - those carry real per-packet
+    // kernel copy + syscall cost at gigabit line rate (issue #11).
+    bool Start(bool with_byte_capture = true);
     void Stop();
     bool IsRunning() const { return m_running; }
+    // Runtime toggle for the byte-capture half (raw socket + QueryTcpStats).
+    // The connection monitor keeps running in both states. Toggling ON
+    // rebinds sockets and resets the delta baselines (no bogus speed spike).
+    // Same-state calls are no-ops, so calling it every refresh tick is cheap.
+    void SetByteCaptureEnabled(bool on);
+    bool ByteCaptureEnabled() const { return m_byte_enabled.load(); }
     const wchar_t* GetLastError() const { return m_error; }
     // Detailed error description (for tooltip / diagnostics)
     const wchar_t* GetErrorDetail() const { return m_error_detail; }
@@ -63,6 +73,8 @@ private:
     void CaptureLoop();
     void ConnRefreshLoop();
     void ProcessPacket(const uint8_t* data, int len);
+    void EnableByteCapture();    // bind raw sockets (byte toggle ON)
+    void DisableByteCapture();   // close raw sockets (byte toggle OFF)
     std::wstring GetProcessName(DWORD pid);
     std::wstring GetProcessPath(DWORD pid);
     
@@ -71,6 +83,7 @@ private:
 
     std::vector<SOCKET> m_socks;  // multiple sockets for 'select all' mode
     std::atomic<bool> m_running{false};
+    std::atomic<bool> m_byte_enabled{true};  // raw socket + EStats toggle (issue #11)
     std::thread m_capture_thread;
     std::thread m_conn_thread;
     std::mutex m_mutex;
