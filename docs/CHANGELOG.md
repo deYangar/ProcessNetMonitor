@@ -4,6 +4,10 @@
 
 ## 版本历史
 
+### v1.16.2 (2026-09-11)
+- **根治详情窗边框线与拖动残影**（issue #13 跟进）：v1.16.1 的 `DWMWA_BORDER_COLOR` 误传 `DEFAULT`（0xFFFFFFFF）而非 `NONE`（0xFFFFFFFE），白线未实际关闭；`WM_NCCALCSIZE` 全吞客户区导致 DWM frame 认知与布局失配，拖动时边缘漏浅灰碎片。排查确认系统边框线在应用层无法可靠关闭（该属性对 `WS_POPUP` 不生效、`WM_NCPAINT` 盖不住），改为去掉 `WS_THICKFRAME`：边框线与残影物理消失，边缘拉伸由插件自绘（手感/最小尺寸/尺寸记忆不变），`DwmExtendFrameIntoClientArea` 玻璃框延伸找回系统投影
+- **新增颜色模式设置**：插件设置「颜色模式」下拉（自动=跟随系统（默认）/深色/浅色），详情窗与悬浮提示同步应用，选择即时生效并持久化；英文语言包补词条
+
 ### v1.16.1 (2026-09-11)
 - **修复偶发 "Encountered an improper argument." 弹窗**（issue #14）：TM 每秒将自身文本与全部插件 tooltip 拼接交给 MFC `CToolTipCtrl`，超 1024 字符即抛 `CInvalidArgException`，TM 侧不截断（上游 [TrafficMonitor#2413](https://github.com/zhongyang219/TrafficMonitor/issues/2413)）。插件自身 tooltip 限 500 字符：逐行预算拼接（按速度排序丢弃最慢行）+ 系统错误文本路径同预算 + 末尾兜底硬截断
 - **修复详情窗外圈白线**（issue #13）：`WS_THICKFRAME` 的 1px 系统非客户区边框线残留在自绘表面外缘（Win11 24H2+ DWM 描边加重）。`WM_NCCALCSIZE` 全窗并入客户区 + `DWMWA_BORDER_COLOR = NONE` 禁用系统描边，外圈仅由自绘画笔控制
