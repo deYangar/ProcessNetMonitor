@@ -31,6 +31,8 @@ TM_source/
 # Issue screenshots
 issue_shots/
 *.png
+# README 界面演示图需要进仓库
+!docs/screenshot-*.png
 debug.log
 
 # YOLO session tools - scripts, logs, research

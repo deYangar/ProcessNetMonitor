@@ -4,13 +4,13 @@
 
 ## 效果预览
 
-![任务栏显示](docs/screenshot-main.jpg)
+![任务栏显示](docs/screenshot-main.png)
 
-![悬浮信息窗口](docs/screenshot-popup.jpg)
+![悬浮信息窗口](docs/screenshot-popup.png)
 
-![详情窗口-实时流量](docs/screenshot-detail-realtime.jpg)
+![详情窗口-实时流量](docs/screenshot-detail-realtime.png)
 
-![详情窗口-历史流量](docs/screenshot-detail-history.jpg)
+![详情窗口-历史流量](docs/screenshot-detail-history.png)
 
 ## 功能
 
