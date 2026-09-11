@@ -326,6 +326,12 @@ bool CDetailWindow::Initialize(HINSTANCE hInst) {
 
     int corner_pref = 2;
     DwmSetWindowAttribute(m_hwnd, 33, &corner_pref, sizeof(corner_pref));
+    // Win11 (24H2+) draws its own 1px themed border around the window even
+    // with the custom frame below - the light-theme "white line" of issue
+    // #13. Disable it so the outer edge is painted solely by our border pen.
+    // The call fails harmlessly on older builds that lack the attribute.
+    COLORREF border_none = 0xFFFFFFFF;   // DWMWA_COLOR_NONE
+    DwmSetWindowAttribute(m_hwnd, 34 /* DWMWA_BORDER_COLOR */, &border_none, sizeof(border_none));
 
     CreateFonts();
     AutoSizeColumns();  // one-shot after fonts exist
@@ -1576,6 +1582,16 @@ void CDetailWindow::ShowContextMenu(int row, int x, int y) {
 
 LRESULT CDetailWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+    case WM_NCCALCSIZE:
+        // WS_THICKFRAME is kept for the DWM shadow and the resize borders,
+        // but its 1px non-client edge must not eat into the window: map the
+        // whole window rect to the client area so the custom-drawn surface
+        // covers it fully (issue #13 - the leftover edge showed as a white
+        // line around the window). The window never maximizes, so the usual
+        // maximized-frame compensation is not needed.
+        if (wp) return 0;
+        break;
+
     case WM_PAINT: OnPaint(); return 0;
     case WM_SIZE: OnSize(LOWORD(lp), HIWORD(lp)); return 0;
     case WM_LBUTTONDOWN: OnLButtonDown((short)LOWORD(lp), (short)HIWORD(lp)); return 0;

@@ -468,6 +468,38 @@ IPluginItem* CProcessNetPlugin::GetItem(int i) {
     return nullptr;
 }
 
+// --- Tooltip budget (issue #14) --------------------------------------------
+// TM rebuilds its hover tooltip every second, concatenating its own text with
+// every plugin's GetTooltipInfo(), and feeds the result to MFC's
+// CToolTipCtrl, which throws CInvalidArgException ("Encountered an improper
+// argument.") once the text passes MAX_TIP_TEXT_LENGTH = 1024 chars
+// (zhongyang219/TrafficMonitor#2413). TM applies no truncation on its side,
+// so each plugin has to keep its own share bounded. 500 chars leaves room
+// for TM's built-in lines on heavily configured setups.
+static const size_t kTooltipBudget = 500;
+
+// Appends s only when the result stays within the tooltip budget. List rows
+// are pre-sorted by speed, so when the budget runs out the dropped lines are
+// the slowest ones.
+static bool TipAppend(wchar_t* buf, const wchar_t* s) {
+    size_t used = wcslen(buf), add = wcslen(s);
+    if (used + add >= kTooltipBudget) return false;
+    return wcscat_s(buf, kTooltipBudget, s) == 0;
+}
+
+// Safety net for direct writes that bypass TipAppend (error messages embed
+// unbounded system text): cut back to the budget at a line boundary.
+static void ClampTooltip(wchar_t* buf) {
+    if (wcslen(buf) < kTooltipBudget) return;
+    size_t cut = kTooltipBudget - 1;   // reserve one wchar for the ellipsis
+    size_t last_nl = 0;
+    for (size_t i = 0; i < cut; ++i)
+        if (buf[i] == L'\n') last_nl = i + 1;
+    if (last_nl >= kTooltipBudget / 4) cut = last_nl;
+    buf[cut] = L'\0';
+    wcscat_s(buf, kTooltipBudget, L"\u2026");
+}
+
 void CProcessNetPlugin::DataRequired() {
     // Last-resort fallback only: every known host (1.85.x and 1.86 alike)
     // delivers EI_CONFIG_DIR on the main thread before the first tick, which
@@ -517,6 +549,7 @@ void CProcessNetPlugin::DataRequired() {
             swprintf_s(CProcessNetItem::s_value_buf[1], 256, L"ERR: %s", m_capture.GetLastError());
             swprintf_s(m_tooltip, 2048, TR(L"Process Net Monitor\n\u26a0 \u542f\u52a8\u5931\u8d25\uff1a%s\n\n%s"),
                        m_capture.GetLastError(), m_capture.GetErrorDetail());
+            ClampTooltip(m_tooltip);   // system error text is unbounded (issue #14)
         }
         return;
     }
@@ -604,9 +637,9 @@ void CProcessNetPlugin::BuildTooltip(bool etw_active, const std::vector<ProcTraf
         wcscpy_s(m_tooltip, 2048, L"Process Net Monitor\n");
     }
     swprintf_s(line, 256, L"Total: U:%.1fKB/s D:%.1fKB/s\n", su/1024.0, sd/1024.0);
-    wcscat_s(m_tooltip, line);
+    TipAppend(m_tooltip, line);
 
-    wcscat_s(m_tooltip, L"\n--- Upload ---\n");
+    TipAppend(m_tooltip, L"\n--- Upload ---\n");
     std::vector<RecentProc*> up_list, down_list;
     {
         EnterCriticalSection(&m_data_lock);
@@ -626,19 +659,23 @@ void CProcessNetPlugin::BuildTooltip(bool etw_active, const std::vector<ProcTraf
         if (count >= 5) break;
         wchar_t spd[32]; FmtSpeed(rp->speed_up, spd, 32);
         swprintf_s(line, 256, L"  %-14s %s\n", rp->name.c_str(), spd);
-        wcscat_s(m_tooltip, line); count++;
+        if (!TipAppend(m_tooltip, line)) break;
+        count++;
     }
-    while (count < 5) { wcscat_s(m_tooltip, L"  -\n"); count++; }
+    while (count < 5) { if (!TipAppend(m_tooltip, L"  -\n")) break; count++; }
 
-    wcscat_s(m_tooltip, L"\n--- Download ---\n");
+    TipAppend(m_tooltip, L"\n--- Download ---\n");
     count = 0;
     for (auto* rp : down_list) {
         if (count >= 5) break;
         wchar_t spd[32]; FmtSpeed(rp->speed_down, spd, 32);
         swprintf_s(line, 256, L"  %-14s %s\n", rp->name.c_str(), spd);
-        wcscat_s(m_tooltip, line); count++;
+        if (!TipAppend(m_tooltip, line)) break;
+        count++;
     }
-    while (count < 5) { wcscat_s(m_tooltip, L"  -\n"); count++; }
+    while (count < 5) { if (!TipAppend(m_tooltip, L"  -\n")) break; count++; }
+
+    ClampTooltip(m_tooltip);
 }
 
 // High-frequency refresh: runs on a TimerQueueTimer independent of TM's tick.
@@ -807,7 +844,7 @@ const wchar_t* CProcessNetPlugin::GetInfo(PluginInfoIndex i) {
     case TMI_DESCRIPTION: return L"Per-process network speed";
     case TMI_AUTHOR: return L"deYangar";
     case TMI_COPYRIGHT: return L"MIT";
-    case TMI_VERSION: return L"1.16.0";
+    case TMI_VERSION: return L"1.16.1";
     case TMI_URL: return L"https://github.com/deYangar/ProcessNetMonitor";
     default: return L"";
     }

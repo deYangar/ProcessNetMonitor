@@ -4,6 +4,10 @@
 
 ## 版本历史
 
+### v1.16.1 (2026-09-11)
+- **修复偶发 "Encountered an improper argument." 弹窗**（issue #14）：TM 每秒将自身文本与全部插件 tooltip 拼接交给 MFC `CToolTipCtrl`，超 1024 字符即抛 `CInvalidArgException`，TM 侧不截断（上游 [TrafficMonitor#2413](https://github.com/zhongyang219/TrafficMonitor/issues/2413)）。插件自身 tooltip 限 500 字符：逐行预算拼接（按速度排序丢弃最慢行）+ 系统错误文本路径同预算 + 末尾兜底硬截断
+- **修复详情窗外圈白线**（issue #13）：`WS_THICKFRAME` 的 1px 系统非客户区边框线残留在自绘表面外缘（Win11 24H2+ DWM 描边加重）。`WM_NCCALCSIZE` 全窗并入客户区 + `DWMWA_BORDER_COLOR = NONE` 禁用系统描边，外圈仅由自绘画笔控制
+
 ### v1.16.0 (2026-09-08)
 - **ETW 主导时关闭 legacy raw socket 抓包**（issue #11：用户反馈启用插件后千兆带宽只跑到 700M）：此前 ETW 与 legacy 采集双路常驻，`SIO_RCVALL` raw socket 让内核复制每一个数据包（千兆线速 ≈ 8 万+ 包/秒），加上每 500ms 对所有 ESTABLISHED 连接轮询 `GetPerTcpConnectionEStats`（穿透 per-TCB 锁），在核少/中断集中的机器上实测可吃掉 10~30% 吞吐。现在 ETW 就绪后只保留轻量连接表监控（3s 一次，供连接数与连接详情），raw socket 与 EStats 轮询全部关闭；ETW 静默超过 15s（会话丢失且重建失败）自动回退 legacy 全量采集，恢复后再次关闭。启动初期 ETW 未就绪时照旧全量启动，首事件到达后自动切换
 - **修复日志正文被换行符覆盖**（v1.12.0 回归）：`etw_capture.log`/`capture.log` 的 `LogLine`/`WriteLog` 在格式化完成后从旧偏移写入 `\n`，把整行正文覆盖掉，日志只剩时间戳。改为定位真实末尾追加。此前远程诊断基本失明，issue #11 这类吞吐问题无从取证
