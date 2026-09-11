@@ -324,14 +324,7 @@ bool CDetailWindow::Initialize(HINSTANCE hInst) {
 
     SetWindowLongPtrW(m_hwnd, GWLP_WNDPROC, (LONG_PTR)DetailStaticWndProc);
 
-    int corner_pref = 2;
-    DwmSetWindowAttribute(m_hwnd, 33, &corner_pref, sizeof(corner_pref));
-    // Win11 (24H2+) draws its own 1px themed border around the window even
-    // with the custom frame below - the light-theme "white line" of issue
-    // #13. Disable it so the outer edge is painted solely by our border pen.
-    // The call fails harmlessly on older builds that lack the attribute.
-    COLORREF border_none = 0xFFFFFFFF;   // DWMWA_COLOR_NONE
-    DwmSetWindowAttribute(m_hwnd, 34 /* DWMWA_BORDER_COLOR */, &border_none, sizeof(border_none));
+    ApplyDwmFramePolicy();
 
     CreateFonts();
     AutoSizeColumns();  // one-shot after fonts exist
@@ -343,6 +336,23 @@ bool CDetailWindow::Initialize(HINSTANCE hInst) {
     m_br_child = CreateSolidBrush(m_dark_mode ? RGB(36, 36, 40) : RGB(247, 247, 247));
 
     return true;
+}
+
+void CDetailWindow::ApplyDwmFramePolicy() {
+    int corner_pref = 2;  // DWMWCP_ROUND
+    DwmSetWindowAttribute(m_hwnd, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */,
+                          &corner_pref, sizeof(corner_pref));
+    // Win11 (24H2+) draws its own 1px themed border around the window even
+    // with the custom frame below - the light-theme "white line" of issue
+    // #13. Suppress it so the outer edge is painted solely by our border pen.
+    // The value must be DWMWA_COLOR_NONE (0xFFFFFFFE). 0xFFFFFFFF is
+    // DWMWA_COLOR_DEFAULT, which restores the themed border instead of
+    // hiding it; the explicit border stripe then fights the rounded-corner
+    // mask while dragging and shatters into fragments at the edges (the
+    // v1.16.1 regression Mahantor reported on issue #13). Fails harmlessly
+    // on builds that lack the attribute.
+    COLORREF border_none = DWMWA_COLOR_NONE;
+    DwmSetWindowAttribute(m_hwnd, 34 /* DWMWA_BORDER_COLOR */, &border_none, sizeof(border_none));
 }
 
 void CDetailWindow::ApplyLayoutScale() {
@@ -1608,6 +1618,9 @@ LRESULT CDetailWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_ERASEBKGND: return 1;
     case WM_DPICHANGED: {
         UpdateDpiScale(m_hwnd);
+        // DWM may reset frame attributes (border color / corner preference)
+        // when the window crosses a monitor boundary - reapply them.
+        ApplyDwmFramePolicy();
         RecreateGdiObjects();
         // Apply suggested window rect from lParam
         RECT* prc = (RECT*)lp;

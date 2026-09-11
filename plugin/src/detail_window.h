@@ -253,6 +253,7 @@ private:
     float m_dpi_scale = 1.0f;
     void UpdateDpiScale(HWND hwnd = nullptr);
     void UpdateDpiScaleForRect(const RECT& rc);  // per-monitor DPI for a target rect
+    void ApplyDwmFramePolicy();  // rounded corners + no DWM border stripe; reapply after DPI changes
     void ApplyLayoutScale();
     void CreateFonts();
     void RecreateGdiObjects();
