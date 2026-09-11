@@ -358,6 +358,16 @@ private:
     int m_saved_w = 0;
     int m_saved_h = 0;
 
+    // 自绘边缘拉伸（窗口无 WS_THICKFRAME——DWM 对带它的窗口强制画主题
+    // 边框线且应用层无法覆盖/关闭，issue #13；去掉后系统 resize loop
+    // 不可用，由我们接管 NCHITTEST 返回的边缘 HT* 拖拽）
+    int m_resize_hit = 0;        // 进行中的 HT* 边缘值，0 = 非拉伸
+    RECT m_resize_org = {};      // 拉伸起始窗口矩形（屏幕坐标）
+    POINT m_resize_start = {};   // 拉伸起始鼠标位置（屏幕坐标）
+    void BeginResizeDrag(int hit);
+    void UpdateResizeDrag();
+    void EndResizeDrag();
+
     // Icon cache
     std::unordered_map<std::wstring, HICON> m_icon_cache;
     

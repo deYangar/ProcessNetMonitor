@@ -307,10 +307,16 @@ bool CDetailWindow::Initialize(HINSTANCE hInst) {
     wc.lpszClassName = className;
     RegisterClassExW(&wc);
 
+    // 无 WS_THICKFRAME：DWM 对带它的顶层窗口强制绘制主题边框（激活=强调色、
+    // 失焦=白的 1px 线，issue #13），DWMWA_BORDER_COLOR 对 WS_POPUP 不生效、
+    // WM_NCPAINT 自绘也盖不住（DWM 合成层在自绘之上），唯一能盖住的
+    // WM_NCCALCSIZE 全吞客户区又会在拖动时撕裂（DWM frame 几何与客户区
+    // 失配）。索性不要 sizing border：DWM 无边框可画，线物理消失；resize
+    // 由 BeginResizeDrag/UpdateResizeDrag/EndResizeDrag 自己实现。
     m_hwnd = CreateWindowExW(
         WS_EX_TOOLWINDOW,
         className, L"ProcessNetMonitor",
-        WS_POPUP | WS_THICKFRAME,
+        WS_POPUP,
         CW_USEDEFAULT, CW_USEDEFAULT, MIN_WIDTH + 40, MIN_HEIGHT + 80,
         NULL, NULL, m_hinst, NULL);
 
@@ -339,20 +345,13 @@ bool CDetailWindow::Initialize(HINSTANCE hInst) {
 }
 
 void CDetailWindow::ApplyDwmFramePolicy() {
+    // 窗口已无 WS_THICKFRAME，DWM 不再有边框可画（issue #13 的线、拖动
+    // 撕裂随之物理消失），这里只剩圆角偏好需要维护——它在 DPI 变化后
+    // 可能被系统重置，所以 WM_DPICHANGED / 每次显示前都会重设。
+    // DWMWA_BORDER_COLOR 不再设置：该属性对 WS_POPUP 窗口不生效。
     int corner_pref = 2;  // DWMWCP_ROUND
     DwmSetWindowAttribute(m_hwnd, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */,
                           &corner_pref, sizeof(corner_pref));
-    // Win11 (24H2+) draws its own 1px themed border around the window even
-    // with the custom frame below - the light-theme "white line" of issue
-    // #13. Suppress it so the outer edge is painted solely by our border pen.
-    // The value must be DWMWA_COLOR_NONE (0xFFFFFFFE). 0xFFFFFFFF is
-    // DWMWA_COLOR_DEFAULT, which restores the themed border instead of
-    // hiding it; the explicit border stripe then fights the rounded-corner
-    // mask while dragging and shatters into fragments at the edges (the
-    // v1.16.1 regression Mahantor reported on issue #13). Fails harmlessly
-    // on builds that lack the attribute.
-    COLORREF border_none = DWMWA_COLOR_NONE;
-    DwmSetWindowAttribute(m_hwnd, 34 /* DWMWA_BORDER_COLOR */, &border_none, sizeof(border_none));
 }
 
 void CDetailWindow::ApplyLayoutScale() {
@@ -504,6 +503,10 @@ void CDetailWindow::Show(HWND parent_wnd) {
     int x = work.left + (aw - w) / 2;
     int y = work.top + (ah - h) / 2;
 
+    // DWM frame attributes can be reset by the first show or by hide/show
+    // cycles - reapply right before the window goes visible so the themed
+    // border stays suppressed (the "white line" of issue #13).
+    ApplyDwmFramePolicy();
     SetWindowPos(m_hwnd, HWND_TOPMOST, x, y, w, h, SWP_SHOWWINDOW | SWP_NOACTIVATE);
     ShowWindow(m_hwnd, SW_SHOWNOACTIVATE);
     m_visible = true;
@@ -511,6 +514,12 @@ void CDetailWindow::Show(HWND parent_wnd) {
 }
 
 void CDetailWindow::Hide() {
+    // 拉伸进行中被隐藏（ESC 等）：清掉状态，否则残留的起始矩形会在
+    // 下次显示后污染第一条 WM_MOUSEMOVE
+    if (m_resize_hit) {
+        m_resize_hit = 0;
+        ::ReleaseCapture();
+    }
     if (m_visible) {
         ShowWindow(m_hwnd, SW_HIDE);
         m_visible = false;
@@ -1590,25 +1599,61 @@ void CDetailWindow::ShowContextMenu(int row, int x, int y) {
 // Message handler
 // ============================================================
 
+void CDetailWindow::BeginResizeDrag(int hit) {
+    m_resize_hit = hit;
+    GetCursorPos(&m_resize_start);
+    GetWindowRect(m_hwnd, &m_resize_org);
+    ::SetCapture(m_hwnd);   // 类内有同名成员 SetCapture(PacketCapture*)，显式走 Win32
+}
+
+void CDetailWindow::UpdateResizeDrag() {
+    POINT now;
+    GetCursorPos(&now);
+    int dx = now.x - m_resize_start.x;
+    int dy = now.y - m_resize_start.y;
+    RECT rc = m_resize_org;
+    bool left   = (m_resize_hit == HTLEFT     || m_resize_hit == HTTOPLEFT    || m_resize_hit == HTBOTTOMLEFT);
+    bool right  = (m_resize_hit == HTRIGHT    || m_resize_hit == HTTOPRIGHT   || m_resize_hit == HTBOTTOMRIGHT);
+    bool top    = (m_resize_hit == HTTOP      || m_resize_hit == HTTOPLEFT    || m_resize_hit == HTTOPRIGHT);
+    bool bottom = (m_resize_hit == HTBOTTOM   || m_resize_hit == HTBOTTOMLEFT || m_resize_hit == HTBOTTOMRIGHT);
+    // 从起始边拉伸，反侧固定；两侧 clamp 保住 MIN_WIDTH / MIN_HEIGHT
+    if (left)   { int v = m_resize_org.left + dx;   rc.left   = (v > rc.right - MIN_WIDTH)  ? rc.right - MIN_WIDTH  : v; }
+    if (right)  { int v = m_resize_org.right + dx;  rc.right  = (v < rc.left + MIN_WIDTH)   ? rc.left + MIN_WIDTH   : v; }
+    if (top)    { int v = m_resize_org.top + dy;    rc.top    = (v > rc.bottom - MIN_HEIGHT) ? rc.bottom - MIN_HEIGHT : v; }
+    if (bottom) { int v = m_resize_org.bottom + dy; rc.bottom = (v < rc.top + MIN_HEIGHT)   ? rc.top + MIN_HEIGHT   : v; }
+    SetWindowPos(m_hwnd, NULL, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+void CDetailWindow::EndResizeDrag() {
+    ::ReleaseCapture();
+    m_resize_hit = 0;
+    // 对齐 WM_EXITSIZEMOVE 的语义：记录用户确定的宽高（语言切换不再收缩）
+    RECT rc;
+    GetWindowRect(m_hwnd, &rc);
+    m_saved_w = rc.right - rc.left;
+    m_saved_h = rc.bottom - rc.top;
+    SaveSettings();
+}
+
 LRESULT CDetailWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
-    case WM_NCCALCSIZE:
-        // WS_THICKFRAME is kept for the DWM shadow and the resize borders,
-        // but its 1px non-client edge must not eat into the window: map the
-        // whole window rect to the client area so the custom-drawn surface
-        // covers it fully (issue #13 - the leftover edge showed as a white
-        // line around the window). The window never maximizes, so the usual
-        // maximized-frame compensation is not needed.
-        if (wp) return 0;
-        break;
-
     case WM_PAINT: OnPaint(); return 0;
     case WM_SIZE: OnSize(LOWORD(lp), HIWORD(lp)); return 0;
     case WM_LBUTTONDOWN: OnLButtonDown((short)LOWORD(lp), (short)HIWORD(lp)); return 0;
-    case WM_LBUTTONUP: OnLButtonUp((short)LOWORD(lp), (short)HIWORD(lp)); return 0;
+    case WM_LBUTTONUP:
+        if (m_resize_hit) { EndResizeDrag(); return 0; }
+        OnLButtonUp((short)LOWORD(lp), (short)HIWORD(lp)); return 0;
     case WM_LBUTTONDBLCLK: OnLButtonDblClk((short)LOWORD(lp), (short)HIWORD(lp)); return 0;
     case WM_RBUTTONDOWN: OnRButtonDown((short)LOWORD(lp), (short)HIWORD(lp)); return 0;
-    case WM_MOUSEMOVE: OnMouseMove((short)LOWORD(lp), (short)HIWORD(lp)); return 0;
+    case WM_MOUSEMOVE:
+        if (m_resize_hit) { UpdateResizeDrag(); return 0; }
+        OnMouseMove((short)LOWORD(lp), (short)HIWORD(lp)); return 0;
+    case WM_NCLBUTTONDOWN:
+        // 无 WS_THICKFRAME 后系统对边缘 HT* 不再启动 resize loop，自己接管。
+        // HTCAPTION 的移动 loop 不依赖 THICKFRAME，仍走 DefWindowProc。
+        if (wp >= HTLEFT && wp <= HTBOTTOMRIGHT) { BeginResizeDrag((int)wp); return 0; }
+        break;
     case WM_MOUSELEAVE: OnMouseLeave(); return 0;
     case WM_MOUSEWHEEL: OnMouseWheel(GET_WHEEL_DELTA_WPARAM(wp)); return 0;
     case WM_VSCROLL: OnVScroll(LOWORD(wp)); return 0;
