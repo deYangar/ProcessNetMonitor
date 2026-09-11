@@ -159,6 +159,10 @@ CTooltipPopup::~CTooltipPopup() {
 }
 
 bool CTooltipPopup::IsDarkMode() {
+    // 与详情窗共享插件设置的「颜色模式」：强制深/浅优先于系统
+    int cm = CDetailWindow::GetColorMode();
+    if (cm == 1) return true;
+    if (cm == 2) return false;
     ULONGLONG now = GetTickCount64();
     if (now - m_dark_mode_tick < 5000) return m_dark_mode_cached;
     m_dark_mode_tick = now;

@@ -52,6 +52,12 @@ public:
     void SetTransparentWidth(int w) { m_transparent_width = w; }
     int GetRefreshMs() const { return m_refresh_ms; }
     void SetRefreshMs(int v) { m_refresh_ms = v; }
+
+    // 颜色模式（插件设置）：0=跟随系统（默认），1=强制深色，2=强制浅色。
+    // 静态共享：详情窗与 hover 悬浮窗的 IsDarkMode 都先查它
+    int GetColorModeSetting() const { return s_color_mode; }
+    static int GetColorMode() { return s_color_mode; }
+    void SetColorMode(int mode);
     // Master switch for the Up/Down plugin items in TM's main window / taskbar
     bool GetShowSpeedItems() const { return m_show_speed_items; }
     void SetShowSpeedItems(bool v) { m_show_speed_items = v; }
@@ -257,6 +263,7 @@ private:
     void ApplyLayoutScale();
     void CreateFonts();
     void RecreateGdiObjects();
+    void RecreateThemeColors();  // 深浅模式切换时重建颜色 pens/brushes
     bool m_hovering_close = false;
     bool m_hovering_min = false;
     int m_active_tab = 0;      // 0=实时流量, 1=历史流量
@@ -396,6 +403,8 @@ private:
 
     // IsDarkMode cache
     bool m_dark_mode_cached = true;
+    // 颜色模式全局值（0=auto 1=dark 2=light），定义见构造函数上方说明
+    inline static int s_color_mode = 0;
     ULONGLONG m_dark_mode_tick = 0;
 
     // Title bar / UI rects

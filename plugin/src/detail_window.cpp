@@ -101,6 +101,9 @@ CDetailWindow::~CDetailWindow() {
 }
 
 bool CDetailWindow::IsDarkMode() {
+    // 插件设置的颜色模式优先：强制深/浅直接短路，不再读系统
+    if (s_color_mode == 1) return true;
+    if (s_color_mode == 2) return false;
     ULONGLONG now = GetTickCount64();
     if (now - m_dark_mode_tick < 5000) return m_dark_mode_cached;
     m_dark_mode_tick = now;
@@ -352,6 +355,12 @@ void CDetailWindow::ApplyDwmFramePolicy() {
     int corner_pref = 2;  // DWMWCP_ROUND
     DwmSetWindowAttribute(m_hwnd, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */,
                           &corner_pref, sizeof(corner_pref));
+    // 把玻璃框延伸进客户区 1px：让 DWM 重新把这扇窗口当作「有框窗」
+    // 合成、找回系统投影（Chrome/Edge 无边框窗口同款手法）；延伸区被
+    // 自绘内容盖住，视觉上只多投影。themed border 线跟随的是
+    // WS_THICKFRAME 样式而非这个调用，理论上不会回来——实测验证。
+    MARGINS margins = { 1, 1, 1, 1 };
+    DwmExtendFrameIntoClientArea(m_hwnd, &margins);
 }
 
 void CDetailWindow::ApplyLayoutScale() {
@@ -458,23 +467,37 @@ void CDetailWindow::RecreateGdiObjects() {
     m_br_child = CreateSolidBrush(m_dark_mode ? RGB(36,36,40) : RGB(247,247,247));
 }
 
+void CDetailWindow::RecreateThemeColors() {
+    if (m_pen_border) DeleteObject(m_pen_border);
+    if (m_pen_border_exp) DeleteObject(m_pen_border_exp);
+    for (auto& b : m_br_row) { if (b) DeleteObject(b); }
+    if (m_br_hover) DeleteObject(m_br_hover);
+    if (m_br_child) DeleteObject(m_br_child);
+    m_pen_border = CreatePen(PS_SOLID, 1, m_dark_mode ? RGB(42, 42, 46) : RGB(238, 238, 238));
+    m_pen_border_exp = CreatePen(PS_SOLID, 1, m_dark_mode ? RGB(42, 42, 46) : RGB(238, 238, 238));
+    m_br_row[0] = CreateSolidBrush(GetBgColor());
+    m_br_row[1] = CreateSolidBrush(m_dark_mode ? RGB(35, 35, 39) : RGB(245, 245, 245));
+    m_br_hover = CreateSolidBrush(m_dark_mode ? RGB(48, 48, 54) : RGB(232, 232, 232));
+    m_br_child = CreateSolidBrush(m_dark_mode ? RGB(36, 36, 40) : RGB(247, 247, 247));
+}
+
+void CDetailWindow::SetColorMode(int mode) {
+    if (mode < 0 || mode > 2) mode = 0;
+    if (s_color_mode == mode) return;
+    s_color_mode = mode;
+    bool old_dark = m_dark_mode;
+    m_dark_mode = IsDarkMode();
+    if (m_dark_mode != old_dark) RecreateThemeColors();
+    if (m_hwnd) InvalidateRect(m_hwnd, NULL, FALSE);
+    // hover 悬浮窗不在此处刷新：它每次显示前都会重读 IsDarkMode()，
+    // 拿到的已是新模式；强刷反而要重建字体等一串对象
+}
+
 void CDetailWindow::Show(HWND parent_wnd) {
     m_parent_wnd = parent_wnd;
     bool old_dark = m_dark_mode;
     m_dark_mode = IsDarkMode();
-    if (m_dark_mode != old_dark) {
-        if (m_pen_border) DeleteObject(m_pen_border);
-        if (m_pen_border_exp) DeleteObject(m_pen_border_exp);
-        for (auto& b : m_br_row) { if (b) DeleteObject(b); }
-        if (m_br_hover) DeleteObject(m_br_hover);
-        if (m_br_child) DeleteObject(m_br_child);
-        m_pen_border = CreatePen(PS_SOLID, 1, m_dark_mode ? RGB(42, 42, 46) : RGB(238, 238, 238));
-        m_pen_border_exp = CreatePen(PS_SOLID, 1, m_dark_mode ? RGB(42, 42, 46) : RGB(238, 238, 238));
-        m_br_row[0] = CreateSolidBrush(GetBgColor());
-        m_br_row[1] = CreateSolidBrush(m_dark_mode ? RGB(35, 35, 39) : RGB(245, 245, 245));
-        m_br_hover = CreateSolidBrush(m_dark_mode ? RGB(48, 48, 54) : RGB(232, 232, 232));
-        m_br_child = CreateSolidBrush(m_dark_mode ? RGB(36, 36, 40) : RGB(247, 247, 247));
-    }
+    if (m_dark_mode != old_dark) RecreateThemeColors();
 
     // Center on the monitor that contains the parent window (multi-monitor fix:
     // previously always centered on the primary screen, so a detail window opened
@@ -1230,6 +1253,8 @@ void CDetailWindow::SaveSettings() {
     }
     fprintf(f, "  \"show_speed_items\": %s,\n", m_show_speed_items ? "true" : "false");
     fprintf(f, "  \"debug_logs\": %s,\n", m_debug_logs ? "true" : "false");
+    // 颜色模式：0=跟随系统 1=深色 2=浅色（详情窗与悬浮提示共享）
+    fprintf(f, "  \"color_mode\": %d,\n", s_color_mode);
     // 界面语言：auto 或 BCP-47（ASCII，安全直接写）
     fprintf(f, "  \"lang\": \"%s\"\n", std::string(m_lang.begin(), m_lang.end()).c_str());
     fprintf(f, "}\n");
@@ -1278,6 +1303,21 @@ void CDetailWindow::LoadSettings() {
                 m_sort_asc[0] = a0; m_sort_asc[1] = a1;
             }
         }
+    }
+    // Parse color_mode (0=auto 1=dark 2=light); applied to the static so both
+    // detail window and tooltip popup pick it up before first draw
+    {
+        size_t pos = json.find("\"color_mode\"");
+        if (pos != std::string::npos) {
+            pos = json.find(':', pos);
+            if (pos != std::string::npos) {
+                int v = atoi(json.c_str() + pos + 1);
+                s_color_mode = (v >= 0 && v <= 2) ? v : 0;
+            }
+        }
+        // 构造函数在 LoadSettings 之前跑（那时 s_color_mode 还是 0），
+        // 强制模式下 m_dark_mode 需在此对齐，Initialize 创建的 pens 才是对的
+        m_dark_mode = IsDarkMode();
     }
     // Parse transparent_width
     {

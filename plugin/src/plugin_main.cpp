@@ -1318,6 +1318,17 @@ static void OptionsApplyLang(HWND hwnd) {
     SetWindowTextW(GetDlgItem(hwnd, 1006), TR(L"\u8C03\u8BD5\u65E5\u5FD7\uFF08\u5199\u5165\u63D2\u4EF6\u76EE\u5F55 debug\\\uFF09"));
     SetWindowTextW(GetDlgItem(hwnd, 1013), TR(L"\u5728 TrafficMonitor \u9F20\u6807\u60AC\u505C\u63D0\u793A\u4E2D\u663E\u793A\u8FDB\u7A0B\u7F51\u901F\u4FE1\u606F"));
     SetWindowTextW(GetDlgItem(hwnd, 1015), TR(L"\u754C\u9762\u8BED\u8A00"));
+    SetWindowTextW(GetDlgItem(hwnd, 1019), TR(L"\u989C\u8272\u6A21\u5F0F"));
+    // 重填颜色模式下拉（保持当前选择）
+    HWND hColorCombo = GetDlgItem(hwnd, 1018);
+    if (hColorCombo) {
+        int cur_c = (int)SendMessageW(hColorCombo, CB_GETCURSEL, 0, 0);
+        SendMessageW(hColorCombo, CB_RESETCONTENT, 0, 0);
+        SendMessageW(hColorCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"\u81EA\u52A8"));
+        SendMessageW(hColorCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"\u6DF1\u8272"));
+        SendMessageW(hColorCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"\u6D45\u8272"));
+        SendMessageW(hColorCombo, CB_SETCURSEL, cur_c < 0 ? 0 : cur_c, 0);
+    }
     // 重填语言下拉：item0 = 跟随系统，其余为扫描到的语言（保持当前选择）
     HWND hCombo = GetDlgItem(hwnd, 1014);
     if (hCombo) {
@@ -1657,12 +1668,25 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             SendMessageW(hLangCombo, CB_SETCURSEL, cur, 0);
         }
 
+        // 颜色模式 label + combo（自动=跟随系统 / 深色 / 浅色，详情窗与悬浮提示共用）
+        CreateWindowW(L"STATIC", TR(L"\u989C\u8272\u6A21\u5F0F"),
+            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 10, 272, 90, 20, hwnd, (HMENU)1019, nullptr, nullptr);
+        HWND hColorCombo = CreateWindowW(L"COMBOBOX", L"",
+            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+            100, 270, 190, 120, hwnd, (HMENU)1018, nullptr, nullptr);
+        {
+            SendMessageW(hColorCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"\u81EA\u52A8"));
+            SendMessageW(hColorCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"\u6DF1\u8272"));
+            SendMessageW(hColorCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"\u6D45\u8272"));
+            SendMessageW(hColorCombo, CB_SETCURSEL, CDetailWindow::GetColorMode(), 0);
+        }
+
         // OK button
         CreateWindowW(L"BUTTON", L"OK",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 380, 276, 75, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 380, 306, 75, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
         // Cancel button
         CreateWindowW(L"BUTTON", L"Cancel",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 465, 276, 75, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 465, 306, 75, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
         // Use the proper UI font (Segoe UI 9pt) on every child control -
         // default is the bitmap 'System' font (jagged, ugly).
         EnumChildWindows(hwnd, OptionsSetFontProc, (LPARAM)GetStockObject(DEFAULT_GUI_FONT));
@@ -1715,6 +1739,12 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             bool geo_on = (SendMessageW(GetDlgItem(hwnd, 1012), BM_GETCHECK, 0, 0) == BST_CHECKED);
             IpGeo::Instance().SetEnabled(geo_on);
 
+            // 颜色模式兜底：正常在下拉选择时已即时生效（CBN_SELCHANGE），
+            // SetColorMode 同值早退，这里只是保险
+            int csel = (int)SendMessageW(GetDlgItem(hwnd, 1018), CB_GETCURSEL, 0, 0);
+            if (csel < 0 || csel > 2) csel = 0;
+            plugin.m_detail.SetColorMode(csel);
+
             plugin.m_detail.SaveSettings();
             plugin.StartRefreshTimer();   // apply immediately
             g_option_changed = true;
@@ -1729,6 +1759,16 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         // 界面语言下拉：切换即时生效（保存 + 重载 + 刷新）
         if (LOWORD(wp) == 1014 && HIWORD(wp) == CBN_SELCHANGE) {
             OptionsApplyLanguageChange(hwnd);
+            return 0;
+        }
+        // 颜色模式下拉：切换即时生效（同语言切换语义：改了就保存，Cancel 不回滚）
+        if (LOWORD(wp) == 1018 && HIWORD(wp) == CBN_SELCHANGE) {
+            int csel = (int)SendMessageW(GetDlgItem(hwnd, 1018), CB_GETCURSEL, 0, 0);
+            if (csel >= 0 && csel <= 2) {
+                auto& plugin = CProcessNetPlugin::Instance();
+                plugin.m_detail.SetColorMode(csel);
+                plugin.m_detail.SaveSettings();
+            }
             return 0;
         }
         // 立即更新 IP 库
@@ -1770,7 +1810,7 @@ ITMPlugin::OptionReturn CProcessNetPlugin::ShowOptionsDialog(void* hParent) {
         L"ProcessNetMonitorOptionsDlg",
         TR(L"\x63D2\x4EF6\x8BBE\x7F6E"),
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        0, 0, 650, 370,
+        0, 0, 650, 405,
         (HWND)hParent, nullptr, GetModuleHandleW(NULL), nullptr
     );
     
