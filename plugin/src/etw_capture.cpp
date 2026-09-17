@@ -506,30 +506,37 @@ void EtwCapture::OnEvent(PEVENT_RECORD rec) {
             std::wstring path;
             ULONG cl = 0;
             if (img + 2 <= rec->UserDataLength) {
-                // ANSI ImageFileName. Only a clean NUL-terminated run is
-                // trusted: a control byte or an unterminated run (k>=280)
-                // invalidates the whole parse - cl stays 0 so the CommandLine
-                // step below is skipped instead of reading at a wrong offset
-                // (garbage path/name would otherwise be cached).
+                // ANSI ImageFileName. The kernel fills this field by truncating
+                // each Unicode char of the real name to its low byte (NOT a
+                // codepage encoding): "淘宝桌面版.exe" lands here as
+                // D8 9D 4C 62 48 2E 65 78 65 - unrecoverable garbage (issue
+                // #15). Only a pure-ASCII NUL-terminated run may be used as
+                // the name; for anything else we keep the NUL offset (so the
+                // UTF-16 CommandLine below is parsed from the right place and
+                // yields the true name via its path token) and fall back.
                 std::string ansi;
                 ULONG k = 0;
-                bool ansi_ok = true;
+                bool terminated = false, ascii_ok = true;
                 while (img + k < rec->UserDataLength && k < 280) {
-                    char ch = (char)ud[img + k];
-                    if (ch == 0) break;
-                    if ((unsigned char)ch < 32) { ansi_ok = false; break; }
-                    ansi += ch;
+                    unsigned char ch = ud[img + k];
+                    if (ch == 0) { terminated = true; break; }
+                    if (ch < 32 || ch >= 127) ascii_ok = false;
+                    ansi += (char)ch;
                     k++;
                 }
-                if (ansi_ok && k < 280) {   // NUL-terminated within bounds
-                    cl = img + k + 1;       // CommandLine starts after the NUL
-                    if (!ansi.empty()) base.assign(ansi.begin(), ansi.end());
+                if (terminated) {           // NUL found: CommandLine offset is valid
+                    cl = img + k + 1;
+                    if (ascii_ok && !ansi.empty())
+                        base.assign(ansi.begin(), ansi.end());
                 }
+                // not terminated within bounds: cl stays 0 so the CommandLine
+                // step below is skipped instead of reading at a wrong offset
+                // (garbage path/name would otherwise be cached).
             }
             // CommandLine (UNICODE, NUL-terminated): extract first token as full
             // path when it carries a drive/UNC prefix (also covers CJK exe names
-            // that fail the ANSI ImageFileName parse).
-            if (cl + 1 < rec->UserDataLength) {
+            // whose ANSI ImageFileName is truncated beyond recovery).
+            if (cl != 0 && cl + 1 < rec->UserDataLength) {
                 std::wstring cmd;
                 ULONG p = cl;
                 while (p + 1 < rec->UserDataLength && cmd.size() < 1024) {
