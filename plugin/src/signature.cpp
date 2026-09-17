@@ -68,6 +68,7 @@ void SignatureCache::WorkerLoop() {
         WaitForSingleObject(m_event, INFINITE);
         if (m_stop.load()) break;
         // Drain the queue (dedup against m_pending)
+        bool any_changed = false;
         while (true) {
             std::wstring path;
             {
@@ -87,8 +88,12 @@ void SignatureCache::WorkerLoop() {
                 }
                 m_pending.erase(path);
             }
-            if (changed) NotifyOnce();
+            if (changed) any_changed = true;
         }
+        // One notification per drained batch: per-file posts caused a
+        // WM_APP+2 storm right after the first history build (one post per
+        // exe, each triggering a full detail-window rebuild+repaint).
+        if (any_changed) NotifyOnce();
     }
 }
 

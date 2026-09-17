@@ -827,8 +827,11 @@ void CProcessNetPlugin::StartRefreshTimer() {
     int ms = m_detail.GetRefreshMs();
     if (ms < 100) ms = 100;
     if (ms > 2000) ms = 2000;
-    if (CreateTimerQueueTimer(&m_refresh_timer, nullptr, RefreshTimerProc, this, ms, ms, WT_EXECUTELONGFUNCTION))
+    HANDLE h = nullptr;
+    if (CreateTimerQueueTimer(&h, nullptr, RefreshTimerProc, this, ms, ms, WT_EXECUTELONGFUNCTION)) {
+        m_refresh_timer = h;
         m_refresh_timer_ok = true;
+    }
 }
 
 void CProcessNetPlugin::StopRefreshTimer() {

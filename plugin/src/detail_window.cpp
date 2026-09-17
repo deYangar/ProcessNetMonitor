@@ -996,8 +996,10 @@ void CDetailWindow::UpdateData(const std::vector<ProcTraffic>& stats, double tot
         SaveHistory();
     }
 
-    // Pause visual updates while context menu is open
-    if (m_context_menu_open) {
+    // Pause visual updates while context menu is open; skip the rebuild
+    // entirely while hidden (history recording above must keep running,
+    // but per-tick row rebuilds for an invisible window are pure waste)
+    if (m_context_menu_open || !m_visible) {
         m_cached_stats = stats;
         return;
     }
@@ -1028,7 +1030,10 @@ void CDetailWindow::RebuildRows() {
         if (m_visible) {
             RECT rc = { PADDING, GetTableAreaTop(), 0, 0 };
             GetClientRect(m_hwnd, &rc);
-            rc.top = GetTableAreaTop();
+            // include the summary bar (total up/down change with the time
+            // range): its top is above the table header AND the summary
+            // strip itself, both of which sit inside GetTableAreaTop()
+            rc.top = GetTableAreaTop() - GetSummaryHeight() - GetTableHeaderHeight();
             InvalidateRect(m_hwnd, &rc, FALSE);
         }
         return;
@@ -1131,7 +1136,8 @@ void CDetailWindow::RebuildRows() {
     if (m_visible) {
         RECT rc;
         GetClientRect(m_hwnd, &rc);
-        rc.top = GetTableAreaTop();
+        // include the summary bar (same layout math as the history branch)
+        rc.top = GetTableAreaTop() - GetSummaryHeight() - GetTableHeaderHeight();
         InvalidateRect(m_hwnd, &rc, FALSE);
     }
 }
@@ -1255,8 +1261,16 @@ void CDetailWindow::SaveSettings() {
     fprintf(f, "  \"debug_logs\": %s,\n", m_debug_logs ? "true" : "false");
     // 颜色模式：0=跟随系统 1=深色 2=浅色（详情窗与悬浮提示共享）
     fprintf(f, "  \"color_mode\": %d,\n", s_color_mode);
-    // 界面语言：auto 或 BCP-47（ASCII，安全直接写）
-    fprintf(f, "  \"lang\": \"%s\"\n", std::string(m_lang.begin(), m_lang.end()).c_str());
+    // 界面语言：auto 或 BCP-47（现值域纯 ASCII；显式 UTF-8 转换以防将来塞入非 ASCII）
+    {
+        std::string lang8;
+        int n = WideCharToMultiByte(CP_UTF8, 0, m_lang.c_str(), (int)m_lang.size(), NULL, 0, NULL, NULL);
+        if (n > 0) {
+            lang8.resize(n);
+            WideCharToMultiByte(CP_UTF8, 0, m_lang.c_str(), (int)m_lang.size(), &lang8[0], n, NULL, NULL);
+        }
+        fprintf(f, "  \"lang\": \"%s\"\n", lang8.c_str());
+    }
     fprintf(f, "}\n");
     fclose(f);
 }
