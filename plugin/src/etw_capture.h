@@ -132,6 +132,10 @@ private:
     std::mutex m_mutex;                       // protects m_cum + shape cache
     std::map<ShapeKey, ShapeInfo> m_shapes;
     std::map<DWORD, Cum> m_cum;
+    // m_cum size cap: evict stalest-idle entries down to kCumLow once kCumMax
+    // is exceeded (never the pid of the event triggering the eviction).
+    static const size_t kCumMax = 4096;
+    static const size_t kCumLow = 3500;
 
     // Adapter unicast IPs, split physical vs virtual (TUN/TAP/VPN...) by name.
     // Blacklist semantics: only events whose LOCAL address belongs to a virtual

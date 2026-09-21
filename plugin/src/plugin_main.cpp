@@ -589,23 +589,31 @@ void CProcessNetPlugin::DataRequired() {
                     m_cached_stats = stats;
                     m_cached_up = su;
                     m_cached_down = sd;
+                    // Tooltip write stays inside the lock: BuildTooltip
+                    // (timer thread) holds m_data_lock for its whole body,
+                    // so an unlocked write to the inactive slot here would
+                    // race two writers on the same buffer.
+                    wchar_t* tip = TipWriteBuf();
+                    swprintf_s(tip, kTipSize, L"Process Net Monitor (ETW)\nTotal: U:%.1fKB/s D:%.1fKB/s",
+                               su / 1024.0, sd / 1024.0);
+                    PublishTooltip();
                     LeaveCriticalSection(&m_data_lock);
                 }
                 if (m_detail_created) PostMessage(m_detail.GetHwnd(), WM_PNM_REFRESH, 0, 0);
-                wchar_t* tip = TipWriteBuf();
-                swprintf_s(tip, kTipSize, L"Process Net Monitor (ETW)\nTotal: U:%.1fKB/s D:%.1fKB/s",
-                           su / 1024.0, sd / 1024.0);
-                PublishTooltip();
                 return;
             }
             swprintf_s(CProcessNetItem::s_value_buf[0], 256, L"ERR: %s", m_capture.GetLastError());
             swprintf_s(CProcessNetItem::s_value_buf[1], 256, L"ERR: %s", m_capture.GetLastError());
             {
+                // Same lock discipline as BuildTooltip (see above): the
+                // double-buffered publish must never run unlocked.
+                EnterCriticalSection(&m_data_lock);
                 wchar_t* tip = TipWriteBuf();
                 swprintf_s(tip, kTipSize, TR(L"Process Net Monitor\n\u26a0 \u542f\u52a8\u5931\u8d25\uff1a%s\n\n%s"),
                            m_capture.GetLastError(), m_capture.GetErrorDetail());
                 ClampTooltip(tip);   // system error text is unbounded (issue #14)
                 PublishTooltip();
+                LeaveCriticalSection(&m_data_lock);
             }
         }
         return;

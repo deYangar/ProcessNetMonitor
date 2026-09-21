@@ -174,8 +174,7 @@ void PacketCapture::RebindSockets(const std::vector<std::string>& new_ips) {
     // Build bind key to detect changes. m_last_bind_key / m_socks are also
     // read by CaptureLoop (snapshot) and Start() - check under the lock
     // (unsynchronized access from timer/conn/TM threads was heap corruption).
-    std::string new_key;
-    for (auto& ip : new_ips) new_key += ip + ";";
+    std::string new_key = MakeBindKey(new_ips);
     {
         std::lock_guard<std::mutex> lk(m_mutex);
         if (new_key == m_last_bind_key && !m_socks.empty()) return;  // no change and sockets healthy
@@ -237,7 +236,24 @@ void PacketCapture::CheckConfigChanged() {
     if (now - m_last_config_check < 5) return;  // check every 5 seconds
     m_last_config_check = now;
     auto new_ips = ReadTMAdapterConfig();
-    if (!new_ips.empty()) RebindSockets(new_ips);
+    if (new_ips.empty()) return;
+    // Backoff check BEFORE RebindSockets: this 5s loop is the path that
+    // actually churns sockets after a failed enable (e.g. SIO_RCVALL denied
+    // without admin) - only reading the config stays unconditional so an
+    // adapter change still rebinds immediately.
+    std::string key = MakeBindKey(new_ips);
+    if (EnableBackoffActive(key)) return;
+    RebindSockets(new_ips);
+    if (!SocketsBound()) {
+        int stage = 0, wsa_err = 0;
+        GetFailInfo(stage, wsa_err);
+        ULONGLONG wait_ms = NoteEnableFailed(key);
+        WriteLog("byte capture rebind FAILED (config-check) stage=" + std::to_string(stage) +
+                 " wsa=" + std::to_string(wsa_err) +
+                 " (retry in " + std::to_string(wait_ms / 1000) + "s)");
+    } else {
+        NoteEnableSucceeded();
+    }
 }
 
 // ============================================================
@@ -403,42 +419,56 @@ void PacketCapture::EnableByteCapture() {
         WriteLog("byte capture enable: no usable adapter, will retry via config check");
         return;
     }
+    // Backoff check BEFORE the rebuild: with it placed after RebindSockets,
+    // every attempt still created+destroyed the sockets and only the log
+    // line was throttled. Key-matched, so an adapter change retries at once.
+    std::string key = MakeBindKey(ips);
+    if (EnableBackoffActive(key)) return;
     RebindSockets(ips);
     if (!SocketsBound()) {
         int stage = 0, wsa_err = 0;
         GetFailInfo(stage, wsa_err);
-        // Backoff: consecutive enable failures (e.g. SIO_RCVALL denied
-        // without admin) back off exponentially 5s..300s instead of logging
-        // + socket-churn on every config check.
-        ULONGLONG now = GetTickCount64();
-        int fails = 0;
-        ULONGLONG last_fail = 0;
-        {
-            std::lock_guard<std::mutex> lk(m_mutex);
-            fails = m_enable_fail_count;
-            last_fail = m_last_enable_fail_tick;
-        }
-        ULONGLONG wait = 5000ULL << fails;
-        if (wait > 300000ULL) wait = 300000ULL;
-        if (now - last_fail >= wait) {
-            {
-                std::lock_guard<std::mutex> lk(m_mutex);
-                m_last_enable_fail_tick = now;
-                if (m_enable_fail_count < 6) m_enable_fail_count++;
-            }
-            WriteLog("byte capture enable FAILED stage=" + std::to_string(stage) +
-                     " wsa=" + std::to_string(wsa_err) +
-                     " (retry in " + std::to_string(wait / 1000) + "s)");
-        }
+        ULONGLONG wait_ms = NoteEnableFailed(key);
+        WriteLog("byte capture enable FAILED stage=" + std::to_string(stage) +
+                 " wsa=" + std::to_string(wsa_err) +
+                 " (retry in " + std::to_string(wait_ms / 1000) + "s)");
         return;
     }
-    {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        m_enable_fail_count = 0;
-        m_last_enable_fail_tick = 0;
-    }
+    NoteEnableSucceeded();
     // m_tcp_stats_enabled survives: EStats collection stays enabled per
     // connection in the kernel, re-enabling is harmless (idempotent).
+}
+
+std::string PacketCapture::MakeBindKey(const std::vector<std::string>& ips) {
+    std::string key;
+    for (auto& ip : ips) key += ip + ";";
+    return key;
+}
+
+bool PacketCapture::EnableBackoffActive(const std::string& bind_key) {
+    std::lock_guard<std::mutex> lk(m_mutex);
+    if (m_enable_fail_count <= 0) return false;
+    if (bind_key != m_last_fail_key) return false;
+    ULONGLONG wait = 5000ULL << m_enable_fail_count;
+    if (wait > 300000ULL) wait = 300000ULL;
+    return (GetTickCount64() - m_last_enable_fail_tick) < wait;
+}
+
+ULONGLONG PacketCapture::NoteEnableFailed(const std::string& bind_key) {
+    std::lock_guard<std::mutex> lk(m_mutex);
+    m_last_enable_fail_tick = GetTickCount64();
+    m_last_fail_key = bind_key;
+    if (m_enable_fail_count < 6) m_enable_fail_count++;
+    ULONGLONG wait = 5000ULL << m_enable_fail_count;
+    if (wait > 300000ULL) wait = 300000ULL;
+    return wait;
+}
+
+void PacketCapture::NoteEnableSucceeded() {
+    std::lock_guard<std::mutex> lk(m_mutex);
+    m_enable_fail_count = 0;
+    m_last_enable_fail_tick = 0;
+    m_last_fail_key.clear();
 }
 
 bool PacketCapture::SocketsBound() {

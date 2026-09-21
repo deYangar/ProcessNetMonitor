@@ -723,16 +723,20 @@ void EtwCapture::OnEvent(PEVENT_RECORD rec) {
     m_last_event_tick.store(GetTickCount64(), std::memory_order_release);
     // Hard cap on tracked PIDs: m_cum grows forever (never evicted) and the
     // per-tick GetStats walk + log formatting scale with it. On busy systems
-    // with short-lived processes this reached 10k+ rows. Evict the stalest
-    // idle entries past the cap (never the pid we just touched).
-    if (m_cum.size() > 4096) {
-        DWORD victim = 0;
-        ULONGLONG oldest = ULLONG_MAX;
+    // with short-lived processes this reached 10k+ rows. Evict down to the
+    // low watermark in one pass - evicting a single entry per event kept the
+    // O(n) scan hot on every new PID past the cap (never evict the pid we
+    // just touched).
+    if (m_cum.size() > kCumMax) {
+        std::vector<std::pair<ULONGLONG, DWORD>> by_age;
+        by_age.reserve(m_cum.size());
         for (auto& [vpid, vc] : m_cum) {
-            if (vpid == pid) continue;
-            if (vc.last_seen < oldest) { oldest = vc.last_seen; victim = vpid; }
+            if (vpid != pid) by_age.push_back({ vc.last_seen, vpid });
         }
-        if (victim) m_cum.erase(victim);
+        std::sort(by_age.begin(), by_age.end());
+        size_t drop = m_cum.size() - kCumLow;
+        if (drop > by_age.size()) drop = by_age.size();
+        for (size_t i = 0; i < drop; i++) m_cum.erase(by_age[i].second);
     }
 
     // protocol split (diagnostics)

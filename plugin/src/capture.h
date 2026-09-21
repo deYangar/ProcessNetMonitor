@@ -129,6 +129,7 @@ private:
     // exponentially (5s..300s) instead of retrying every config check.
     int m_enable_fail_count = 0;          // guarded by m_mutex
     ULONGLONG m_last_enable_fail_tick = 0;  // guarded by m_mutex
+    std::string m_last_fail_key;          // adapter selection that failed (guarded by m_mutex)
     
     // Diagnostics log
     std::wstring m_log_dir;
@@ -148,6 +149,14 @@ private:
     // under m_mutex from several threads - never read them unlocked).
     bool SocketsBound();
     void GetFailInfo(int& stage, int& wsa);
+    // Enable-failure backoff helpers, shared by EnableByteCapture and the
+    // conn thread's CheckConfigChanged (both drive RebindSockets). Key-
+    // matched: an adapter change bypasses the backoff and retries at once.
+    // NoteEnableFailed returns the ms to wait before the next retry.
+    static std::string MakeBindKey(const std::vector<std::string>& ips);
+    bool EnableBackoffActive(const std::string& bind_key);
+    ULONGLONG NoteEnableFailed(const std::string& bind_key);
+    void NoteEnableSucceeded();
     
     // Local adapter IPs (for packet direction detection)
     std::vector<uint32_t> m_local_ips;  // in network byte order (guarded by m_mutex)
