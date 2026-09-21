@@ -1258,6 +1258,7 @@ void CDetailWindow::SaveSettings() {
         fprintf(f, "  \"geo_enabled\": %s,\n", IpGeo::Instance().IsEnabled() ? "true" : "false");
     }
     fprintf(f, "  \"show_speed_items\": %s,\n", m_show_speed_items ? "true" : "false");
+    fprintf(f, "  \"popup_enabled\": %s,\n", m_popup_enabled ? "true" : "false");
     fprintf(f, "  \"debug_logs\": %s,\n", m_debug_logs ? "true" : "false");
     // 颜色模式：0=跟随系统 1=深色 2=浅色（详情窗与悬浮提示共享）
     fprintf(f, "  \"color_mode\": %d,\n", s_color_mode);
@@ -1363,6 +1364,18 @@ void CDetailWindow::LoadSettings() {
             if (pos != std::string::npos) {
                 std::string sub = json.substr(pos + 1, 16);
                 m_show_speed_items = (sub.find("true") != std::string::npos);
+            }
+        }
+    }
+    // Parse popup_enabled (default ON - hover popup master switch; absent
+    // field in older settings.json keeps it ON)
+    {
+        size_t pos = json.find("\"popup_enabled\"");
+        if (pos != std::string::npos) {
+            pos = json.find(':', pos);
+            if (pos != std::string::npos) {
+                std::string sub = json.substr(pos + 1, 16);
+                m_popup_enabled = (sub.find("true") != std::string::npos);
             }
         }
     }

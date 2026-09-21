@@ -90,6 +90,11 @@ private:
     COLORREF GetAccentColor(bool is_upload);
     COLORREF GetSectionBgColor();
 
+    // True while the cursor is inside/near the popup rect (~32px margin):
+    // the user is moving toward the "查看详细" button - the popup must not
+    // move under the cursor (button ends up missed, 2026-09-21).
+    bool IsCursorNear() const;
+
     // State
     HWND m_hwnd = nullptr;
     HINSTANCE m_hinst = nullptr;
@@ -103,7 +108,13 @@ private:
     double m_total_up = 0;
     double m_total_down = 0;
     RECT m_last_anchor = {};  // anchor rect used for the current show session
-    std::vector<RECT> m_last_tooltips;  // tooltips detected during last positioning
+    // Tooltip-avoidance state: TM's native tooltip follows the cursor and is
+    // rebuilt every second (text width changes), so its rect jitters
+    // constantly. Reposition only on real overlap, freeze while the cursor
+    // is near, and return to the anchor position only after the tooltip has
+    // stayed clear for 500ms.
+    bool m_avoided = false;           // nudge away from a tooltip happened
+    ULONGLONG m_no_overlap_tick = 0;  // first tick with no overlap (0 = reset)
 
     // Icon cache: exe_path -> HICON
     std::unordered_map<std::wstring, HICON> m_icon_cache;

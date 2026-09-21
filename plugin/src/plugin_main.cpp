@@ -347,12 +347,44 @@ void CProcessNetItem::DrawItem(void* hDC, int x, int y, int w, int h, bool dark_
     DrawTextW(hdc, left.c_str(), (int)left.size(), &rc_left, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 }
 
+// True while a menu opened by this thread (TrafficMonitor's right-click menu)
+// is tracking. Our popup window lives on TM's UI thread, so querying thread 0
+// (current) reports exactly TM's menu state - a hard signal that does not
+// depend on where the cursor sits: TrackPopupMenu may flip/shift the menu at
+// screen edges, leaving the cursor over the TM window and defeating any
+// WindowFromPoint-based check.
+static bool IsTMMenuMode() {
+    GUITHREADINFO gti = { sizeof(GUITHREADINFO) };
+    if (!GetGUIThreadInfo(0, &gti)) return false;
+    return (gti.flags & (GUI_INMENUMODE | GUI_POPUPMENUMODE)) != 0 ||
+           gti.hwndMenuOwner != nullptr;
+}
+
+// Hide TM's native tooltip windows right now (same thing CToolTipCtrl::Pop
+// does). Upstream pops them synchronously only in the taskbar window's
+// right-click handler; the main window relies on a 1 s timer, so its tooltip
+// can sit on top of the context menu for up to a second. We run inside the
+// TM process: GetCurrentProcessId() filters to TM's own tooltips.
+static void PopTMTooltips() {
+    HWND hwnd = nullptr;
+    while ((hwnd = FindWindowExW(nullptr, hwnd, L"tooltips_class32", nullptr)) != nullptr) {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(hwnd, &pid);
+        if (pid == GetCurrentProcessId())
+            SendMessageW(hwnd, TTM_POP, 0, 0);
+    }
+}
+
 int CProcessNetItem::OnMouseEvent(MouseEventType type, int x, int y, void* hWnd, int flag) {
     auto& plugin = CProcessNetPlugin::Instance();
     bool is_taskbar = (flag & MF_TASKBAR_WND) != 0;
 
     if (type == MT_LCLICKED) {
         if (is_taskbar) {
+            // Popup disabled via options: taskbar click has nothing to
+            // pin/unpin - consume it silently (TM has no default left-click
+            // action of its own there).
+            if (!plugin.m_detail.GetPopupEnabled()) return 1;
             // Taskbar click = pin/unpin the popup.
             // Pinned popup survives mouse leave; clicking again dismisses it.
             if (plugin.m_popup.IsVisible() && plugin.m_popup_pinned) {
@@ -380,13 +412,18 @@ int CProcessNetItem::OnMouseEvent(MouseEventType type, int x, int y, void* hWnd,
         return 1;
     }
     if (type == MT_RCLICKED) {
-        // Right-click dismisses the popup; only consume the event when we actually
-        // hid something, otherwise let TM show its own context menu.
+        // Right-click means "open TM's menu, popup get out of the way" - the
+        // same gesture does both: hide the popup (if any), pop TM's native
+        // tooltip synchronously (before TrackPopupMenu paints the menu), and
+        // return 0 so TM shows its context menu. The old behavior consumed
+        // the first right-click to just dismiss the popup, which read as
+        // "menu does not open on first right-click". Right-clicks on non-
+        // plugin items are covered by HoverTick's menu-mode check.
         if (plugin.m_popup.IsVisible()) {
             plugin.m_popup_pinned = false;
             plugin.m_popup.Hide();
-            return 1;
         }
+        PopTMTooltips();
         return 0;
     }
     if (type == MT_DBCLICKED) {
@@ -1199,7 +1236,9 @@ void CProcessNetPlugin::GetProcessDisplayInfo(
 //   - Move onto the popup itself -> stays open (user can click "查看详细").
 //   - Leave everything -> popup hides after a 300ms grace period.
 //   - Click on the taskbar item -> pins the popup (survives mouse leave);
-//     click again / right-click -> dismisses. See OnMouseEvent.
+//     clicking again dismisses it. See OnMouseEvent.
+//   - Right-click / context menu open -> popup hides immediately (no grace,
+//     pinned included) and stays suppressed until the menu closes.
 
 void CProcessNetPlugin::ShowPopupAt(const RECT& anchor) {
     std::vector<CTooltipPopup::ProcDisplayInfo> procs;
@@ -1209,7 +1248,26 @@ void CProcessNetPlugin::ShowPopupAt(const RECT& anchor) {
 }
 
 void CProcessNetPlugin::HoverTick() {
-    if (!m_popup_created) return;
+    // Popup disabled via options: no hover popup at all - TM's native
+    // tooltip (which still carries our GetTooltipInfo text) is the only hint.
+    if (!m_popup_created || !m_detail.GetPopupEnabled()) return;
+
+    // --- Context menu open: hide immediately, suppress hover logic ---------
+    // No 300ms grace here (the menu must never share the screen with the
+    // popup) and pinned popups step aside too. Right-clicks that land on a
+    // non-plugin display item never reach OnMouseEvent - this tick-level
+    // check is what covers them (worst case one 100ms tick).
+    if (IsTMMenuMode()) {
+        if (m_popup.IsVisible()) {
+            m_popup_pinned = false;
+            m_popup.Hide();
+        }
+        m_hover_target = nullptr;
+        m_hover_start_tick = 0;
+        m_hover_leave_tick = 0;
+        PopTMTooltips();   // idempotent; covers the main window's 1 s gap
+        return;
+    }
 
     ULONGLONG now = GetTickCount64();
 
@@ -1320,6 +1378,7 @@ static void OptionsApplyLang(HWND hwnd) {
     SetWindowTextW(GetDlgItem(hwnd, 1009), TR(L"\u7ACB\u5373\u66F4\u65B0"));
     SetWindowTextW(GetDlgItem(hwnd, 1006), TR(L"\u8C03\u8BD5\u65E5\u5FD7\uFF08\u5199\u5165\u63D2\u4EF6\u76EE\u5F55 debug\\\uFF09"));
     SetWindowTextW(GetDlgItem(hwnd, 1013), TR(L"\u5728 TrafficMonitor \u9F20\u6807\u60AC\u505C\u63D0\u793A\u4E2D\u663E\u793A\u8FDB\u7A0B\u7F51\u901F\u4FE1\u606F"));
+    SetWindowTextW(GetDlgItem(hwnd, 1020), TR(L"启用悬浮网速提示（关闭后仅 TrafficMonitor 官方悬停提示）"));
     SetWindowTextW(GetDlgItem(hwnd, 1015), TR(L"\u754C\u9762\u8BED\u8A00"));
     SetWindowTextW(GetDlgItem(hwnd, 1019), TR(L"\u989C\u8272\u6A21\u5F0F"));
     // 重填颜色模式下拉（保持当前选择）
@@ -1649,12 +1708,23 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         if (CProcessNetItem::s_show_speed_items)
             SendMessageW(GetDlgItem(hwnd, 1013), BM_SETCHECK, BST_CHECKED, 0);
 
+        // Enable/disable our own hover popup (the dark window that pops up
+        // when hovering a TM window). OFF = TM's native tooltip (with our
+        // GetTooltipInfo text, if the switch above is on) is the only hint.
+        // Default ON.
+        CreateWindowW(L"BUTTON",
+            TR(L"启用悬浮网速提示（关闭后仅 TrafficMonitor 官方悬停提示）"),
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            10, 242, 610, 22, hwnd, (HMENU)1020, nullptr, nullptr);
+        if (CProcessNetPlugin::Instance().m_detail.GetPopupEnabled())
+            SendMessageW(GetDlgItem(hwnd, 1020), BM_SETCHECK, BST_CHECKED, 0);
+
         // 界面语言 label + combo (跟随系统 + 扫描到的语言)
         CreateWindowW(L"STATIC", TR(L"\u754C\u9762\u8BED\u8A00"),
-            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 10, 242, 90, 20, hwnd, (HMENU)1015, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 10, 270, 90, 20, hwnd, (HMENU)1015, nullptr, nullptr);
         HWND hLangCombo = CreateWindowW(L"COMBOBOX", L"",
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-            90, 240, 190, 200, hwnd, (HMENU)1014, nullptr, nullptr);
+            90, 268, 190, 200, hwnd, (HMENU)1014, nullptr, nullptr);
         {
             SendMessageW(hLangCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"\u8DDF\u968F\u7CFB\u7EDF"));
             int cur = 0;
@@ -1673,10 +1743,10 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
 
         // 颜色模式 label + combo（自动=跟随系统 / 深色 / 浅色，详情窗与悬浮提示共用）
         CreateWindowW(L"STATIC", TR(L"\u989C\u8272\u6A21\u5F0F"),
-            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 10, 272, 90, 20, hwnd, (HMENU)1019, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 10, 300, 90, 20, hwnd, (HMENU)1019, nullptr, nullptr);
         HWND hColorCombo = CreateWindowW(L"COMBOBOX", L"",
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-            100, 270, 190, 120, hwnd, (HMENU)1018, nullptr, nullptr);
+            100, 298, 190, 120, hwnd, (HMENU)1018, nullptr, nullptr);
         {
             SendMessageW(hColorCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"\u81EA\u52A8"));
             SendMessageW(hColorCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"\u6DF1\u8272"));
@@ -1686,10 +1756,10 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
 
         // OK button
         CreateWindowW(L"BUTTON", L"OK",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 380, 306, 75, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 380, 334, 75, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
         // Cancel button
         CreateWindowW(L"BUTTON", L"Cancel",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 465, 306, 75, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 465, 334, 75, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
         // Use the proper UI font (Segoe UI 9pt) on every child control -
         // default is the bitmap 'System' font (jagged, ugly).
         EnumChildWindows(hwnd, OptionsSetFontProc, (LPARAM)GetStockObject(DEFAULT_GUI_FONT));
@@ -1726,6 +1796,16 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             bool show_speed = (SendMessageW(GetDlgItem(hwnd, 1013), BM_GETCHECK, 0, 0) == BST_CHECKED);
             CProcessNetItem::s_show_speed_items = show_speed;
             plugin.m_detail.SetShowSpeedItems(show_speed);
+
+            // Hover popup master switch: applies immediately - a visible
+            // (even pinned) popup is dismissed the moment it is turned off;
+            // the hover tick keeps suppressing it until re-enabled.
+            bool popup_on = (SendMessageW(GetDlgItem(hwnd, 1020), BM_GETCHECK, 0, 0) == BST_CHECKED);
+            plugin.m_detail.SetPopupEnabled(popup_on);
+            if (!popup_on && plugin.m_popup.IsVisible()) {
+                plugin.m_popup_pinned = false;
+                plugin.m_popup.Hide();
+            }
 
             // IP 库代理
             wchar_t proxy_buf[512] = {};
@@ -1813,7 +1893,7 @@ ITMPlugin::OptionReturn CProcessNetPlugin::ShowOptionsDialog(void* hParent) {
         L"ProcessNetMonitorOptionsDlg",
         TR(L"\x63D2\x4EF6\x8BBE\x7F6E"),
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        0, 0, 650, 405,
+        0, 0, 650, 433,
         (HWND)hParent, nullptr, GetModuleHandleW(NULL), nullptr
     );
     

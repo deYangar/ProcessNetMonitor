@@ -61,6 +61,10 @@ public:
     // Master switch for the Up/Down plugin items in TM's main window / taskbar
     bool GetShowSpeedItems() const { return m_show_speed_items; }
     void SetShowSpeedItems(bool v) { m_show_speed_items = v; }
+    // Master switch for the hover popup (our own popup window shown when
+    // hovering a TM window). OFF = only TM's native tooltip carries our info.
+    bool GetPopupEnabled() const { return m_popup_enabled; }
+    void SetPopupEnabled(bool v) { m_popup_enabled = v; }
     // 界面语言设置："auto"（跟随 TM）或具体 BCP-47（如 "en-US"）
     const std::wstring& GetLangSetting() const { return m_lang; }
     void SetLangSetting(const std::wstring& v) { m_lang = v; }
@@ -271,6 +275,7 @@ private:
     int m_transparent_width = 100;  // transparent area width in pixels
     int m_refresh_ms = 500;         // plugin data refresh interval (ms)
     bool m_show_speed_items = true; // show Up/Down items in TM main window/taskbar
+    bool m_popup_enabled = true;    // hover popup enabled (default ON; setting: settings.json "popup_enabled")
     std::wstring m_lang = L"auto";  // 界面语言：auto=跟随 TM，或具体 BCP-47
 
     // Columns - real-time

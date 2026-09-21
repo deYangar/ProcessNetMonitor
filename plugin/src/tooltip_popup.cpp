@@ -768,8 +768,6 @@ void CTooltipPopup::PositionWindow(const RECT& anchor_rect) {
                 break; // recompute intersections after this adjustment
             }
         }
-
-        m_last_tooltips = tips;
     }
 
     // Final clamp after tooltip avoidance
@@ -832,6 +830,10 @@ void CTooltipPopup::UpdateAndShow(const std::vector<ProcDisplayInfo>& procs,
 
     SetWindowPos(m_hwnd, NULL, 0, 0, pw, ph, SWP_NOMOVE | SWP_NOZORDER);
 
+    // Fresh show session (first show, or the anchor moved): reset the
+    // avoidance state - a full PositionWindow pass follows.
+    m_avoided = false;
+    m_no_overlap_tick = 0;
     PositionWindow(anchor_rect);
     InvalidateRect(m_hwnd, NULL, FALSE);
 }
@@ -856,28 +858,87 @@ void CTooltipPopup::UpdateData(const std::vector<ProcDisplayInfo>& procs,
         ReleaseDC(m_hwnd, hdc);
 
         if (pw != old_w || ph != old_h) {
-            // Size changed: resize and reposition (anchor may need re-clamping)
+            // Size changed: resize and reposition (anchor may need re-clamping),
+            // unless the cursor is near - freeze rule: keep the top-left and
+            // change the size only, so the "查看详细" button stays put.
             SetWindowPos(m_hwnd, NULL, 0, 0, pw, ph, SWP_NOMOVE | SWP_NOZORDER);
-            PositionWindow(m_last_anchor);
+            if (!IsCursorNear())
+                PositionWindow(m_last_anchor);
         }
         InvalidateRect(m_hwnd, NULL, FALSE);
     }
 }
 
+bool CTooltipPopup::IsCursorNear() const {
+    if (!m_hwnd) return false;
+    POINT pt;
+    GetCursorPos(&pt);
+    // The cursor hovering the anchor (TM window, incl. its taskbar child
+    // dialog) does NOT count as near: the popup always sits right next to
+    // the anchor, so the initial hover would permanently freeze avoidance
+    // and let the native tooltip sit on top of the popup (2026-09-21
+    // screenshot). "Near" starts once the cursor leaves the anchor and
+    // approaches the popup - i.e. the user is heading for the "查看详细"
+    // button.
+    if (m_anchor_hwnd && IsWindow(m_anchor_hwnd)) {
+        HWND hover = WindowFromPoint(pt);
+        for (HWND w = hover; w; w = GetParent(w)) {
+            if (w == m_anchor_hwnd) return false;
+        }
+    }
+    RECT rc;
+    GetWindowRect(m_hwnd, &rc);
+    InflateRect(&rc, (int)(32 * m_dpi_scale), (int)(32 * m_dpi_scale));
+    return PtInRect(&rc, pt) != 0;
+}
+
+// Reposition policy (2026-09-21, "查看详细" button missed):
+//  1. Only react when a native tooltip actually overlaps the popup rect
+//     (same 8px inflation as PositionWindow's avoidance loop). The tooltip
+//     follows the cursor and is rebuilt every second (text width changes),
+//     so reacting to mere rect changes pushed the popup across the screen.
+//  2. Freeze ALL movement while the cursor is near (within 32px of) the
+//     popup: the user is heading for the button - overlapping the tooltip
+//     is acceptable, moving the button is not.
+//  3. After being nudged away, return to the anchor position only once the
+//     tooltips have stayed clear for 500ms AND the cursor is not near.
 bool CTooltipPopup::RepositionIfTooltipsChanged() {
     if (!m_visible) return false;
 
     std::vector<RECT> tips;
     FindTMTooltips(m_anchor_hwnd, tips);
-    if (tips.size() != m_last_tooltips.size()) {
-        PositionWindow(m_last_anchor);
-        return true;
+
+    RECT self;
+    GetWindowRect(m_hwnd, &self);
+    int tip_margin = max(4, (int)(8 * m_dpi_scale));
+    bool overlap = false;
+    for (const auto& tip : tips) {
+        if (RectsIntersect(self, InflateRectScreen(tip, tip_margin, tip_margin))) {
+            overlap = true;
+            break;
+        }
     }
-    for (size_t i = 0; i < tips.size(); ++i) {
-        if (!EqualRect(&tips[i], &m_last_tooltips[i])) {
+
+    if (overlap) {
+        m_no_overlap_tick = 0;
+        if (!IsCursorNear()) {
             PositionWindow(m_last_anchor);
+            m_avoided = true;
             return true;
         }
+        return false;
+    }
+
+    // No overlap: nothing to do unless we were nudged away earlier.
+    if (!m_avoided) return false;
+
+    ULONGLONG now = GetTickCount64();
+    if (m_no_overlap_tick == 0) m_no_overlap_tick = now;
+    if (now - m_no_overlap_tick >= 500 && !IsCursorNear()) {
+        m_avoided = false;
+        m_no_overlap_tick = 0;
+        PositionWindow(m_last_anchor);
+        return true;
     }
     return false;
 }
