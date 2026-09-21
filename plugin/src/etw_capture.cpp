@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cstdarg>
 #include <cwchar>
+#include <limits.h>
 #include <share.h>
 #include <set>
 #include <tlhelp32.h>
@@ -196,6 +197,20 @@ void EtwCapture::LogLine(const wchar_t* fmt, ...) {
     wchar_t path[MAX_PATH] = L"";
     if (!PNM_GetDebugDir(path, MAX_PATH)) return;
     wcscat_s(path, L"\\etw_capture.log");
+    // Rotation: cap at 8MB (this log grew to 43MB on the reporter's machine).
+    {
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        if (GetFileAttributesExW(path, GetFileExInfoStandard, &fad)) {
+            ULARGE_INTEGER sz{ fad.nFileSizeLow, fad.nFileSizeHigh };
+            if (sz.QuadPart > 8ULL * 1024 * 1024) {
+                wchar_t bak[MAX_PATH] = L"";
+                wcsncpy_s(bak, path, _TRUNCATE);
+                wcscat_s(bak, L".bak");
+                DeleteFileW(bak);
+                MoveFileW(path, bak);
+            }
+        }
+    }
     HANDLE h = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
                            NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) return;
@@ -254,7 +269,7 @@ bool EtwCapture::Start() {
     m_stop = false;
     m_last_event_tick.store(0);
     m_ev_total = 0; m_ev_net = 0; m_ev_filt_addr = 0; m_ev_kept = 0;
-    wcscpy_s(m_conn_state, L"starting");
+    SetConnState(L"starting");
     try { m_thread = std::thread([this] { ConsumerLoop(); }); }
     catch (...) { return false; }
     return true;
@@ -283,9 +298,31 @@ void EtwCapture::Stop() {
 }
 
 void EtwCapture::SetError(const wchar_t* fmt, ...) {
+    std::lock_guard<std::mutex> lk(m_state_mutex);
     va_list ap; va_start(ap, fmt);
     _vsnwprintf_s(m_error, 256, _TRUNCATE, fmt, ap);
     va_end(ap);
+}
+
+void EtwCapture::SetConnState(const wchar_t* s) {
+    std::lock_guard<std::mutex> lk(m_state_mutex);
+    wcsncpy_s(m_conn_state, s, _TRUNCATE);
+}
+
+void EtwCapture::SetOwner(std::wstring o) {
+    std::lock_guard<std::mutex> lk(m_state_mutex);
+    m_owner = std::move(o);
+}
+
+void EtwCapture::GetConnState(wchar_t* out, size_t cap) const {
+    if (!out || cap == 0) return;
+    std::lock_guard<std::mutex> lk(m_state_mutex);
+    wcsncpy_s(out, cap, m_conn_state, _TRUNCATE);
+}
+
+std::wstring EtwCapture::GetOwner() const {
+    std::lock_guard<std::mutex> lk(m_state_mutex);
+    return m_owner;
 }
 
 void EtwCapture::ConsumerLoop() {
@@ -322,7 +359,7 @@ void EtwCapture::ConsumerLoop() {
         if (sr == ERROR_SUCCESS) {
             started_own = true;
             m_own_session_handle = session;
-            wcscpy_s(m_conn_state, L"self-started");
+            SetConnState(L"self-started");
             LogLine(L"StartTrace OK (own session, maxbuf=%u)", props->MaximumBuffers);
             consumer = OpenTraceW(&lf);
             if (consumer == INVALID_PROCESSTRACE_HANDLE) {
@@ -346,7 +383,7 @@ void EtwCapture::ConsumerLoop() {
                 if (sr2 == ERROR_SUCCESS) {
                     started_own = true;
                     m_own_session_handle = session;
-                    wcscpy_s(m_conn_state, L"self-started");
+                    SetConnState(L"self-started");
                     LogLine(L"took over stale session - StartTrace OK (own, maxbuf=%u)", props->MaximumBuffers);
                     consumer = OpenTraceW(&lf);
                     if (consumer == INVALID_PROCESSTRACE_HANDLE) {
@@ -363,9 +400,9 @@ void EtwCapture::ConsumerLoop() {
             }
             if (!started_own && consumer == INVALID_PROCESSTRACE_HANDLE) {
                 // fall back: attach to whatever is there
-                wcscpy_s(m_conn_state, L"attached");
+                SetConnState(L"attached");
                 LogLine(L"attaching to existing session instead (buffers NOT ours)");
-                m_owner = FindSessionOwners();
+                SetOwner(FindSessionOwners());
                 LogLine(L"ETW session owner(s): %s", m_owner.empty() ? L"(unknown)" : m_owner.c_str());
                 consumer = OpenTraceW(&lf);
                 if (consumer == INVALID_PROCESSTRACE_HANDLE) {
@@ -379,7 +416,7 @@ void EtwCapture::ConsumerLoop() {
         }
 
         if (consumer == INVALID_PROCESSTRACE_HANDLE) {
-            wcscpy_s(m_conn_state, L"failed");
+            SetConnState(L"failed");
             if (m_stop) break;
             Sleep(5000);
             continue;
@@ -684,6 +721,19 @@ void EtwCapture::OnEvent(PEVENT_RECORD rec) {
     c.idle_rounds = 0;
     m_ev_kept++;
     m_last_event_tick.store(GetTickCount64(), std::memory_order_release);
+    // Hard cap on tracked PIDs: m_cum grows forever (never evicted) and the
+    // per-tick GetStats walk + log formatting scale with it. On busy systems
+    // with short-lived processes this reached 10k+ rows. Evict the stalest
+    // idle entries past the cap (never the pid we just touched).
+    if (m_cum.size() > 4096) {
+        DWORD victim = 0;
+        ULONGLONG oldest = ULLONG_MAX;
+        for (auto& [vpid, vc] : m_cum) {
+            if (vpid == pid) continue;
+            if (vc.last_seen < oldest) { oldest = vc.last_seen; victim = vpid; }
+        }
+        if (victim) m_cum.erase(victim);
+    }
 
     // protocol split (diagnostics)
     bool is_udp = false;
@@ -947,8 +997,10 @@ void EtwCapture::LogPeriodicLocked() {
     }
     m_samp_weird.clear();
 
+    wchar_t conn_st[64] = L"";
+    GetConnState(conn_st, 64);
     LogLine(L"conn=%s total=%llu net=%llu filt=%llu kept=%llu cum=%zu phys=[%s] virt=[%s] keptAddrs=[%s] filtAddrs=[%s] procs=%s weird=%s tcpU=%lluB/%lluev tcpD=%lluB/%lluev udpU=%lluB/%lluev udpD=%lluB/%lluev",
-            m_conn_state, m_ev_total, m_ev_net, m_ev_filt_addr, m_ev_kept,
+            conn_st, m_ev_total, m_ev_net, m_ev_filt_addr, m_ev_kept,
             m_cum.size(), phys, virt, sk, sf, pids, wd,
             m_tcp_send_b, m_tcp_send_ev, m_tcp_recv_b, m_tcp_recv_ev,
             m_udp_send_b, m_udp_send_ev, m_udp_recv_b, m_udp_recv_ev);

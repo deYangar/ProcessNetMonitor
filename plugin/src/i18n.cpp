@@ -14,7 +14,9 @@
 namespace {
 
 std::map<std::wstring, std::wstring> g_table;
-SRWLOCK g_lock = SRWLOCK_INIT;  // 保护 g_table（定时器线程 Reload vs UI 线程 TR 读）
+SRWLOCK g_lock = SRWLOCK_INIT;  // 保护 g_table + 下面的全局语言状态
+// （定时器线程 CheckAndReload/Reload/ScanLangFiles vs UI 线程 TR/Get/选项对话框
+// 并发读写曾导致堆损坏 0xc0000374——所有全局状态必须持锁访问）
 // Reload 时旧表不立即析构：保留若干份，避免 Get() 返回的指针在调用方使用期间失效
 std::vector<std::shared_ptr<std::map<std::wstring, std::wstring>>> g_old_tables;
 std::vector<I18n::LangInfo> g_lang_list;   // 扫描到的语言列表
@@ -169,8 +171,7 @@ bool Load(const std::wstring& file_path) {
 }
 
 bool ScanLangFiles(const std::wstring& dir) {
-    g_lang_list.clear();
-    g_lang_dir = dir;
+    std::vector<LangInfo> list;   // 本地构建，IO 全程无锁；最后短锁换入
     std::wstring pattern = dir + L"\\*.ini";
     WIN32_FIND_DATAW fd;
     HANDLE hFind = FindFirstFileW(pattern.c_str(), &fd);
@@ -217,60 +218,95 @@ bool ScanLangFiles(const std::wstring& dir) {
         li.LowPart = fd.ftLastWriteTime.dwLowDateTime;
         li.HighPart = fd.ftLastWriteTime.dwHighDateTime;
         info.mtime = li.QuadPart;
-        g_lang_list.push_back(info);
+        list.push_back(info);
     } while (FindNextFileW(hFind, &fd));
     FindClose(hFind);
-    return !g_lang_list.empty();
+    if (list.empty()) return false;
+    AcquireSRWLockExclusive(&g_lock);
+    g_lang_dir = dir;
+    g_lang_list = std::move(list);
+    ReleaseSRWLockExclusive(&g_lock);
+    return true;
 }
 
 void SetLang(const std::wstring& bcp47_or_auto) {
+    AcquireSRWLockExclusive(&g_lock);
     g_mode = bcp47_or_auto.empty() ? L"auto" : bcp47_or_auto;
+    ReleaseSRWLockExclusive(&g_lock);
 }
 
-const std::wstring& GetLang() { return g_mode; }
+std::wstring GetLang() {
+    AcquireSRWLockShared(&g_lock);
+    std::wstring m = g_mode;
+    ReleaseSRWLockShared(&g_lock);
+    return m;
+}
 
 bool IsChinese() {
-    std::wstring lang = (g_mode == L"auto") ? g_tm_lang : g_mode;
+    AcquireSRWLockShared(&g_lock);
+    std::wstring mode = g_mode, tm = g_tm_lang;
+    ReleaseSRWLockShared(&g_lock);
+    std::wstring lang = (mode == L"auto") ? tm : mode;
     if (lang.empty()) lang = L"zh-CN";
     return MainLang(lang) == L"zh";
 }
 
 void SetTmLang(const std::wstring& bcp47) {
+    AcquireSRWLockExclusive(&g_lock);
     g_tm_lang = bcp47;
+    ReleaseSRWLockExclusive(&g_lock);
 }
 
 bool Reload() {
-    g_table.clear();
+    // 快照模式/语言/目录后解锁：Load() 内部再取排他锁（不可嵌套持锁调用）。
+    std::wstring mode, tm, dir;
+    std::vector<LangInfo> langs;
+    AcquireSRWLockShared(&g_lock);
+    mode = g_mode; tm = g_tm_lang; dir = g_lang_dir; langs = g_lang_list;
+    ReleaseSRWLockShared(&g_lock);
     // 确定目标 BCP-47
-    std::wstring target = g_mode;
+    std::wstring target = mode;
     if (target == L"auto") {
-        target = g_tm_lang;
-        if (target.empty()) return false;  // 未知 TM 语言 -> 中文兜底
+        target = tm;
+        if (target.empty()) {
+            // 未知 TM 语言 -> 中文兜底（清空当前表）。
+            AcquireSRWLockExclusive(&g_lock);
+            g_old_tables.push_back(std::make_shared<std::map<std::wstring, std::wstring>>(std::move(g_table)));
+            if (g_old_tables.size() > 8) g_old_tables.erase(g_old_tables.begin());
+            g_table.clear();
+            ReleaseSRWLockExclusive(&g_lock);
+            return false;
+        }
     }
     std::wstring target_main = MainLang(target);
     // 1) 在扫描到的语言列表里精确匹配 BCP-47，其次匹配主语言
     const LangInfo* match = nullptr;
-    for (const auto& lang : g_lang_list) {
+    for (const auto& lang : langs) {
         if (ToLower(lang.bcp47) == ToLower(target)) { match = &lang; break; }
     }
     if (!match) {
-        for (const auto& lang : g_lang_list) {
+        for (const auto& lang : langs) {
             if (MainLang(lang.bcp47) == target_main) { match = &lang; break; }
         }
     }
     if (match) {
-        return Load(g_lang_dir + L"\\" + match->file_name);
+        return Load(dir + L"\\" + match->file_name);
     }
     // 2) 回退：按文件名映射（English.ini / Indonesian.ini 等内置约定）
-    if (!g_lang_dir.empty()) {
+    if (!dir.empty()) {
         std::wstring fallback = LangFileFromBcp47(target);
-        if (Load(g_lang_dir + L"\\" + fallback)) return true;
+        if (Load(dir + L"\\" + fallback)) return true;
     }
     // 3) 中文兜底：不加载任何文件，TR 返回中文原文
     return false;
 }
 
-const std::vector<LangInfo>& GetLangList() { return g_lang_list; }
+std::vector<LangInfo> GetLangList() {
+    AcquireSRWLockShared(&g_lock);
+    std::vector<LangInfo> copy = g_lang_list;
+    ReleaseSRWLockShared(&g_lock);
+    return copy;
+}
 
 const wchar_t* Get(const wchar_t* key) {
     AcquireSRWLockShared(&g_lock);
@@ -296,14 +332,33 @@ std::wstring LangFileFromBcp47(const std::wstring& bcp47) {
 }
 
 bool CheckAndReload(const std::wstring& tm_lang) {
-    // 重新扫描目录，对比语言列表（含文件修改时间）与 TM 语言
-    std::vector<LangInfo> old_list = g_lang_list;
-    bool scanned = ScanLangFiles(g_lang_dir);
-    bool list_changed = (old_list != g_lang_list);
-    bool tm_changed = (ToLower(tm_lang) != ToLower(g_tm_lang));
-    if (!scanned && old_list.empty()) return false;
+    // 快照旧状态（共享锁）→ 目录 rescan（无锁 IO）→ 有变化才换入（排他锁）。
+    // 旧版直接 ScanLangFiles 重建 g_lang_list：定时器线程与 UI 线程的
+    // GetLangList()/TR() 无锁并发即堆损坏 0xc0000374。
+    std::vector<LangInfo> old_list;
+    std::wstring old_tm, dir;
+    AcquireSRWLockShared(&g_lock);
+    old_list = g_lang_list; old_tm = g_tm_lang; dir = g_lang_dir;
+    ReleaseSRWLockShared(&g_lock);
+    if (dir.empty()) return false;   // 尚未 InitOnce：无语言目录可扫描
+    if (!ScanLangFiles(dir)) {
+        if (old_list.empty()) return false;
+        // 目录不可读但旧表非空：保持旧表，仅检查 TM 语言变化
+        if (ToLower(tm_lang) == ToLower(old_tm)) return false;
+        AcquireSRWLockExclusive(&g_lock);
+        g_tm_lang = tm_lang;
+        ReleaseSRWLockExclusive(&g_lock);
+        return Reload();
+    }
+    AcquireSRWLockShared(&g_lock);
+    std::vector<LangInfo> new_list = g_lang_list;   // ScanLangFiles 已换入
+    ReleaseSRWLockShared(&g_lock);
+    bool list_changed = (old_list != new_list);
+    bool tm_changed = (ToLower(tm_lang) != ToLower(old_tm));
     if (!list_changed && !tm_changed) return false;
+    AcquireSRWLockExclusive(&g_lock);
     g_tm_lang = tm_lang;
+    ReleaseSRWLockExclusive(&g_lock);
     return Reload();
 }
 

@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <deque>
 #include <map>
+#include <atomic>
 
 struct RecentProc {
     std::wstring name;
@@ -84,7 +85,17 @@ private:
     ULONGLONG m_last_time = 0;
     bool m_started = false;
     ULONGLONG m_last_start_attempt = 0;  // throttle capture Start() retries
-    wchar_t m_tooltip[2048] = L"";
+    // Double-buffered tooltip text: BuildTooltip (timer/TM threads) rewrites
+    // one slot then atomically publishes the index; GetTooltipInfo (host UI
+    // thread) reads whatever slot is current. The host may hold the returned
+    // pointer while we publish again - so each slot keeps its content until
+    // it becomes the write slot again (2 slots = no torn reads, no lifetime
+    // issue). Direct in-place rewrite of a single buffer was a torn-read
+    // race (host reads partial garbage -> same class as Weather.dll issue).
+    static const int kTipSlots = 2;
+    static const int kTipSize = 2048;
+    wchar_t m_tooltip[2][2048] = { L"", L"" };
+    std::atomic<int> m_tooltip_cur{ 0 };
     static CProcessNetPlugin s_instance;
 
     // TM config directory (received via OnExtenedInfo)
@@ -114,6 +125,10 @@ public:
     bool m_refresh_timer_ok = false;
     CRITICAL_SECTION m_data_lock;         // guards cached stats + item updates
     bool m_lock_inited = false;
+    // Re-entrancy guard: TimerQueueTimer with WT_EXECUTELONGFUNCTION may
+    // overlap RefreshTick with itself under load (GetStats does syscalls).
+    // Overlapping ticks raced on m_last_time / stats pipeline.
+    std::atomic<bool> m_refresh_busy{false};
     bool m_inited = false;                // InitOnce() has run (OnInitialize or first DataRequired)
     void InitOnce(const wchar_t* cfg_base);   // full one-time init, shared by both entries
     void EnsureInitialized();                 // issue #12: hosts that never call OnInitialize
@@ -125,6 +140,10 @@ public:
     void StopRefreshTimer();
     void ComputeWindowSpeeds(std::vector<ProcTraffic>& stats);
     void BuildTooltip(bool etw_active, const std::vector<ProcTraffic>& stats, double su, double sd);
+    // Tooltip publish helpers (double-buffered, see m_tooltip): writers
+    // build into the INACTIVE slot then PublishTooltip() flips the index.
+    wchar_t* TipWriteBuf() { return m_tooltip[1 - m_tooltip_cur.load(std::memory_order_acquire)]; }
+    void PublishTooltip() { m_tooltip_cur.store(1 - m_tooltip_cur.load(std::memory_order_acquire), std::memory_order_release); }
     // Run on the window's own (UI) thread via WM_PNM_REFRESH
     void DetailRefreshFromSnapshot();
     void PopupRefreshFromSnapshot();

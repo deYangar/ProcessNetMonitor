@@ -61,10 +61,10 @@ public:
     
     // Check if TM config changed and rebind sockets if needed
     void CheckConfigChanged();
-    // Set TM config directory
-    void SetTMConfigDir(const std::wstring& dir) { m_tm_config_dir = dir; }
-    // Set directory for capture.log (diagnostics)
-    void SetLogDir(const std::wstring& dir) { m_log_dir = dir; }
+    // Set TM config directory (locked: cross-thread with readers)
+    void SetTMConfigDir(const std::wstring& dir);
+    // Set directory for capture.log (diagnostics, locked)
+    void SetLogDir(const std::wstring& dir);
     
     // 获取指定进程的连接详情
     std::vector<ConnDetail> GetProcessConnections(DWORD pid);
@@ -114,9 +114,21 @@ private:
     std::string m_last_bind_key;  // hash of last adapter selection
     time_t m_last_config_check = 0;
     
-    // Last socket creation failure info (for specific error messages)
+    // Last socket creation failure info (for specific error messages).
+    // Guarded by m_mutex (written by RebindSockets on timer/conn/TM threads).
     int m_fail_stage = 0;       // 1=socket() 2=bind() 3=WSAIoctl(SIO_RCVALL)
     int m_last_wsa_error = 0;   // WSAGetLastError() at failure
+
+    // Byte-toggle hysteresis: the ETW backend flaps (lost/primary) on
+    // unstable networks (VPN reconnects) - without a dwell each flap
+    // creates+destroys raw sockets. Minimum 30s between toggles.
+    // Atomic: SetByteCaptureEnabled runs on both the timer and TM threads.
+    std::atomic<ULONGLONG> m_last_toggle_tick{ 0 };
+    static const ULONGLONG kToggleDwellMs = 30000;
+    // Enable-failure backoff: consecutive SIO_RCVALL denials back off
+    // exponentially (5s..300s) instead of retrying every config check.
+    int m_enable_fail_count = 0;          // guarded by m_mutex
+    ULONGLONG m_last_enable_fail_tick = 0;  // guarded by m_mutex
     
     // Diagnostics log
     std::wstring m_log_dir;
@@ -128,11 +140,17 @@ private:
     
     // Read TM connection config and return adapter IPs to bind
     std::vector<std::string> ReadTMAdapterConfig();
-    // Rebind sockets (called when config changes)
+    // Rebind sockets (called when config changes). Thread-safe: may be called
+    // from the timer thread (byte toggle), the conn thread (config check) and
+    // the TM thread (Start) concurrently.
     void RebindSockets(const std::vector<std::string>& new_ips);
+    // Locked snapshots of socket/failure state (m_socks etc. are mutated
+    // under m_mutex from several threads - never read them unlocked).
+    bool SocketsBound();
+    void GetFailInfo(int& stage, int& wsa);
     
     // Local adapter IPs (for packet direction detection)
-    std::vector<uint32_t> m_local_ips;  // in network byte order
+    std::vector<uint32_t> m_local_ips;  // in network byte order (guarded by m_mutex)
     
     // TCP per-connection byte stats (from GetPerTcpConnectionEStats)
     // Key: PID, Value: {DataBytesIn, DataBytesOut}

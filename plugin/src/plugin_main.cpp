@@ -209,8 +209,13 @@ static void SetupWerLocalDumps() {
         CreateDirectoryW(dump_dir, nullptr);
         RegSetValueExW(hk, L"DumpFolder", 0, REG_SZ,
                        (const BYTE*)dump_dir, (DWORD)((wcslen(dump_dir) + 1) * sizeof(wchar_t)));
-        DWORD type = 2;  // full dump
+        // Mini dumps (was full=2: each crash left a 300-400MB .dmp, 1.4GB
+        // total on the reporter's machine). Mini dumps still capture the
+        // faulting stack the crash.log references.
+        DWORD type = 1;  // MiniDump
         RegSetValueExW(hk, L"DumpType", 0, REG_DWORD, (const BYTE*)&type, sizeof(type));
+        DWORD count = 3;  // keep at most 3 dumps
+        RegSetValueExW(hk, L"DumpCount", 0, REG_DWORD, (const BYTE*)&count, sizeof(count));
     }
     RegCloseKey(hk);
 }
@@ -220,11 +225,14 @@ static const wchar_t* EtwPopupStatus(const EtwCapture* cap) {
     thread_local wchar_t buf[512];
     if (!cap) return nullptr;
     if (cap->HasData()) {
-        const wchar_t* st = cap->ConnState();
-        if (st && wcsstr(st, L"attach") != nullptr) {
-            const wchar_t* owner = cap->OwnerText();
-            if (owner && owner[0]) {
-                swprintf_s(buf, 512, TR(L"\u26a0 \u9644\u52a0\u6a21\u5f0f\uff1aNT Kernel Logger \u7591\u4f3c\u88ab %s \u5360\u7528\uff0c\u5927\u6d41\u91cf\u65f6\u53ef\u80fd\u4e22\u4e8b\u4ef6\uff0c\u5efa\u8bae\u5173\u95ed\u540e\u91cd\u542f TM"), owner);
+        // Locked snapshot: the ETW consumer thread writes conn_state/owner
+        // while this runs on the TM/timer thread.
+        wchar_t st[64] = L"";
+        cap->GetConnState(st, 64);
+        if (st[0] && wcsstr(st, L"attach") != nullptr) {
+            std::wstring owner = cap->GetOwner();
+            if (!owner.empty()) {
+                swprintf_s(buf, 512, TR(L"\u26a0 \u9644\u52a0\u6a21\u5f0f\uff1aNT Kernel Logger \u7591\u4f3c\u88ab %s \u5360\u7528\uff0c\u5927\u6d41\u91cf\u65f6\u53ef\u80fd\u4e22\u4e8b\u4ef6\uff0c\u5efa\u8bae\u5173\u95ed\u540e\u91cd\u542f TM"), owner.c_str());
             } else {
                 swprintf_s(buf, 512, TR(L"\u26a0 \u9644\u52a0\u6a21\u5f0f\uff1aNT Kernel Logger \u88ab\u5176\u4ed6\u7a0b\u5e8f\u5360\u7528\uff0c\u5927\u6d41\u91cf\u65f6\u53ef\u80fd\u4e22\u4e8b\u4ef6\uff0c\u5efa\u8bae\u5173\u95ed AppNetworkCounter \u540e\u91cd\u542f TM"));
             }
@@ -572,21 +580,33 @@ void CProcessNetPlugin::DataRequired() {
                 auto stats = m_etw_cap.GetStats(dt2);
                 double su = 0, sd = 0;
                 for (auto& s : stats) { su += s.speed_up; sd += s.speed_down; }
-                m_items[0].Update(stats, su, sd);
-                m_items[1].Update(stats, su, sd);
-                m_cached_stats = stats;
-                m_cached_up = su;
-                m_cached_down = sd;
+                // Locked: the popup/detail UI threads read m_cached_stats /
+                // m_recent via snapshots (unlocked write was heap corruption).
+                {
+                    EnterCriticalSection(&m_data_lock);
+                    m_items[0].Update(stats, su, sd);
+                    m_items[1].Update(stats, su, sd);
+                    m_cached_stats = stats;
+                    m_cached_up = su;
+                    m_cached_down = sd;
+                    LeaveCriticalSection(&m_data_lock);
+                }
                 if (m_detail_created) PostMessage(m_detail.GetHwnd(), WM_PNM_REFRESH, 0, 0);
-                swprintf_s(m_tooltip, 2048, L"Process Net Monitor (ETW)\nTotal: U:%.1fKB/s D:%.1fKB/s",
+                wchar_t* tip = TipWriteBuf();
+                swprintf_s(tip, kTipSize, L"Process Net Monitor (ETW)\nTotal: U:%.1fKB/s D:%.1fKB/s",
                            su / 1024.0, sd / 1024.0);
+                PublishTooltip();
                 return;
             }
             swprintf_s(CProcessNetItem::s_value_buf[0], 256, L"ERR: %s", m_capture.GetLastError());
             swprintf_s(CProcessNetItem::s_value_buf[1], 256, L"ERR: %s", m_capture.GetLastError());
-            swprintf_s(m_tooltip, 2048, TR(L"Process Net Monitor\n\u26a0 \u542f\u52a8\u5931\u8d25\uff1a%s\n\n%s"),
-                       m_capture.GetLastError(), m_capture.GetErrorDetail());
-            ClampTooltip(m_tooltip);   // system error text is unbounded (issue #14)
+            {
+                wchar_t* tip = TipWriteBuf();
+                swprintf_s(tip, kTipSize, TR(L"Process Net Monitor\n\u26a0 \u542f\u52a8\u5931\u8d25\uff1a%s\n\n%s"),
+                           m_capture.GetLastError(), m_capture.GetErrorDetail());
+                ClampTooltip(tip);   // system error text is unbounded (issue #14)
+                PublishTooltip();
+            }
         }
         return;
     }
@@ -640,12 +660,17 @@ void CProcessNetPlugin::DataRequired() {
     double su = 0, sd = 0;
     for (auto& s : stats) { su += s.speed_up; sd += s.speed_down; }
 
-    m_items[0].Update(stats, su, sd);
-    m_items[1].Update(stats, su, sd);
-
-    m_cached_stats = stats;
-    m_cached_up = su;
-    m_cached_down = sd;
+    // Locked: the popup/detail UI threads read m_cached_stats / m_recent
+    // via snapshots (unlocked write was heap corruption).
+    {
+        EnterCriticalSection(&m_data_lock);
+        m_items[0].Update(stats, su, sd);
+        m_items[1].Update(stats, su, sd);
+        m_cached_stats = stats;
+        m_cached_up = su;
+        m_cached_down = sd;
+        LeaveCriticalSection(&m_data_lock);
+    }
 
     // Update detail window via UI thread (history recording keeps working)
     if (m_detail_created) {
@@ -656,68 +681,86 @@ void CProcessNetPlugin::DataRequired() {
 }
 
 void CProcessNetPlugin::BuildTooltip(bool etw_active, const std::vector<ProcTraffic>& stats, double su, double sd) {
+    // Serialize writers: RefreshTick (timer) and DataRequired (TM thread)
+    // both build concurrently. Build into the INACTIVE slot; publish
+    // atomically at the end so GetTooltipInfo (host UI thread) never reads
+    // a half-written buffer. (CRITICAL_SECTION is recursive, so the
+    // m_recent copy below can re-enter safely.)
+    EnterCriticalSection(&m_data_lock);
+    wchar_t* tip = TipWriteBuf();
     wchar_t line[256];
     if (etw_active) {
-        const wchar_t* st = m_etw_cap.ConnState();
-        if (st && wcsstr(st, L"attach") != nullptr) {
+        wchar_t st[64] = L"";
+        m_etw_cap.GetConnState(st, 64);
+        if (st[0] && wcsstr(st, L"attach") != nullptr) {
             wchar_t warn[600];
-            const wchar_t* owner = m_etw_cap.OwnerText();
-            if (owner && owner[0])
-                swprintf_s(warn, 600, TR(L"Process Net Monitor (ETW-attach)\n\u26a0 \u9644\u52a0\u6a21\u5f0f\uff1aNT Kernel Logger \u7591\u4f3c\u88ab %s \u5360\u7528\uff0c\u5927\u6d41\u91cf\u65f6\u53ef\u80fd\u4e22\u4e8b\u4ef6\uff0c\u5efa\u8bae\u5173\u95ed\u540e\u91cd\u542f TM\n"), owner);
+            std::wstring owner = m_etw_cap.GetOwner();
+            if (!owner.empty())
+                swprintf_s(warn, 600, TR(L"Process Net Monitor (ETW-attach)\n\u26a0 \u9644\u52a0\u6a21\u5f0f\uff1aNT Kernel Logger \u7591\u4f3c\u88ab %s \u5360\u7528\uff0c\u5927\u6d41\u91cf\u65f6\u53ef\u80fd\u4e22\u4e8b\u4ef6\uff0c\u5efa\u8bae\u5173\u95ed\u540e\u91cd\u542f TM\n"), owner.c_str());
             else
                 swprintf_s(warn, 600, TR(L"Process Net Monitor (ETW-attach)\n\u26a0 \u9644\u52a0\u6a21\u5f0f\uff1aNT Kernel Logger \u88ab\u5176\u4ed6\u7a0b\u5e8f\u5360\u7528\uff0c\u5927\u6d41\u91cf\u65f6\u53ef\u80fd\u4e22\u4e8b\u4ef6\uff0c\u5efa\u8bae\u5173\u95ed AppNetworkCounter \u540e\u91cd\u542f TM\n"));
-            wcscpy_s(m_tooltip, 2048, warn);
+            wcscpy_s(tip, kTipSize, warn);
         } else {
-            wcscpy_s(m_tooltip, 2048, L"Process Net Monitor (ETW)\n");
+            wcscpy_s(tip, kTipSize, L"Process Net Monitor (ETW)\n");
         }
     } else {
-        wcscpy_s(m_tooltip, 2048, L"Process Net Monitor\n");
+        wcscpy_s(tip, kTipSize, L"Process Net Monitor\n");
     }
     swprintf_s(line, 256, L"Total: U:%.1fKB/s D:%.1fKB/s\n", su/1024.0, sd/1024.0);
-    TipAppend(m_tooltip, line);
+    TipAppend(tip, line);
 
-    TipAppend(m_tooltip, L"\n--- Upload ---\n");
-    std::vector<RecentProc*> up_list, down_list;
+    TipAppend(tip, L"\n--- Upload ---\n");
+    // Copy under the lock, sort+format after: RefreshTick (timer thread)
+    // may erase entries concurrently, so raw pointers into m_recent must
+    // never escape the critical section (use-after-free -> heap corruption).
+    struct TipRow { std::wstring name; double speed; };
+    std::vector<TipRow> up_list, down_list;
     {
         EnterCriticalSection(&m_data_lock);
         for (auto& [pid, rp] : m_items[0].m_recent) {
-            if (rp.speed_up > 0.01 || rp.idle_rounds == 0) up_list.push_back(&rp);
+            if (rp.speed_up > 0.01 || rp.idle_rounds == 0) up_list.push_back({ rp.name, rp.speed_up });
         }
         for (auto& [pid, rp] : m_items[1].m_recent) {
-            if (rp.speed_down > 0.01 || rp.idle_rounds == 0) down_list.push_back(&rp);
+            if (rp.speed_down > 0.01 || rp.idle_rounds == 0) down_list.push_back({ rp.name, rp.speed_down });
         }
         LeaveCriticalSection(&m_data_lock);
     }
-    std::sort(up_list.begin(), up_list.end(), [](auto* a, auto* b) { return a->speed_up > b->speed_up; });
-    std::sort(down_list.begin(), down_list.end(), [](auto* a, auto* b) { return a->speed_down > b->speed_down; });
+    std::sort(up_list.begin(), up_list.end(), [](const TipRow& a, const TipRow& b) { return a.speed > b.speed; });
+    std::sort(down_list.begin(), down_list.end(), [](const TipRow& a, const TipRow& b) { return a.speed > b.speed; });
 
     int count = 0;
-    for (auto* rp : up_list) {
+    for (auto& rp : up_list) {
         if (count >= 5) break;
-        wchar_t spd[32]; FmtSpeed(rp->speed_up, spd, 32);
-        swprintf_s(line, 256, L"  %-14s %s\n", rp->name.c_str(), spd);
-        if (!TipAppend(m_tooltip, line)) break;
+        wchar_t spd[32]; FmtSpeed(rp.speed, spd, 32);
+        swprintf_s(line, 256, L"  %-14s %s\n", rp.name.c_str(), spd);
+        if (!TipAppend(tip, line)) break;
         count++;
     }
-    while (count < 5) { if (!TipAppend(m_tooltip, L"  -\n")) break; count++; }
+    while (count < 5) { if (!TipAppend(tip, L"  -\n")) break; count++; }
 
-    TipAppend(m_tooltip, L"\n--- Download ---\n");
+    TipAppend(tip, L"\n--- Download ---\n");
     count = 0;
-    for (auto* rp : down_list) {
+    for (auto& rp : down_list) {
         if (count >= 5) break;
-        wchar_t spd[32]; FmtSpeed(rp->speed_down, spd, 32);
-        swprintf_s(line, 256, L"  %-14s %s\n", rp->name.c_str(), spd);
-        if (!TipAppend(m_tooltip, line)) break;
+        wchar_t spd[32]; FmtSpeed(rp.speed, spd, 32);
+        swprintf_s(line, 256, L"  %-14s %s\n", rp.name.c_str(), spd);
+        if (!TipAppend(tip, line)) break;
         count++;
     }
-    while (count < 5) { if (!TipAppend(m_tooltip, L"  -\n")) break; count++; }
+    while (count < 5) { if (!TipAppend(tip, L"  -\n")) break; count++; }
 
-    ClampTooltip(m_tooltip);
+    ClampTooltip(tip);
+    PublishTooltip();
+    LeaveCriticalSection(&m_data_lock);
 }
 
 // High-frequency refresh: runs on a TimerQueueTimer independent of TM's tick.
 void CProcessNetPlugin::RefreshTick() {
     if (!m_started) return;
+    // Skip overlapping ticks: TimerQueueTimer fires the next callback even
+    // when the previous tick is still inside GetStats (syscalls under load).
+    bool expected = false;
+    if (!m_refresh_busy.compare_exchange_strong(expected, true)) return;
 
     // issue #11: ETW primary -> legacy byte capture OFF (no raw socket, no
     // per-connection EStats polling). ETW silent for >15s (HasData() false)
@@ -773,6 +816,7 @@ void CProcessNetPlugin::RefreshTick() {
     if (m_popup_created && m_popup.IsVisible()) {
         PostMessage(m_popup.GetHwnd(), WM_PNM_REFRESH, 0, 0);
     }
+    m_refresh_busy.store(false);
 }
 
 // Runs on the detail window's UI thread (WM_PNM_REFRESH handler)
@@ -895,7 +939,7 @@ const wchar_t* CProcessNetPlugin::GetTooltipInfo() {
     // hover tooltip - the plugin's own popup already shows the process
     // list (issue #9).
     if (!CProcessNetItem::s_show_speed_items) return L"";
-    return m_tooltip;
+    return m_tooltip[m_tooltip_cur.load(std::memory_order_acquire)];
 }
 
 void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
@@ -1195,6 +1239,10 @@ void CProcessNetPlugin::GetProcessDisplayInfo(
         const std::vector<ProcTraffic>& stats) {
     std::unordered_map<DWORD, CTooltipPopup::ProcDisplayInfo> merged;
 
+    // m_items[].m_recent is mutated by RefreshTick/DataRequired (timer/TM
+    // threads) via Update() - iterate only under m_data_lock (unsynchronized
+    // unordered_map read+insert/erase was heap corruption 0xc0000374).
+    EnterCriticalSection(&m_data_lock);
     for (auto& [pid, rp] : m_items[0].m_recent) {
         auto& d = merged[pid];
         d.name = rp.name;
@@ -1205,6 +1253,7 @@ void CProcessNetPlugin::GetProcessDisplayInfo(
         d.name = rp.name;
         d.speed_down = rp.speed_down;
     }
+    LeaveCriticalSection(&m_data_lock);
     for (auto& st : stats) {
         auto it = merged.find(st.pid);
         if (it != merged.end() && !st.exe_path.empty()) {
@@ -1241,10 +1290,22 @@ void CProcessNetPlugin::GetProcessDisplayInfo(
 //     pinned included) and stays suppressed until the menu closes.
 
 void CProcessNetPlugin::ShowPopupAt(const RECT& anchor) {
+    // Snapshot under the lock: RefreshTick (timer thread) rewrites the
+    // cached stats concurrently (unsynchronized std::vector copy was heap
+    // corruption 0xc0000374).
+    std::vector<ProcTraffic> snap;
+    double su = 0, sd = 0;
+    {
+        EnterCriticalSection(&m_data_lock);
+        snap = m_cached_stats;
+        su = m_cached_up;
+        sd = m_cached_down;
+        LeaveCriticalSection(&m_data_lock);
+    }
     std::vector<CTooltipPopup::ProcDisplayInfo> procs;
-    GetProcessDisplayInfo(procs, m_cached_stats);
+    GetProcessDisplayInfo(procs, snap);
     m_popup_anchor = anchor;
-    m_popup.UpdateAndShow(procs, m_cached_up, m_cached_down, anchor, EtwPopupStatus(&m_etw_cap));
+    m_popup.UpdateAndShow(procs, su, sd, anchor, EtwPopupStatus(&m_etw_cap));
 }
 
 void CProcessNetPlugin::HoverTick() {
@@ -1330,8 +1391,20 @@ void CProcessNetPlugin::HoverTick() {
 
     // --- data refresh while visible (lightweight: no reposition unless anchor moved) ---
     if (m_popup.IsVisible()) {
+        // Snapshot under the lock: RefreshTick (timer thread) rewrites the
+        // cached stats concurrently (unsynchronized std::vector copy was
+        // heap corruption 0xc0000374).
+        std::vector<ProcTraffic> snap;
+        double su = 0, sd = 0;
+        {
+            EnterCriticalSection(&m_data_lock);
+            snap = m_cached_stats;
+            su = m_cached_up;
+            sd = m_cached_down;
+            LeaveCriticalSection(&m_data_lock);
+        }
         std::vector<CTooltipPopup::ProcDisplayInfo> procs;
-        GetProcessDisplayInfo(procs, m_cached_stats);
+        GetProcessDisplayInfo(procs, snap);
         RECT anchor = m_popup_anchor;
         // Follow the floating main window if it moves; taskbar/pinned keep their anchor
         if (!m_popup_pinned && m_hover_target && !m_hover_is_taskbar && IsWindow(m_hover_target)) {
@@ -1340,13 +1413,13 @@ void CProcessNetPlugin::HoverTick() {
         if (!EqualRect(&anchor, &m_popup_anchor)) {
             m_popup_anchor = anchor;
             m_popup.SetAnchorHwnd(m_hover_target);
-            m_popup.UpdateAndShow(procs, m_cached_up, m_cached_down, anchor, EtwPopupStatus(&m_etw_cap), m_hover_target);
+            m_popup.UpdateAndShow(procs, su, sd, anchor, EtwPopupStatus(&m_etw_cap), m_hover_target);
         } else if (m_popup.RepositionIfTooltipsChanged()) {
             // Native tooltip has appeared/moved; popup was already repositioned.
             // Just refresh data without another layout pass.
-            m_popup.UpdateData(procs, m_cached_up, m_cached_down, EtwPopupStatus(&m_etw_cap));
+            m_popup.UpdateData(procs, su, sd, EtwPopupStatus(&m_etw_cap));
         } else {
-            m_popup.UpdateData(procs, m_cached_up, m_cached_down, EtwPopupStatus(&m_etw_cap));
+            m_popup.UpdateData(procs, su, sd, EtwPopupStatus(&m_etw_cap));
         }
     }
 }
@@ -1397,7 +1470,8 @@ static void OptionsApplyLang(HWND hwnd) {
         int cur = (int)SendMessageW(hCombo, CB_GETCURSEL, 0, 0);
         SendMessageW(hCombo, CB_RESETCONTENT, 0, 0);
         SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"\u8DDF\u968F\u7CFB\u7EDF"));
-        for (const auto& lang : I18n::GetLangList()) {
+        // By value: GetLangList() returns a thread-safe snapshot copy.
+        for (const auto lang : I18n::GetLangList()) {
             SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)lang.display_name.c_str());
         }
         SendMessageW(hCombo, CB_SETCURSEL, cur < 0 ? 0 : cur, 0);
@@ -1411,7 +1485,8 @@ static void OptionsApplyLanguageChange(HWND hwnd) {
     HWND hCombo = GetDlgItem(hwnd, 1014);
     int sel = hCombo ? (int)SendMessageW(hCombo, CB_GETCURSEL, 0, 0) : 0;
     std::wstring mode = L"auto";
-    const auto& langs = I18n::GetLangList();
+    // By value: GetLangList() returns a thread-safe snapshot copy.
+    const auto langs = I18n::GetLangList();
     if (sel > 0 && sel - 1 < (int)langs.size()) {
         mode = langs[sel - 1].bcp47;
     }
@@ -1728,7 +1803,8 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         {
             SendMessageW(hLangCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"\u8DDF\u968F\u7CFB\u7EDF"));
             int cur = 0;
-            const auto& langs = I18n::GetLangList();
+            // By value: GetLangList() returns a thread-safe snapshot copy.
+            const auto langs = I18n::GetLangList();
             std::wstring cur_lang = CProcessNetPlugin::Instance().m_detail.GetLangSetting();
             for (size_t i = 0; i < langs.size(); i++) {
                 SendMessageW(hLangCombo, CB_ADDSTRING, 0, (LPARAM)langs[i].display_name.c_str());

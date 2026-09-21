@@ -985,10 +985,16 @@ void CTooltipPopup::Hide() {
     }
 }
 
-// Public helper to get cached proc display info
+// Public helper to get cached proc display info (UI thread: locks inside)
 std::vector<CTooltipPopup::ProcDisplayInfo> CProcessNetPlugin::GetCachedProcDisplayInfo() {
     std::vector<CTooltipPopup::ProcDisplayInfo> out;
-    GetProcessDisplayInfo(out, m_cached_stats);
+    std::vector<ProcTraffic> snap;
+    {
+        EnterCriticalSection(&m_data_lock);
+        snap = m_cached_stats;
+        LeaveCriticalSection(&m_data_lock);
+    }
+    GetProcessDisplayInfo(out, snap);
     return out;
 }
 

@@ -36,8 +36,11 @@ public:
         return t != 0 && (GetTickCount64() - t) < 15000;
     }
     const wchar_t* GetLastError() const { return m_error; }
-    const wchar_t* ConnState() const { return m_conn_state; }  // init/starting/self-started/attached/failed
-    const wchar_t* OwnerText() const { return m_owner.empty() ? nullptr : m_owner.c_str(); }
+    // Thread-safe snapshots: the consumer thread writes these while the
+    // TM/timer threads read them (unsynchronized wchar_t array access across
+    // threads was a torn-read / heap-corruption risk).
+    void GetConnState(wchar_t* out, size_t cap) const;
+    std::wstring GetOwner() const;
 
     // Same contract as PacketCapture::GetStats: per-process speeds.
     // conn_count is left 0 (merge with PacketCapture data upstream).
@@ -109,6 +112,9 @@ private:
     uint64_t m_ev_kept = 0;        // actually counted
     ULONGLONG m_last_log_tick = 0;
     ULONGLONG m_last_shape_tick = 0;
+    // guards m_conn_state / m_owner / m_error (consumer thread writes,
+    // TM + timer threads read via EtwPopupStatus/BuildTooltip)
+    mutable std::mutex m_state_mutex;
     wchar_t m_conn_state[64] = L"init";   // attaching/attached/self/failed
     std::set<uint32_t> m_samp_kept;  // IPv4 local addrs of kept events (since last log)
     std::set<uint32_t> m_samp_filt;  // IPv4 local addrs of filtered events
@@ -175,4 +181,6 @@ private:
 
     wchar_t m_error[256] = L"";
     void SetError(const wchar_t* fmt, ...);
+    void SetConnState(const wchar_t* s);   // locked write (consumer thread)
+    void SetOwner(std::wstring o);         // locked write (consumer thread)
 };

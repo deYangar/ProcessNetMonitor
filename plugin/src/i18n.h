@@ -26,10 +26,11 @@ struct LangInfo {
 bool ScanLangFiles(const std::wstring& dir);
 
 // 设置语言模式："auto" = 跟随 TM 主程序语言；其他值 = 具体 BCP-47 标签（手动选择）。
+// 线程安全：内部加锁（定时器线程 CheckAndReload vs UI 线程读取并发）。
 void SetLang(const std::wstring& bcp47_or_auto);
 
-// 当前语言模式（"auto" 或具体 BCP-47）。
-const std::wstring& GetLang();
+// 当前语言模式（"auto" 或具体 BCP-47）。返回拷贝（线程安全）。
+std::wstring GetLang();
 
 // 按当前模式重新加载语言文件：
 //   auto  -> 需要先用 SetTmLang() 告知 TM 的语言，再 Reload()；
@@ -40,8 +41,10 @@ bool Reload();
 // 设置 TM 主程序当前语言（auto 模式匹配用），由 plugin_main 调用。
 void SetTmLang(const std::wstring& bcp47);
 
-// 扫描到的语言列表（含 display_name）。
-const std::vector<LangInfo>& GetLangList();
+// 扫描到的语言列表（含 display_name）。返回拷贝（线程安全：
+// CheckAndReload 在定时器线程重建该列表，而选项对话框在 UI 线程遍历它——
+// 无锁并发曾导致堆损坏 0xc0000374）。
+std::vector<LangInfo> GetLangList();
 
 // 加载指定语言文件（UTF-8/UTF-16，带/不带 BOM）。成功返回 true。
 bool Load(const std::wstring& file_path);

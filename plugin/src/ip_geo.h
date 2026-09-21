@@ -28,11 +28,13 @@ public:
     const wchar_t* StateText() const;
 
     // ---- 设置 (由 detail_window 持久化到 settings.json) ----
-    const std::wstring& GetProxy() const { return m_proxy; }
-    void SetProxy(const std::wstring& v) { m_proxy = v; }
-    int GetUpdateDays() const { return m_update_days; }
-    void SetUpdateDays(int v) { m_update_days = v; }
-    bool IsEnabled() const { return m_enabled; }
+    // 线程安全：下载线程在 m_mutex 下读取，UI 线程读写也必须持锁
+    // （无锁并发读写 std::wstring 曾是堆损坏候选）。返回拷贝，禁止引用外泄。
+    std::wstring GetProxy() const;
+    void SetProxy(const std::wstring& v);
+    int GetUpdateDays() const;
+    void SetUpdateDays(int v);
+    bool IsEnabled() const { return m_enabled.load(); }
     void SetEnabled(bool on);
     // 立即后台更新 IP 库 (失败保留旧文件)
     void ForceUpdate();
@@ -53,7 +55,7 @@ private:
     static bool IsFileStale(const std::wstring& path, int days);
 
     // 数据库
-    std::mutex m_mutex;                 // 保护 m_buf / m_buf6 / m_state
+    mutable std::mutex m_mutex;           // 保护 m_buf / m_buf6 / m_state / m_proxy / m_update_days
     std::vector<uint8_t> m_buf;         // IPv4 xdb
     std::vector<uint8_t> m_buf6;        // IPv6 xdb
     std::atomic<DbState> m_state{ DbState::NoDb };
@@ -64,9 +66,11 @@ private:
     std::wstring m_dll_dir;             // DLL 目录
 
     // 设置 (内存态, detail_window 负责持久化到 settings.json)
+    // m_proxy / m_update_days 持 m_mutex 读写（下载线程 vs 选项对话框）；
+    // m_enabled 用 atomic（查询热路径 Query() 免锁读取）。
     std::wstring m_proxy;               // 代理 (空=直连)
     int m_update_days = 7;              // 自动更新间隔(天)
-    bool m_enabled = true;              // 启用归属地显示 (关闭则不下载)
+    std::atomic<bool> m_enabled{ true };// 启用归属地显示 (关闭则不下载)
     std::atomic<bool> m_fail_notified{ false };  // 首次下载失败已提示
 
     // 查询缓存 (FIFO 淘汰)
