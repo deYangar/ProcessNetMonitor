@@ -1244,7 +1244,7 @@ void CDetailWindow::SaveSettings() {
     fprintf(f, "  \"win_h\": %d,\n", wh);
     // IP 归属地设置 (proxy / update_days / enabled)
     {
-        const std::wstring& proxy = IpGeo::Instance().GetProxy();
+        std::wstring proxy = IpGeo::Instance().GetProxy();
         std::string proxy8;
         if (!proxy.empty()) {
             int n = WideCharToMultiByte(CP_UTF8, 0, proxy.c_str(), (int)proxy.size(), NULL, 0, NULL, NULL);

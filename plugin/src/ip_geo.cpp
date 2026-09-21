@@ -246,7 +246,7 @@ void IpGeo::EnsureDatabase(const std::wstring& dll_dir) {
             FindClose(hFind);
         }
         // 功能关闭: 不加载不下载
-        if (!m_enabled) return;
+        if (!m_enabled.load()) return;
         // 已有文件则标记加载 (IO 在锁外做)
         if (m_state.load() != DbState::Ready) {
             DWORD attr = GetFileAttributesW(m_db_path.c_str());
@@ -275,6 +275,26 @@ void IpGeo::EnsureDatabase(const std::wstring& dll_dir) {
     }
 }
 
+std::wstring IpGeo::GetProxy() const {
+    std::lock_guard<std::mutex> lk(m_mutex);
+    return m_proxy;
+}
+
+void IpGeo::SetProxy(const std::wstring& v) {
+    std::lock_guard<std::mutex> lk(m_mutex);
+    m_proxy = v;
+}
+
+int IpGeo::GetUpdateDays() const {
+    std::lock_guard<std::mutex> lk(m_mutex);
+    return m_update_days;
+}
+
+void IpGeo::SetUpdateDays(int v) {
+    std::lock_guard<std::mutex> lk(m_mutex);
+    m_update_days = v;
+}
+
 void IpGeo::SetEnabled(bool on) {
     {
         std::lock_guard<std::mutex> lk(m_mutex);
@@ -292,7 +312,7 @@ void IpGeo::SetEnabled(bool on) {
 }
 
 void IpGeo::ForceUpdate() {
-    if (!m_enabled) return;
+    if (!m_enabled.load()) return;
     bool start = false;
     {
         std::lock_guard<std::mutex> lk(m_mutex);
@@ -518,7 +538,7 @@ void IpGeo::DownloadThread(std::wstring dll_dir, bool force) {
 
 // ============ 查询 ============
 std::wstring IpGeo::Query(const std::wstring& remote_addr) {
-    if (!m_enabled || remote_addr.empty()) return L"";
+    if (!m_enabled.load() || remote_addr.empty()) return L"";
     // 提取 IP 部分
     std::wstring ip = remote_addr;
     if (ip[0] == L'[') {  // IPv6 "[::1]:443"

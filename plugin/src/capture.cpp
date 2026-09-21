@@ -49,13 +49,29 @@ static std::vector<AdapterInfo> EnumAdapters() {
 // ============================================================
 // TM config reading
 // ============================================================
+
+void PacketCapture::SetTMConfigDir(const std::wstring& dir) {
+    std::lock_guard<std::mutex> lk(m_mutex);
+    m_tm_config_dir = dir;
+}
+
+void PacketCapture::SetLogDir(const std::wstring& dir) {
+    std::lock_guard<std::mutex> lk(m_mutex);
+    m_log_dir = dir;
+}
+
 std::vector<std::string> PacketCapture::ReadTMAdapterConfig() {
     auto adapters = EnumAdapters();
     std::vector<std::string> result;
     if (adapters.empty()) return result;
 
-    // Determine config file path
-    std::wstring config_path = m_tm_config_dir;
+    // Determine config file path (locked copy: written from OnExtenedInfo
+    // on the host thread, read here from TM/conn/timer threads).
+    std::wstring config_path;
+    {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        config_path = m_tm_config_dir;
+    }
     if (config_path.empty()) {
         // Fallback: try AppData\Roaming\TrafficMonitor\config.ini
         wchar_t appdata[MAX_PATH];
@@ -130,11 +146,21 @@ std::vector<std::string> PacketCapture::ReadTMAdapterConfig() {
         }
     }
 
-    // Log adapter selection when it changes (for remote diagnostics)
+    // Log adapter selection when it changes (for remote diagnostics).
+    // m_last_logged_selection is touched from the TM thread (Start), the
+    // conn thread (CheckConfigChanged) and the timer thread (EnableByteCapture)
+    // - guard it (unsynchronized std::string access was heap corruption).
     std::string sel_key;
     for (auto& ip : result) sel_key += ip + ";";
-    if (sel_key != m_last_logged_selection) {
-        m_last_logged_selection = sel_key;
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        if (sel_key != m_last_logged_selection) {
+            m_last_logged_selection = sel_key;
+            changed = true;
+        }
+    }
+    if (changed) {
         if (result.empty())
             WriteLog("adapter selection: NONE (no usable adapter found)");
         else
@@ -145,17 +171,21 @@ std::vector<std::string> PacketCapture::ReadTMAdapterConfig() {
 }
 
 void PacketCapture::RebindSockets(const std::vector<std::string>& new_ips) {
-    // Build bind key to detect changes
+    // Build bind key to detect changes. m_last_bind_key / m_socks are also
+    // read by CaptureLoop (snapshot) and Start() - check under the lock
+    // (unsynchronized access from timer/conn/TM threads was heap corruption).
     std::string new_key;
     for (auto& ip : new_ips) new_key += ip + ";";
-    if (new_key == m_last_bind_key && !m_socks.empty()) return;  // no change and sockets healthy
-
-    // Store local IPs for packet direction detection
-    m_local_ips.clear();
-    for (auto& ip : new_ips) {
-        uint32_t addr;
-        inet_pton(AF_INET, ip.c_str(), &addr);
-        m_local_ips.push_back(addr);
+    {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        if (new_key == m_last_bind_key && !m_socks.empty()) return;  // no change and sockets healthy
+        // Store local IPs for packet direction detection
+        m_local_ips.clear();
+        for (auto& ip : new_ips) {
+            uint32_t addr;
+            inet_pton(AF_INET, ip.c_str(), &addr);
+            m_local_ips.push_back(addr);
+        }
     }
 
     // Close old sockets (under the same lock CaptureLoop snapshots with)
@@ -274,9 +304,10 @@ bool PacketCapture::Start(bool with_byte_capture) {
     m_byte_enabled.store(with_byte_capture);
     if (with_byte_capture) {
         RebindSockets(bind_ips);
-        if (m_socks.empty()) {
-            int wsa = m_last_wsa_error;
-            switch (m_fail_stage) {
+        if (!SocketsBound()) {
+            int wsa = 0, stage = 0;
+            GetFailInfo(stage, wsa);
+            switch (stage) {
             case 1:  // socket() failed
                 if (wsa == WSAEACCES)
                     SetError(TR(L"\u9700\u8981\u7ba1\u7406\u5458\u6743\u9650"), TR(L"\u521b\u5efa\u539f\u59cb\u5957\u63a5\u5b57\u88ab\u62d2\u7edd\uff08WSAError 10013\uff09\u3002\u672c\u63d2\u4ef6\u901a\u8fc7\u539f\u59cb\u5957\u63a5\u5b57\u6293\u53d6\u6570\u636e\u5305\uff0c\u9700\u8981\u7ba1\u7406\u5458\u6743\u9650\u3002\n\u89e3\u51b3\u65b9\u6cd5\uff1a\u53f3\u952e TrafficMonitor \u2192 \u4ee5\u7ba1\u7406\u5458\u8eab\u4efd\u8fd0\u884c\u3002\n\u82e5\u5df2\u662f\u7ba1\u7406\u5458\u8fd0\u884c\uff0c\u8bf7\u68c0\u67e5\u706b\u7ed2/360 \u7b49\u5b89\u5168\u8f6f\u4ef6\u662f\u5426\u62e6\u622a\u539f\u59cb\u5957\u63a5\u5b57\u3002"));
@@ -341,6 +372,12 @@ void PacketCapture::SetByteCaptureEnabled(bool on) {
         m_byte_enabled.store(on);
         return;
     }
+    // Dwell: ETW lost/primary flaps every few seconds on unstable networks
+    // (VPN reconnect) - toggling raw sockets at that rate destabilizes the
+    // capture threads. Require 30s between toggles.
+    ULONGLONG now = GetTickCount64();
+    if (now - m_last_toggle_tick < kToggleDwellMs) return;
+    m_last_toggle_tick = now;
     m_byte_enabled.store(on);
     if (on) {
         // Reset delta baselines: counters were frozen while OFF, so the first
@@ -367,11 +404,52 @@ void PacketCapture::EnableByteCapture() {
         return;
     }
     RebindSockets(ips);
-    if (m_socks.empty())
-        WriteLog("byte capture enable FAILED stage=" + std::to_string(m_fail_stage) +
-                 " wsa=" + std::to_string(m_last_wsa_error));
+    if (!SocketsBound()) {
+        int stage = 0, wsa_err = 0;
+        GetFailInfo(stage, wsa_err);
+        // Backoff: consecutive enable failures (e.g. SIO_RCVALL denied
+        // without admin) back off exponentially 5s..300s instead of logging
+        // + socket-churn on every config check.
+        ULONGLONG now = GetTickCount64();
+        int fails = 0;
+        ULONGLONG last_fail = 0;
+        {
+            std::lock_guard<std::mutex> lk(m_mutex);
+            fails = m_enable_fail_count;
+            last_fail = m_last_enable_fail_tick;
+        }
+        ULONGLONG wait = 5000ULL << fails;
+        if (wait > 300000ULL) wait = 300000ULL;
+        if (now - last_fail >= wait) {
+            {
+                std::lock_guard<std::mutex> lk(m_mutex);
+                m_last_enable_fail_tick = now;
+                if (m_enable_fail_count < 6) m_enable_fail_count++;
+            }
+            WriteLog("byte capture enable FAILED stage=" + std::to_string(stage) +
+                     " wsa=" + std::to_string(wsa_err) +
+                     " (retry in " + std::to_string(wait / 1000) + "s)");
+        }
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        m_enable_fail_count = 0;
+        m_last_enable_fail_tick = 0;
+    }
     // m_tcp_stats_enabled survives: EStats collection stays enabled per
     // connection in the kernel, re-enabling is harmless (idempotent).
+}
+
+bool PacketCapture::SocketsBound() {
+    std::lock_guard<std::mutex> lk(m_mutex);
+    return !m_socks.empty();
+}
+
+void PacketCapture::GetFailInfo(int& stage, int& wsa) {
+    std::lock_guard<std::mutex> lk(m_mutex);
+    stage = m_fail_stage;
+    wsa = m_last_wsa_error;
 }
 
 void PacketCapture::DisableByteCapture() {
@@ -394,9 +472,27 @@ void PacketCapture::SetError(const wchar_t* short_msg, const wchar_t* detail_fmt
 }
 
 void PacketCapture::WriteLog(const std::string& text) {
-    if (m_log_dir.empty()) return;
-    CreateDirectoryW(m_log_dir.c_str(), NULL);
-    std::wstring path = m_log_dir + L"\\capture.log";
+    // Locked copy: SetLogDir writes from the host thread.
+    std::wstring log_dir;
+    {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        log_dir = m_log_dir;
+    }
+    if (log_dir.empty()) return;
+    CreateDirectoryW(log_dir.c_str(), NULL);
+    std::wstring path = log_dir + L"\\capture.log";
+    // Rotation: cap at 8MB with a single .bak generation.
+    {
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad)) {
+            ULARGE_INTEGER sz{ fad.nFileSizeLow, fad.nFileSizeHigh };
+            if (sz.QuadPart > 8ULL * 1024 * 1024) {
+                std::wstring bak = path + L".bak";
+                DeleteFileW(bak.c_str());
+                MoveFileW(path.c_str(), bak.c_str());
+            }
+        }
+    }
     // 用 Win32 API (绕开 CRT FILE*: 第三方注入 hook 会干扰 CRT 文件状态导致 failfast)
     HANDLE h = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
                            NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -424,7 +520,12 @@ void PacketCapture::WriteLog(const std::string& text) {
 }
 
 void PacketCapture::LogStartupFailure() {
-    if (m_log_dir.empty()) return;
+    std::wstring log_dir;
+    {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        if (m_log_dir.empty()) return;
+        log_dir = m_log_dir;
+    }
     std::wstring err_key = std::wstring(m_error) + L"|" + m_error_detail;
     if (err_key == m_last_logged_error) return;  // dedupe: log each distinct error once
     m_last_logged_error = err_key;
@@ -446,18 +547,23 @@ void PacketCapture::CaptureLoop() {
     while (m_running) {
         // Byte capture disabled (ETW primary, issue #11) or sockets not (yet)
         // bound: idle-wait. The thread stays alive so toggling back ON needs
-        // no thread (re)creation.
-        if (!m_byte_enabled.load() || m_socks.empty()) {
+        // no thread (re)creation. Snapshot under the lock: the byte-toggle
+        // and rebind paths mutate m_socks from other threads (unsynchronized
+        // std::vector access was heap corruption).
+        if (!m_byte_enabled.load()) {
             Sleep(200);
             continue;
         }
-        // Use select() to wait on all sockets. Snapshot under the lock: the
-        // byte-toggle and rebind paths mutate m_socks from other threads.
         std::vector<SOCKET> socks;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
             socks = m_socks;
         }
+        if (socks.empty()) {
+            Sleep(200);
+            continue;
+        }
+        // Use select() to wait on all sockets.
         fd_set readset;
         FD_ZERO(&readset);
         for (auto s : socks) FD_SET(s, &readset);
