@@ -649,15 +649,17 @@ void CProcessNetPlugin::DataRequired() {
     auto stats = m_capture.GetStats(dt);
 
     // ETW backend takes priority: more accurate per-process bytes (TCP+UDP,
-    // kernel attribution, works under TUN). Legacy stays warm as fallback
-    // and supplies conn_count. If ETW currently yields no rows (session
-    // hiccup / all filtered), keep legacy data so the UI never blanks out.
+    // kernel attribution, works under TUN). Legacy stays warm as fallback.
+    // conn_count merges from the live connection-table monitor (GetConnCounts)
+    // - NOT from the legacy stats rows: with ETW primary those rows are frozen
+    // to the PIDs byte capture last saw, so anything started afterwards stuck
+    // at 0 connections. If ETW yields no rows (session hiccup / all filtered),
+    // keep legacy data so the UI never blanks out.
     bool etw_active = m_etw_cap.HasData();
     if (etw_active) {
         auto es = m_etw_cap.GetStats(dt);
         if (!es.empty()) {
-            std::map<DWORD, int> conn_by_pid;
-            for (auto& l : stats) conn_by_pid[l.pid] = l.conn_count;
+            std::map<DWORD, int> conn_by_pid = m_capture.GetConnCounts();
             for (auto& e : es) {
                 auto it = conn_by_pid.find(e.pid);
                 if (it != conn_by_pid.end()) e.conn_count = it->second;
@@ -788,8 +790,10 @@ void CProcessNetPlugin::RefreshTick() {
     if (etw_active) {
         auto es = m_etw_cap.GetStats(dt);
         if (!es.empty()) {
-            std::map<DWORD, int> conn_by_pid;
-            for (auto& l : stats) conn_by_pid[l.pid] = l.conn_count;
+            // Live connection-table counts (v4+v6), independent of the legacy
+            // stats rows - see DataRequired for why the rows must not be the
+            // merge source (PIDs started after byte capture went OFF were 0).
+            std::map<DWORD, int> conn_by_pid = m_capture.GetConnCounts();
             for (auto& e : es) {
                 auto it = conn_by_pid.find(e.pid);
                 if (it != conn_by_pid.end()) e.conn_count = it->second;
@@ -936,7 +940,7 @@ const wchar_t* CProcessNetPlugin::GetInfo(PluginInfoIndex i) {
     case TMI_DESCRIPTION: return L"Per-process network speed";
     case TMI_AUTHOR: return L"deYangar";
     case TMI_COPYRIGHT: return L"MIT";
-    case TMI_VERSION: return L"1.16.5";
+    case TMI_VERSION: return L"1.16.6";
     case TMI_URL: return L"https://github.com/deYangar/ProcessNetMonitor";
     default: return L"";
     }

@@ -568,6 +568,14 @@ void PacketCapture::LogStartupFailure() {
     WriteLog("START FAILED: " + to_u8(m_error) + " | " + to_u8(m_error_detail));
 }
 
+// Unify a network-order IPv4 dword into the 16-byte ConnKey form (v4-mapped)
+static std::array<uint8_t, 16> V4Mapped(uint32_t addr_nbo) {
+    std::array<uint8_t, 16> a{};
+    a[10] = 0xFF; a[11] = 0xFF;
+    memcpy(a.data() + 12, &addr_nbo, 4);
+    return a;
+}
+
 // ============================================================
 // Loops
 // ============================================================
@@ -612,13 +620,12 @@ void PacketCapture::CaptureLoop() {
 void PacketCapture::ConnRefreshLoop() {
     while (m_running) {
         std::map<uint16_t, DWORD> tcp_port_pid;
-        std::map<uint16_t, DWORD> udp_port_pid;
+        std::map<UdpKey, DWORD> udp_port_pid;
         std::map<ConnKey, DWORD> tcp_conns;
-        std::vector<uint8_t> tcpBuf;
-        std::vector<uint8_t> udpBuf;
+        std::vector<uint8_t> tcpBuf, udpBuf, tcp6Buf, udp6Buf;
+        ULONG tcpSize = 0, udpSize = 0, tcp6Size = 0, udp6Size = 0;
 
-        // Query TCP table ONCE - shared by m_tcp_conns and m_conn_details_cache
-        ULONG tcpSize = 0;
+        // Query TCP v4 table ONCE - shared by m_tcp_conns and m_conn_details_cache
         GetExtendedTcpTable(NULL, &tcpSize, FALSE, AF_INET, TCP_TABLE_OWNER_MODULE_ALL, 0);
         if (tcpSize > 0) {
             tcpBuf.resize(tcpSize);
@@ -630,13 +637,12 @@ void PacketCapture::ConnRefreshLoop() {
                     uint16_t lp = ntohs((u_short)row.dwLocalPort);
                     uint16_t rp = ntohs((u_short)row.dwRemotePort);
                     tcp_port_pid[lp] = row.dwOwningPid;
-                    tcp_conns[{lp, row.dwRemoteAddr, rp}] = row.dwOwningPid;
+                    tcp_conns[{lp, V4Mapped(row.dwRemoteAddr), rp}] = row.dwOwningPid;
                 }
             }
         }
 
-        // Query UDP table ONCE
-        ULONG udpSize = 0;
+        // Query UDP v4 table ONCE
         GetExtendedUdpTable(NULL, &udpSize, FALSE, AF_INET, UDP_TABLE_OWNER_MODULE, 0);
         if (udpSize > 0) {
             udpBuf.resize(udpSize);
@@ -644,15 +650,48 @@ void PacketCapture::ConnRefreshLoop() {
                 auto* table = (MIB_UDPTABLE_OWNER_MODULE*)udpBuf.data();
                 for (DWORD i = 0; i < table->dwNumEntries; i++) {
                     if (!table->table[i].dwOwningPid) continue;
-                    udp_port_pid[ntohs((u_short)table->table[i].dwLocalPort)] = table->table[i].dwOwningPid;
+                    udp_port_pid[{4, ntohs((u_short)table->table[i].dwLocalPort)}] = table->table[i].dwOwningPid;
+                }
+            }
+        }
+
+        // TCP v6: dual-stack systems keep a growing share of connections on
+        // AF_INET6 only - without this query their owners showed 0 connections
+        GetExtendedTcpTable(NULL, &tcp6Size, FALSE, AF_INET6, TCP_TABLE_OWNER_MODULE_ALL, 0);
+        if (tcp6Size > 0) {
+            tcp6Buf.resize(tcp6Size);
+            if (GetExtendedTcpTable(tcp6Buf.data(), &tcp6Size, FALSE, AF_INET6, TCP_TABLE_OWNER_MODULE_ALL, 0) == NO_ERROR) {
+                auto* table = (MIB_TCP6TABLE_OWNER_MODULE*)tcp6Buf.data();
+                for (DWORD i = 0; i < table->dwNumEntries; i++) {
+                    auto& row = table->table[i];
+                    if (!row.dwOwningPid) continue;
+                    uint16_t lp = ntohs((u_short)row.dwLocalPort);
+                    uint16_t rp = ntohs((u_short)row.dwRemotePort);
+                    std::array<uint8_t, 16> ra;
+                    memcpy(ra.data(), row.ucRemoteAddr, 16);
+                    tcp_conns[{lp, ra, rp}] = row.dwOwningPid;
+                }
+            }
+        }
+
+        // UDP v6
+        GetExtendedUdpTable(NULL, &udp6Size, FALSE, AF_INET6, UDP_TABLE_OWNER_MODULE, 0);
+        if (udp6Size > 0) {
+            udp6Buf.resize(udp6Size);
+            if (GetExtendedUdpTable(udp6Buf.data(), &udp6Size, FALSE, AF_INET6, UDP_TABLE_OWNER_MODULE, 0) == NO_ERROR) {
+                auto* table = (MIB_UDP6TABLE_OWNER_MODULE*)udp6Buf.data();
+                for (DWORD i = 0; i < table->dwNumEntries; i++) {
+                    if (!table->table[i].dwOwningPid) continue;
+                    udp_port_pid[{6, ntohs((u_short)table->table[i].dwLocalPort)}] = table->table[i].dwOwningPid;
                 }
             }
         }
 
         // Update connection maps and detail cache from the SAME system snapshot
         { std::lock_guard<std::mutex> lk(m_mutex); m_tcp_port_pid = std::move(tcp_port_pid); m_udp_port_pid = std::move(udp_port_pid); m_tcp_conns = std::move(tcp_conns); }
-        RefreshConnectionDetails(tcpBuf.data(), tcpSize, udpBuf.data(), udpSize);
-        
+        RefreshConnectionDetails(tcpBuf.data(), tcpSize, udpBuf.data(), udpSize,
+                                  tcp6Buf.data(), tcp6Size, udp6Buf.data(), udp6Size);
+
         // Check if TM config changed (adapter selection)
         CheckConfigChanged();
         for (int i = 0; i < 30 && m_running; i++) Sleep(100);
@@ -673,9 +712,9 @@ void PacketCapture::ProcessPacket(const uint8_t* data, int len) {
         uint16_t sp = (data[ihl] << 8) | data[ihl + 1];
         uint16_t dp = (data[ihl + 2] << 8) | data[ihl + 3];
         std::lock_guard<std::mutex> lk(m_mutex);
-        auto it = m_tcp_conns.find({sp, dst_addr, dp});
+        auto it = m_tcp_conns.find({sp, V4Mapped(dst_addr), dp});
         if (it != m_tcp_conns.end()) { pid = it->second; is_out = true; }
-        else { it = m_tcp_conns.find({dp, src_addr, sp}); if (it != m_tcp_conns.end()) { pid = it->second; } }
+        else { it = m_tcp_conns.find({dp, V4Mapped(src_addr), sp}); if (it != m_tcp_conns.end()) { pid = it->second; } }
         if (!pid) {
             auto pit = m_tcp_port_pid.find(sp);
             if (pit != m_tcp_port_pid.end()) { pid = pit->second; is_out = true; }
@@ -688,9 +727,9 @@ void PacketCapture::ProcessPacket(const uint8_t* data, int len) {
         uint16_t sp = (data[ihl] << 8) | data[ihl + 1];
         uint16_t dp = (data[ihl + 2] << 8) | data[ihl + 3];
         std::lock_guard<std::mutex> lk(m_mutex);
-        auto pit = m_udp_port_pid.find(sp);
+        auto pit = m_udp_port_pid.find({4, sp});  // raw sockets are IPv4-only
         if (pit != m_udp_port_pid.end()) { pid = pit->second; is_out = true; }
-        else { pit = m_udp_port_pid.find(dp); if (pit != m_udp_port_pid.end()) { pid = pit->second; } }
+        else { pit = m_udp_port_pid.find({4, dp}); if (pit != m_udp_port_pid.end()) { pid = pit->second; } }
     }
 
     if (pid > 0) {
@@ -796,15 +835,10 @@ std::vector<ProcTraffic> PacketCapture::GetStats(double dt) {
     std::vector<ProcTraffic> result;
     std::lock_guard<std::mutex> lk(m_mutex);
 
-    // Count connections per process (TCP + UDP)
-    std::map<DWORD, int> conn_counts;
-    for (auto& [key, pid] : m_tcp_conns) {
-        conn_counts[pid]++;
-    }
-    for (auto& [port, pid] : m_udp_port_pid) {
-        if (conn_counts.find(pid) == conn_counts.end())
-            conn_counts[pid]++;
-    }
+    // Count connections per process (TCP rows + UDP endpoints, v4+v6).
+    // One row each - matches netstat -ano and the expandable detail list;
+    // the old "UDP only +1 when the pid had no TCP" undercounted.
+    std::map<DWORD, int> conn_counts = ConnCountsLocked();
     
     // Merge: ensure all PIDs from tcp_cum and raw socket stats are present
     for (auto& [pid, vals] : m_tcp_cum) {
@@ -890,88 +924,158 @@ std::vector<ProcTraffic> PacketCapture::GetStats(double dt) {
 // Connection Details
 // ============================================================
 
-void PacketCapture::RefreshConnectionDetails(const uint8_t* tcpBuf, ULONG tcpSize, const uint8_t* udpBuf, ULONG udpSize) {
+// Caller must hold m_mutex (shared by GetStats and GetConnCounts)
+std::map<DWORD, int> PacketCapture::ConnCountsLocked() {
+    std::map<DWORD, int> cc;
+    for (auto& [key, pid] : m_tcp_conns) cc[pid]++;
+    for (auto& [key, pid] : m_udp_port_pid) cc[pid]++;
+    return cc;
+}
+
+std::map<DWORD, int> PacketCapture::GetConnCounts() {
+    std::lock_guard<std::mutex> lk(m_mutex);
+    return ConnCountsLocked();
+}
+
+// TCP state codes are shared by the v4 and v6 owner-module tables
+static const wchar_t* TcpStateText(DWORD state) {
+    switch (state) {
+    case MIB_TCP_STATE_CLOSED:     return L"CLOSED";
+    case MIB_TCP_STATE_LISTEN:     return L"LISTENING";
+    case MIB_TCP_STATE_SYN_SENT:   return L"SYN_SENT";
+    case MIB_TCP_STATE_SYN_RCVD:   return L"SYN_RCVD";
+    case MIB_TCP_STATE_ESTAB:      return L"ESTABLISHED";
+    case MIB_TCP_STATE_FIN_WAIT1:  return L"FIN_WAIT1";
+    case MIB_TCP_STATE_FIN_WAIT2:  return L"FIN_WAIT2";
+    case MIB_TCP_STATE_CLOSE_WAIT: return L"CLOSE_WAIT";
+    case MIB_TCP_STATE_CLOSING:    return L"CLOSING";
+    case MIB_TCP_STATE_LAST_ACK:   return L"LAST_ACK";
+    case MIB_TCP_STATE_TIME_WAIT:  return L"TIME_WAIT";
+    case MIB_TCP_STATE_DELETE_TCB: return L"DELETE_TCB";
+    default:                       return L"UNKNOWN";
+    }
+}
+
+void PacketCapture::RefreshConnectionDetails(const uint8_t* tcpBuf, ULONG tcpSize,
+                                             const uint8_t* udpBuf, ULONG udpSize,
+                                             const uint8_t* tcp6Buf, ULONG tcp6Size,
+                                             const uint8_t* udp6Buf, ULONG udp6Size) {
     std::map<DWORD, std::vector<ConnDetail>> new_cache;
-    
-    // 1. Parse TCP connections from shared buffer
+
+    // 1. Parse TCP v4 connections from shared buffer
     if (tcpBuf && tcpSize > 0) {
         auto* table = (MIB_TCPTABLE_OWNER_MODULE*)tcpBuf;
         for (DWORD i = 0; i < table->dwNumEntries; i++) {
             auto& row = table->table[i];
             if (!row.dwOwningPid) continue;
-            
+
             ConnDetail conn;
             conn.protocol = ConnDetail::TCP;
             conn.pid = row.dwOwningPid;
-            
-            // Local address
+
             wchar_t local[64];
             struct in_addr local_addr;
             local_addr.s_addr = row.dwLocalAddr;
-            swprintf_s(local, L"%S:%u", inet_ntoa(local_addr), 
+            swprintf_s(local, L"%S:%u", inet_ntoa(local_addr),
                       ntohs((u_short)row.dwLocalPort));
             conn.local_addr = local;
-            
-            // Remote address
+
             wchar_t remote[64];
             struct in_addr remote_addr;
             remote_addr.s_addr = row.dwRemoteAddr;
             if (row.dwRemoteAddr == 0) {
                 swprintf_s(remote, L"*:*");
             } else {
-                swprintf_s(remote, L"%S:%u", inet_ntoa(remote_addr), 
+                swprintf_s(remote, L"%S:%u", inet_ntoa(remote_addr),
                           ntohs((u_short)row.dwRemotePort));
             }
             conn.remote_addr = remote;
-            
-            // TCP state
-            switch (row.dwState) {
-            case MIB_TCP_STATE_CLOSED:     conn.state = L"CLOSED"; break;
-            case MIB_TCP_STATE_LISTEN:     conn.state = L"LISTENING"; break;
-            case MIB_TCP_STATE_SYN_SENT:   conn.state = L"SYN_SENT"; break;
-            case MIB_TCP_STATE_SYN_RCVD:   conn.state = L"SYN_RCVD"; break;
-            case MIB_TCP_STATE_ESTAB:      conn.state = L"ESTABLISHED"; break;
-            case MIB_TCP_STATE_FIN_WAIT1:  conn.state = L"FIN_WAIT1"; break;
-            case MIB_TCP_STATE_FIN_WAIT2:  conn.state = L"FIN_WAIT2"; break;
-            case MIB_TCP_STATE_CLOSE_WAIT: conn.state = L"CLOSE_WAIT"; break;
-            case MIB_TCP_STATE_CLOSING:    conn.state = L"CLOSING"; break;
-            case MIB_TCP_STATE_LAST_ACK:   conn.state = L"LAST_ACK"; break;
-            case MIB_TCP_STATE_TIME_WAIT:  conn.state = L"TIME_WAIT"; break;
-            case MIB_TCP_STATE_DELETE_TCB: conn.state = L"DELETE_TCB"; break;
-            default:                       conn.state = L"UNKNOWN"; break;
-            }
-            
+
+            conn.state = TcpStateText(row.dwState);
             new_cache[row.dwOwningPid].push_back(conn);
         }
     }
-    
-    // 2. Parse UDP connections from shared buffer
+
+    // 2. Parse UDP v4 connections from shared buffer
     if (udpBuf && udpSize > 0) {
         auto* table = (MIB_UDPTABLE_OWNER_MODULE*)udpBuf;
         for (DWORD i = 0; i < table->dwNumEntries; i++) {
             if (!table->table[i].dwOwningPid) continue;
-            
+
             ConnDetail conn;
             conn.protocol = ConnDetail::UDP;
             conn.pid = table->table[i].dwOwningPid;
-            
-            // Local address
+
             wchar_t local[64];
             struct in_addr local_addr;
             local_addr.s_addr = table->table[i].dwLocalAddr;
-            swprintf_s(local, L"%S:%u", inet_ntoa(local_addr), 
+            swprintf_s(local, L"%S:%u", inet_ntoa(local_addr),
                       ntohs((u_short)table->table[i].dwLocalPort));
             conn.local_addr = local;
-            
-            // UDP has no remote address
+
             conn.remote_addr = L"*:*";
             conn.state = L"-";
-            
             new_cache[table->table[i].dwOwningPid].push_back(conn);
         }
     }
-    
-    // 3. Update cache
+
+    // 3. TCP v6 - shown as [addr]:port; LISTEN rows (unspecified remote)
+    //    display *:* like the v4 branch
+    if (tcp6Buf && tcp6Size > 0) {
+        auto* table = (MIB_TCP6TABLE_OWNER_MODULE*)tcp6Buf;
+        for (DWORD i = 0; i < table->dwNumEntries; i++) {
+            auto& row = table->table[i];
+            if (!row.dwOwningPid) continue;
+
+            ConnDetail conn;
+            conn.protocol = ConnDetail::TCP;
+            conn.pid = row.dwOwningPid;
+
+            wchar_t addr[64];
+            InetNtopW(AF_INET6, row.ucLocalAddr, addr, 64);
+            wchar_t local[80];
+            swprintf_s(local, L"[%s]:%u", addr, ntohs((u_short)row.dwLocalPort));
+            conn.local_addr = local;
+
+            bool unspec = true;
+            for (int b = 0; b < 16; b++) if (row.ucRemoteAddr[b]) { unspec = false; break; }
+            wchar_t remote[80];
+            if (unspec) {
+                swprintf_s(remote, L"*:*");
+            } else {
+                InetNtopW(AF_INET6, row.ucRemoteAddr, addr, 64);
+                swprintf_s(remote, L"[%s]:%u", addr, ntohs((u_short)row.dwRemotePort));
+            }
+            conn.remote_addr = remote;
+
+            conn.state = TcpStateText(row.dwState);
+            new_cache[row.dwOwningPid].push_back(conn);
+        }
+    }
+
+    // 4. UDP v6
+    if (udp6Buf && udp6Size > 0) {
+        auto* table = (MIB_UDP6TABLE_OWNER_MODULE*)udp6Buf;
+        for (DWORD i = 0; i < table->dwNumEntries; i++) {
+            if (!table->table[i].dwOwningPid) continue;
+
+            ConnDetail conn;
+            conn.protocol = ConnDetail::UDP;
+            conn.pid = table->table[i].dwOwningPid;
+
+            wchar_t addr[64];
+            InetNtopW(AF_INET6, table->table[i].ucLocalAddr, addr, 64);
+            wchar_t local[80];
+            swprintf_s(local, L"[%s]:%u", addr, ntohs((u_short)table->table[i].dwLocalPort));
+            conn.local_addr = local;
+
+            conn.remote_addr = L"*:*";
+            conn.state = L"-";
+            new_cache[table->table[i].dwOwningPid].push_back(conn);
+        }
+    }
+
+    // 5. Update cache
     {
         std::lock_guard<std::mutex> lk(m_conn_mutex);
         m_conn_details_cache = std::move(new_cache);

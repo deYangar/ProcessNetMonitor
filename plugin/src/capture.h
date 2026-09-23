@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <functional>
 #include <set>
+#include <array>
 #include "i18n.h"
 
 struct ProcTraffic {
@@ -68,6 +69,14 @@ public:
     
     // 获取指定进程的连接详情
     std::vector<ConnDetail> GetProcessConnections(DWORD pid);
+    // Live per-PID connection counts straight from the connection-table
+    // monitor (TCP rows + UDP endpoints, v4+v6). Unlike GetStats() the row
+    // set is NOT filtered through m_stats - with ETW primary, byte capture
+    // is off and m_stats never absorbs PIDs started afterwards, which used
+    // to leave their conn_count stuck at 0.
+    std::map<DWORD, int> GetConnCounts();
+    // Same count, caller already holds m_mutex (GetStats reuse)
+    std::map<DWORD, int> ConnCountsLocked();
 
 private:
     void CaptureLoop();
@@ -78,8 +87,11 @@ private:
     std::wstring GetProcessName(DWORD pid);
     std::wstring GetProcessPath(DWORD pid);
     
-    // 刷新连接详情缓存
-    void RefreshConnectionDetails(const uint8_t* tcpBuf, ULONG tcpSize, const uint8_t* udpBuf, ULONG udpSize);
+    // 刷新连接详情缓存（v4 + v6 共四个系统表快照）
+    void RefreshConnectionDetails(const uint8_t* tcpBuf, ULONG tcpSize,
+                                  const uint8_t* udpBuf, ULONG udpSize,
+                                  const uint8_t* tcp6Buf, ULONG tcp6Size,
+                                  const uint8_t* udp6Buf, ULONG udp6Size);
 
     std::vector<SOCKET> m_socks;  // multiple sockets for 'select all' mode
     std::atomic<bool> m_running{false};
@@ -89,9 +101,12 @@ private:
     std::mutex m_mutex;
     std::map<DWORD, ProcTraffic> m_stats;
     std::map<uint16_t, DWORD> m_tcp_port_pid;
-    std::map<uint16_t, DWORD> m_udp_port_pid;
+    // Address is stored unified as 16 bytes: IPv4 uses the v4-mapped form
+    // (::ffff:a.b.c.d, i.e. 10 zero bytes + ffff + the network-order dword),
+    // IPv6 stores the raw 16 bytes. A real in-table v4-mapped v6 remote does
+    // not occur (v4 connections surface as AF_INET rows), so no collisions.
     struct ConnKey {
-        uint16_t local_port; uint32_t remote_addr; uint16_t remote_port;
+        uint16_t local_port; std::array<uint8_t, 16> remote_addr; uint16_t remote_port;
         bool operator<(const ConnKey& o) const {
             if (local_port != o.local_port) return local_port < o.local_port;
             if (remote_addr != o.remote_addr) return remote_addr < o.remote_addr;
@@ -99,6 +114,16 @@ private:
         }
     };
     std::map<ConnKey, DWORD> m_tcp_conns;
+    // v4 and v6 have independent local-port spaces - key by family or a v4
+    // and a v6 listener on the same port would silently overwrite each other.
+    struct UdpKey {
+        uint16_t family; uint16_t port;
+        bool operator<(const UdpKey& o) const {
+            if (family != o.family) return family < o.family;
+            return port < o.port;
+        }
+    };
+    std::map<UdpKey, DWORD> m_udp_port_pid;
     std::map<DWORD, std::wstring> m_name_cache;
     std::map<DWORD, std::wstring> m_path_cache;
     wchar_t m_error[128] = L"";
