@@ -457,6 +457,8 @@ void CDetailWindow::CreateFonts() {
     m_font_time   = CreateFontW((int)(-12*s), 0,0,0, FW_NORMAL, FALSE,FALSE,FALSE,
                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                 CLEARTYPE_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Microsoft YaHei");
+    // 行字体变了（初始化/DPI 变化）→ 归属地换行行数变，行高缓存整批失效
+    m_geo_layout_serial++;
 }
 
 void CDetailWindow::RecreateGdiObjects() {
@@ -1134,6 +1136,12 @@ void CDetailWindow::RebuildRows() {
                     row.sub_processes[i].connections = std::move(it->second[i].connections);
                     row.sub_processes[i].connections_loaded = it->second[i].connections_loaded;
                     row.sub_processes[i].conn_expanded = it->second[i].conn_expanded;
+                    // 行高/归属地缓存一并搬回——RebuildRows 每秒新建 SubProcess，
+                    // 不搬的话缓存每秒清零，等于没缓存（组内 PID 顺序按 map
+                    // 有序输出，index 对应稳定，缓存不会串进程）
+                    row.sub_processes[i].geo_serial = it->second[i].geo_serial;
+                    row.sub_processes[i].conn_heights = std::move(it->second[i].conn_heights);
+                    row.sub_processes[i].conn_geo = std::move(it->second[i].conn_geo);
                 }
             }
         }
@@ -1546,12 +1554,23 @@ void CDetailWindow::ScrollTo(int pos) {
     InvalidateRect(m_hwnd, NULL, FALSE);
 }
 
-int CDetailWindow::GetConnRowHeight(const ConnDetail& conn) const {
-    int h = CONN_ROW_H;
+int CDetailWindow::GetConnRowHeight(const SubProcess& sp, int ci) const {
+    // 缓存失效：布局代次变化（geo 列宽/字体），或新建的 SubProcess（数组为空）。
+    // 越界防御：ci 超出缓存数组（connections 拉取后追加的场景）按未算处理。
+    if (sp.geo_serial != m_geo_layout_serial || ci >= (int)sp.conn_heights.size()) {
+        sp.conn_heights.assign(sp.connections.size(), -1);
+        sp.conn_geo.assign(sp.connections.size(), std::wstring());
+        sp.geo_serial = m_geo_layout_serial;
+    }
+    int cached = sp.conn_heights[ci];
+    if (cached > 0) return cached;
+
+    const ConnDetail& conn = sp.connections[ci];
     std::wstring geo = IpGeo::Instance().Query(conn.remote_addr);
-    if (geo.empty() || geo == L"-") return h;
+    sp.conn_geo[ci] = geo;
+    if (geo.empty() || geo == L"-") { sp.conn_heights[ci] = CONN_ROW_H; return CONN_ROW_H; }
     HDC hdc = CreateCompatibleDC(NULL);
-    if (!hdc) return h;
+    if (!hdc) return CONN_ROW_H;   // DC 创建失败不写缓存，下帧重试
     HFONT old = (HFONT)SelectObject(hdc, m_font_row);
     RECT rc = { 0, 0, m_conn_cols[3].width, 0 };
     DrawTextW(hdc, geo.c_str(), -1, &rc, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
@@ -1559,7 +1578,9 @@ int CDetailWindow::GetConnRowHeight(const ConnDetail& conn) const {
     DeleteDC(hdc);
     int lines = (rc.bottom + CONN_ROW_H - 1) / CONN_ROW_H;
     if (lines < 1) lines = 1;
-    return lines * CONN_ROW_H;
+    int h = lines * CONN_ROW_H;
+    sp.conn_heights[ci] = h;
+    return h;
 }
 
 int CDetailWindow::GetExpandedRowHeight(const DisplayRow& row) const {
@@ -1580,7 +1601,7 @@ int CDetailWindow::GetExpandedRowHeight(const DisplayRow& row) const {
                     h += CHILD_ROW_H + CONN_HEADER_H;
                     int max_rows = sp.conn_expanded ? (int)sp.connections.size() : min((int)sp.connections.size(), MAX_CONN_ROWS);
                     for (int ci = 0; ci < max_rows; ci++)
-                        h += GetConnRowHeight(sp.connections[ci]);
+                        h += GetConnRowHeight(sp, ci);
                     if ((int)sp.connections.size() > MAX_CONN_ROWS)
                         h += CONN_ROW_H;  // expand/collapse button row
                 }
@@ -1965,7 +1986,7 @@ void CDetailWindow::OnLButtonDown(int x, int y) {
                     cur_y += CHILD_ROW_H + CONN_HEADER_H;  // title + header
                     int conn_count = sp.conn_expanded ? (int)sp.connections.size() : min((int)sp.connections.size(), MAX_CONN_ROWS);
                     for (int ci = 0; ci < conn_count; ci++)
-                        cur_y += GetConnRowHeight(sp.connections[ci]);
+                        cur_y += GetConnRowHeight(sp, ci);
                     if ((int)sp.connections.size() > MAX_CONN_ROWS) {
                         // expand/collapse button row
                         if (y >= cur_y && y < cur_y + CONN_ROW_H) {
@@ -2423,6 +2444,7 @@ void CDetailWindow::DrawTableHeader(HDC hdc, int w, int y) {
         int fixed = m_conn_cols[0].width + m_conn_cols[4].width;  // 协议 + 状态 (已 DPI 缩放)
         int rest = table_w - fixed;
         if (rest < 200) rest = 200;
+        int old_geo_w = m_conn_cols[3].width;
         if (IpGeo::Instance().IsEnabled()) {
             m_conn_cols[1].width = (int)(rest * 100 / 320);
             m_conn_cols[2].width = (int)(rest * 100 / 320);
@@ -2433,6 +2455,8 @@ void CDetailWindow::DrawTableHeader(HDC hdc, int w, int y) {
             m_conn_cols[2].width = rest - m_conn_cols[1].width;
             m_conn_cols[3].width = 0;
         }
+        // geo 列宽变了（窗口拉伸 / DPI / 归属地开关）→ 换行行数变，行高缓存整批失效
+        if (m_conn_cols[3].width != old_geo_w) m_geo_layout_serial++;
     }
 
 void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
@@ -2720,8 +2744,9 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
                     for (int ci = 0; ci < conn_count; ci++) {
                         auto& conn = sp.connections[ci];
 
-                        // 行高: 归属地自动换行后所需高度
-                        int row_h = GetConnRowHeight(conn);
+                        // 行高: 归属地自动换行后所需高度（GetConnRowHeight 顺带
+                        // 填充 sp.conn_geo 缓存，下方直接取用）
+                        int row_h = GetConnRowHeight(sp, ci);
                         RECT conn_rc = { PADDING + (int)(32 * m_dpi_scale) + SUBPROC_INDENT, child_y, w - PADDING - 20, child_y + row_h };
                         FillRect(hdc, &conn_rc, m_br_row[ci % 2]);
                         SelectObject(hdc, m_font_row);
@@ -2747,7 +2772,7 @@ void CDetailWindow::DrawTableRows(HDC hdc, int w, int y, int client_h) {
 
                         // Geo location (归属地, 超长自动换行完整显示)
                         SetTextColor(hdc, GetSecondaryTextColor());
-                        std::wstring geo = IpGeo::Instance().Query(conn.remote_addr);
+                        const std::wstring& geo = sp.conn_geo[ci];  // GetConnRowHeight 已填充
                         RECT geo_rc = { col_x, child_y, col_x + m_conn_cols[3].width, child_y + row_h };
                         if (!geo.empty()) {
                             // 垂直居中多行文本

@@ -176,6 +176,15 @@ private:
         std::vector<ConnDetail> connections;
         bool connections_loaded = false;
         bool conn_expanded = false;
+        // 连接行高/归属地缓存（mutable：绘制与命中测试都是 const 路径，惰性填充）。
+        // 行高是 (geo 文本, geo 列宽, 行字体) 的纯函数，geo 又是 remote_addr 的
+        // 纯函数——v1.12.0 起每次 GetConnRowHeight 都 CreateCompatibleDC+DrawText
+        // 现场测高，展开多连接进程后每秒重绘/每次 hit-test 白烧几十 ms GDI。
+        // m_geo_layout_serial 在 geo 列宽或字体变化时递增，代次不符整批失效。
+        // RebuildRows 每秒新建 SubProcess，恢复列表必须把这几个字段一并搬回。
+        mutable UINT geo_serial = 0;                 // 填充时的 m_geo_layout_serial
+        mutable std::vector<int> conn_heights;       // 与 connections 平行；-1 = 未算
+        mutable std::vector<std::wstring> conn_geo;  // 与 connections 平行；Query 结果（空串=无归属地）
     };
     struct DisplayRow {
         DWORD pid = 0;              // first PID for icon
@@ -388,11 +397,16 @@ private:
     
     // Get expanded row height
     int GetExpandedRowHeight(const DisplayRow& row) const;
-    // 连接行高度: 归属地自动换行后所需行数 x 行高
-    int GetConnRowHeight(const ConnDetail& conn) const;
+    // 连接行高度: 归属地自动换行后所需行数 x 行高（结果缓存进 sp.conn_heights，
+    // geo 文本缓存进 sp.conn_geo——同一连接只测一次，布局变化时按代次失效）
+    int GetConnRowHeight(const SubProcess& sp, int ci) const;
     int GetTotalHeight() const;
     int GetVisibleHeight() const;
     int GetScrollMax() const;
+
+    // 行高缓存失效代次：geo 列宽（UpdateConnColWidths）或行字体（CreateFonts）
+    // 变化时递增。从 1 起，避开 SubProcess::geo_serial 的默认 0（新建未算状态）。
+    UINT m_geo_layout_serial = 1;
 
     // Cached GDI objects (created once, reused in OnPaint)
     HFONT m_font_title = nullptr;     // Microsoft YaHei -14 semibold

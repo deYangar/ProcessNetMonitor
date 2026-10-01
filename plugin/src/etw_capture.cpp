@@ -675,8 +675,11 @@ void EtwCapture::OnEvent(PEVENT_RECORD rec) {
     // virtual/TUN adapter (dedup - the same bytes also appear once on the
     // physical side). Unknown addresses are always kept.
     bool skip = SkipByLocalAddr(ud, ulen, si);
-    // sample local addresses for diagnostics
-    {
+    // sample local addresses for diagnostics (skip entirely when the debug
+    // log is off - the sets are only consumed by LogPeriodicLocked/LogLine,
+    // and a mis-resolved shape can insert thousands of public addresses per
+    // 5s window straight into the hot path)
+    if (s_debug_logs.load()) {
         uint32_t sample_pid = si.pid_len == 4 ? *(const uint32_t*)(ud + si.pid_off) : 0;
         if (sample_pid == 0 || sample_pid == (uint32_t)-1) sample_pid = rec->EventHeader.ProcessId;
         uint32_t loff = (si.dir == 1) ? si.saddr_off : si.daddr_off;
@@ -927,6 +930,9 @@ void EtwCapture::RefreshIfaceIpsLocked() {
 }
 
 void EtwCapture::LogPeriodicLocked() {
+    // 日志关闭时整段跳过：m_cum 遍历拼 procs、地址集合格式化只服务
+    // LogLine，拼完也会被 LogLine 的开关挡回——直接白干。
+    if (!s_debug_logs.load()) return;
     ULONGLONG tnow = GetTickCount64();
     if (tnow - m_last_log_tick < 5000) return;
     m_last_log_tick = tnow;

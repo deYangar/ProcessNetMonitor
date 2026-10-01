@@ -103,8 +103,12 @@ private:
     std::map<uint16_t, DWORD> m_tcp_port_pid;
     // Address is stored unified as 16 bytes: IPv4 uses the v4-mapped form
     // (::ffff:a.b.c.d, i.e. 10 zero bytes + ffff + the network-order dword),
-    // IPv6 stores the raw 16 bytes. A real in-table v4-mapped v6 remote does
-    // not occur (v4 connections surface as AF_INET rows), so no collisions.
+    // IPv6 stores the raw 16 bytes. NOTE: a dual-stack (IPV6_V6ONLY=0)
+    // socket's v4 connections DO surface in the AF_INET6 table with
+    // v4-mapped remotes - and that is the ONLY table they appear in (no
+    // AF_INET row for the same connection), so each connection still maps
+    // to exactly one key. The unified form is what lets ProcessPacket
+    // attribute raw-socket v4 packets to those dual-stack rows.
     struct ConnKey {
         uint16_t local_port; std::array<uint8_t, 16> remote_addr; uint16_t remote_port;
         bool operator<(const ConnKey& o) const {
