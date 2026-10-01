@@ -4,6 +4,9 @@
 
 ## 版本历史
 
+### v1.16.7 (2026-10-01)
+- **修复详情窗口最小化后无法恢复**（issue #18）：详情窗口此前是 `WS_EX_TOOLWINDOW`（不占任务栏），点最小化按钮后 `SW_MINIMIZE` 只会退化成经典 iconic 小标题条孤零零停在桌面，窗口全自绘、无系统菜单，没有任何恢复入口。改为 `WS_EX_APPWINDOW`：窗口进任务栏，最小化后点任务栏图标即可恢复原大小（火绒式），Win+D 最小化再按同样可恢复；重新打开（TM 菜单/双击悬浮窗）时先清除可能残留的最小化状态，避免 `SetWindowPos` 尺寸被系统忽略导致重开仍是细条
+
 ### v1.16.6 (2026-09-27)
 - **修复详情窗口进程连接数恒 0**（v1.16.0 回归，a494484）：ETW 就绪后关闭原始套接字抓包，连接数合并所依赖的 legacy 统计行集随之停摆，TrafficMonitor 启动后才启动的进程连接数恒 0；改为直读 ConnRefreshLoop 独立线程维护的活连接表（`GetConnCounts`），RefreshTick/DataRequired 两处合并与抓包状态解耦
 - **连接表补 IPv6 双栈**：TCP/UDP 系统表补查 `AF_INET6`，纯 IPv6 连接不再漏计；地址键统一 16 字节（v4 用 v4-mapped），UDP 键加 family 防 v4/v6 同端口互相覆盖；详情列表 IPv6 显示 `[v6addr]:port`

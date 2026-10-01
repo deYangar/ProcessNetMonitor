@@ -940,7 +940,7 @@ const wchar_t* CProcessNetPlugin::GetInfo(PluginInfoIndex i) {
     case TMI_DESCRIPTION: return L"Per-process network speed";
     case TMI_AUTHOR: return L"deYangar";
     case TMI_COPYRIGHT: return L"MIT";
-    case TMI_VERSION: return L"1.16.6";
+    case TMI_VERSION: return L"1.16.7";
     case TMI_URL: return L"https://github.com/deYangar/ProcessNetMonitor";
     default: return L"";
     }

@@ -316,10 +316,18 @@ bool CDetailWindow::Initialize(HINSTANCE hInst) {
     // WM_NCCALCSIZE 全吞客户区又会在拖动时撕裂（DWM frame 几何与客户区
     // 失配）。索性不要 sizing border：DWM 无边框可画，线物理消失；resize
     // 由 BeginResizeDrag/UpdateResizeDrag/EndResizeDrag 自己实现。
+    // WS_EX_APPWINDOW（issue #18）：窗口在任务栏保留按钮，最小化后点任务栏
+    // 图标恢复原大小（火绒式）。此前是 WS_EX_TOOLWINDOW——无任务栏按钮，
+    // SW_MINIMIZE 退化成 iconic 小标题条，用户没有任何恢复入口。
+    // WS_SYSMENU|WS_MINIMIZEBOX（issue #18 反馈）：任务栏按钮点击的 toggle
+    // 最小化分支只对「可最小化」窗口生效（explorer 看这两个样式位），纯
+    // WS_POPUP 点任务栏图标只激活不最小化。二者在无 WS_CAPTION 的 WS_POPUP
+    // 上不绘制任何非客户区，自绘外观不变；MAXIMIZEBOX 有意不给（不支持
+    // 最大化）。
     m_hwnd = CreateWindowExW(
-        WS_EX_TOOLWINDOW,
+        WS_EX_APPWINDOW,
         className, L"ProcessNetMonitor",
-        WS_POPUP,
+        WS_POPUP | WS_SYSMENU | WS_MINIMIZEBOX,
         CW_USEDEFAULT, CW_USEDEFAULT, MIN_WIDTH + 40, MIN_HEIGHT + 80,
         NULL, NULL, m_hinst, NULL);
 
@@ -530,6 +538,10 @@ void CDetailWindow::Show(HWND parent_wnd) {
     // cycles - reapply right before the window goes visible so the themed
     // border stays suppressed (the "white line" of issue #13).
     ApplyDwmFramePolicy();
+    // issue #18：最小化状态下 Hide/Show 循环不清 iconic 位，SetWindowPos 的
+    // 尺寸会被系统忽略、窗口照 iconic 尺寸显示——先以不激活方式恢复正常
+    // 尺寸再走下面的定位
+    if (IsIconic(m_hwnd)) ShowWindow(m_hwnd, SW_SHOWNOACTIVATE);
     SetWindowPos(m_hwnd, HWND_TOPMOST, x, y, w, h, SWP_SHOWWINDOW | SWP_NOACTIVATE);
     ShowWindow(m_hwnd, SW_SHOWNOACTIVATE);
     m_visible = true;
@@ -1706,7 +1718,10 @@ void CDetailWindow::EndResizeDrag() {
 LRESULT CDetailWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_PAINT: OnPaint(); return 0;
-    case WM_SIZE: OnSize(LOWORD(lp), HIWORD(lp)); return 0;
+    case WM_SIZE:
+        // 最小化交给任务栏按钮恢复（issue #18），iconic 时 cx/cy 无意义，跳过重绘
+        if (wp == SIZE_MINIMIZED) return 0;
+        OnSize(LOWORD(lp), HIWORD(lp)); return 0;
     case WM_LBUTTONDOWN: OnLButtonDown((short)LOWORD(lp), (short)HIWORD(lp)); return 0;
     case WM_LBUTTONUP:
         if (m_resize_hit) { EndResizeDrag(); return 0; }
