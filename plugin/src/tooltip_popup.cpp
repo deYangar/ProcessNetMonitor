@@ -74,6 +74,27 @@ static LRESULT CALLBACK StaticWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
+// Subclass watchdog proc. Natively registered in the window class (never
+// installed via GWLP_WNDPROC), and the window is message-only so it is
+// invisible to EnumWindows-based injector sweeps. Runs on the thread that
+// owns the popup: repairing the subclass from the owning thread is the
+// documented-safe way to touch GWLP_WNDPROC.
+LRESULT CALLBACK CTooltipPopup::WatchdogProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_TIMER && wp == TIMER_WATCHDOG && s_instance && s_instance->m_hwnd) {
+        HWND popup = s_instance->m_hwnd;
+        if (GetWindowLongPtrW(popup, GWLP_WNDPROC) != (LONG_PTR)StaticWndProc) {
+            // Subclass stripped by an external injector: the hover WM_TIMER
+            // is being dispatched to DefWindowProc (or to the injector's
+            // proc) and HoverTick is dead. Re-install both.
+            SetWindowLongPtrW(popup, GWLP_WNDPROC, (LONG_PTR)StaticWndProc);
+            SetTimer(popup, TIMER_HOVER, 100, nullptr);
+            s_instance->m_watchdog_heals++;
+        }
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
 // Capture DLL instance handle for window class registration
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
@@ -138,6 +159,14 @@ CTooltipPopup::CTooltipPopup() {
 }
 
 CTooltipPopup::~CTooltipPopup() {
+    if (m_watchdog_hwnd) {
+        if (g_shutting_down) {
+            m_watchdog_hwnd = nullptr;
+        } else {
+            SafeDestroyWindow(m_watchdog_hwnd);
+            m_watchdog_hwnd = nullptr;
+        }
+    }
     if (m_hwnd) {
         if (g_shutting_down) {
             // DLL unload / process exit: skip DestroyWindow. It fires
@@ -229,6 +258,23 @@ bool CTooltipPopup::Initialize(HINSTANCE hInst) {
     // Hover state machine: 100ms timer dispatched through TM's message loop
     // (this window lives on TM's main thread)
     SetTimer(m_hwnd, TIMER_HOVER, 100, nullptr);
+
+    // Subclass watchdog: message-only, natively-registered proc, 1s tick.
+    // Guards the subclass above (see WatchdogProc). Created on the same
+    // thread as the popup so its WM_TIMER - and the repair - run there.
+    wchar_t wdClass[64];
+    swprintf_s(wdClass, 64, L"PNMWatchdog_%p", m_hinst);
+    WNDCLASSEXW wcWd = {};
+    wcWd.cbSize = sizeof(wcWd);
+    wcWd.lpfnWndProc = WatchdogProc;
+    wcWd.hInstance = m_hinst;
+    wcWd.lpszClassName = wdClass;
+    RegisterClassExW(&wcWd);
+    m_watchdog_hwnd = CreateWindowExW(
+        0, wdClass, L"", WS_OVERLAPPED,
+        0, 0, 0, 0, HWND_MESSAGE, nullptr, m_hinst, nullptr);
+    if (m_watchdog_hwnd)
+        SetTimer(m_watchdog_hwnd, TIMER_WATCHDOG, 1000, nullptr);
 
     return true;
 }

@@ -54,6 +54,9 @@ public:
     bool IsVisible() const { return m_visible; }
     bool IsHovering() const { return m_hovering; }
     HWND GetHwnd() const { return m_hwnd; }
+    // Times the watchdog re-installed the subclass (diagnostics; 0 in a
+    // clean session)
+    UINT GetWatchdogHeals() const { return m_watchdog_heals; }
 
     // Set the TrafficMonitor window handle so the popup can detect its native
     // tooltip window and avoid overlapping it.
@@ -71,6 +74,17 @@ private:
     // Window
     void OnPaint();
     void OnMouseLeave();
+
+    // Subclass watchdog. The hover state machine runs on the popup's own
+    // 100ms WM_TIMER, so a third-party injector that strips GWLP_WNDPROC
+    // (GamePP's re-hook after sleep+display-switch, the 2026-10-07 RDP
+    // takeover corpse) kills HoverTick silently and the hover popup never
+    // comes back. A message-only window whose proc is Natively registered
+    // (not a subclass) ticks once a second and re-installs StaticWndProc +
+    // the hover timer from the owning thread when it finds them replaced.
+    static LRESULT CALLBACK WatchdogProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
+    HWND m_watchdog_hwnd = nullptr;
+    UINT m_watchdog_heals = 0;
 
     // Layout & rendering
     void CalcLayout(HDC hdc, int& out_w, int& out_h, int& out_up_count, int& out_down_count);
@@ -159,7 +173,8 @@ private:
 
 public:
     static const int MAX_SHOW = 5;  // max processes per section
-    static const UINT_PTR TIMER_HOVER = 1;  // 100ms hover state machine timer
+    static const UINT_PTR TIMER_HOVER = 1;    // 100ms hover state machine timer
+    static const UINT_PTR TIMER_WATCHDOG = 2; // 1s subclass watchdog timer
 
     // Mouse tracking
     bool m_tracking = false;
