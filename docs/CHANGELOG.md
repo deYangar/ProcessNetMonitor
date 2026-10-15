@@ -4,6 +4,9 @@
 
 ## 版本历史
 
+### v1.18.0 (2026-10-15)
+- **新增悬浮窗透明度调整**：插件设置新增「悬浮窗背景」（亚克力 / 纯透明度）与「悬浮窗透明度」（10-100，仅纯透明度模式生效）两项。Win10 1803+/Win11 默认走系统亚克力（`SetWindowCompositionAttribute` 通知中心同款机制 + `DwmExtendFrameIntoClientArea`），面板恒为深色磨砂（亚克力路径绘制后显式整理 alpha 通道：纯黑像素=玻璃、其余 GDI 内容强制不透明——双缓冲 BitBlt 会把内存位图未初始化的垃圾 alpha 交给 DWM per-pixel 合成，残值恰为 0 时文字/线条/按钮全部透明、仅自带 alpha 的图标幸存）（Fluent 默认 80% 浓度；浅色面板做不了——GDI 黑底玻璃合成下浅色主题的深灰文字会被 ClearType 白化，浅底上直接消失），文字配色经 UseDarkTheme() 与真实主题解耦——悬浮窗显示期间（含钉住）切换颜色模式或系统深浅，任何刷新路径下都画浅色文字（此前 UpdateData 刷新路径不重算主题，浅色分支深灰字叠深 tint 会全部消失）；透明度编辑框在亚克力模式下禁用。不支持的系统自动退回整窗透明度（`LWA_ALPHA`），不喜欢亚克利的用户也可手动选「纯透明度」逃生，此时透明度自由调节（跟随颜色模式深浅）、默认 100 = 不透明。亚克力模式下圆角由系统 DWM 提供（Win10 直角，与系统原生亚克力面板一致）
+
 ### v1.17.1 (2026-10-07)
 - **修复悬浮窗悬停提示被注入工具顶掉后永久失灵**（两种实测触发：GamePP 睡眠唤醒+切屏后重装钩子；RDP 接管会话后的不明注入）：popup 窗口的 `GWLP_WNDPROC` 子类化被第三方注入 DLL 替换后，hover 状态机的 `WM_TIMER` 全部流入 `DefWindowProc`，`HoverTick` 永不执行，悬浮窗从此哑掉且无任何报错，重启 TM 才能恢复。新增 message-only 看门狗窗口（原生注册 wndproc、非子类化、`EnumWindows` 扫不到）：1s tick 在 owning thread 校验 popup 的 `GWLP_WNDPROC`，被顶立即重装 `StaticWndProc` 并重挂 100ms hover timer，`m_watchdog_heals` 计数留诊断；注入式顶掉 harness 实测 984/985/1000ms 自愈、可重复
 

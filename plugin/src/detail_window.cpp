@@ -1279,6 +1279,8 @@ void CDetailWindow::SaveSettings() {
     }
     fprintf(f, "  \"show_speed_items\": %s,\n", m_show_speed_items ? "true" : "false");
     fprintf(f, "  \"popup_enabled\": %s,\n", m_popup_enabled ? "true" : "false");
+    fprintf(f, "  \"popup_effect\": %d,\n", m_popup_effect);
+    fprintf(f, "  \"popup_opacity\": %d,\n", m_popup_opacity);
     fprintf(f, "  \"debug_logs\": %s,\n", m_debug_logs ? "true" : "false");
     // 颜色模式：0=跟随系统 1=深色 2=浅色（详情窗与悬浮提示共享）
     fprintf(f, "  \"color_mode\": %d,\n", s_color_mode);
@@ -1396,6 +1398,30 @@ void CDetailWindow::LoadSettings() {
             if (pos != std::string::npos) {
                 std::string sub = json.substr(pos + 1, 16);
                 m_popup_enabled = (sub.find("true") != std::string::npos);
+            }
+        }
+    }
+    // Parse popup_effect (0=acrylic, 1=transparent, 2=blur, 3=opaque;
+    // default 0. 旧值语义延续：1 原为「纯透明度」→ 现为「透明」)
+    {
+        size_t pos = json.find("\"popup_effect\"");
+        if (pos != std::string::npos) {
+            pos = json.find(':', pos);
+            if (pos != std::string::npos) {
+                int v = atoi(json.c_str() + pos + 1);
+                m_popup_effect = (v >= 0 && v <= 3) ? v : 0;
+            }
+        }
+    }
+    // Parse popup_opacity (10-100, default 100; out-of-range values keep the
+    // default so a hand-edited settings.json can't brick the popup)
+    {
+        size_t pos = json.find("\"popup_opacity\"");
+        if (pos != std::string::npos) {
+            pos = json.find(':', pos);
+            if (pos != std::string::npos) {
+                int v = atoi(json.c_str() + pos + 1);
+                if (v >= 10 && v <= 100) m_popup_opacity = v;
             }
         }
     }

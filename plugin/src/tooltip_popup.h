@@ -58,6 +58,19 @@ public:
     // clean session)
     UINT GetWatchdogHeals() const { return m_watchdog_heals; }
 
+    // Backdrop effect for the popup (popup_effect setting):
+    //   0 = acrylic  (ULW + blur 效果层)
+    //   1 = transparent (纯 ULW，无模糊)
+    //   2 = blur     (ULW + blur 效果层)
+    //   3 = opaque   (plain window)
+    // opacity: 10-100 = ULW 背景像素 alpha（面板浓度），文字始终不透明；
+    // 仅不透明模式禁用。Idempotent; call before showing.
+    void ApplyBackdrop(int effect, int opacity);
+    static bool AcrylicSupported();
+    // DWMWA_SYSTEMBACKDROP_TYPE（系统 Acrylic 材质）需要 Win11 22H2+
+    static bool SystemBackdropSupported();
+    bool IsAcrylicActive() const { return m_acrylic_active; }
+
     // Set the TrafficMonitor window handle so the popup can detect its native
     // tooltip window and avoid overlapping it.
     void SetAnchorHwnd(HWND hwnd) { m_anchor_hwnd = hwnd; }
@@ -88,7 +101,27 @@ private:
 
     // Layout & rendering
     void CalcLayout(HDC hdc, int& out_w, int& out_h, int& out_up_count, int& out_down_count);
-    void DrawBackground(HDC hdc, int w, int h);
+    void DrawBackground(HDC hdc, int w, int h, bool content_only);
+    // 内容绘制主体（所有呈现路径共用，画到任意 memory DC）。
+    // content_only=true 时跳过背景填充（coverage 双底色 pass 用：内容
+    // 画在白底/黑底上解覆盖率）
+    void DrawContent(HDC dc, int w, int h, bool content_only);
+
+    // ---- ULW per-pixel 呈现（透明系三档的唯一实现） ----
+    // 实测（2026-10-16 harness+探针矩阵）本机 DWM 对「含内容像素的 SWCA
+    // 窗口」忽略 tint alpha（一律全浓度）——滑条在 SWCA 上必然无效。
+    // UpdateLayeredWindow 是唯一语义稳定的 per-pixel 通道：
+    //   背景 = 面板色×opacity（预乘），透出 blur 层/桌面
+    //   内容 = 不透明（coverage 解出精确半透明边缘）
+    // 亚克力/模糊的磨砂由独立 blur 层提供（无内容纯黑窗，SWCA 只取
+    // 模糊——全透窗口路径的 tint 语义正常）；「透明」档不挂 blur 层。
+    void EnsureBlurLayer();
+    void DestroyBlurLayer();
+    bool EnsureLayeredSurface(int w, int h);
+    void ComposeLayeredSurface(int w, int h);
+    // 文字自适应反色：显示前截屏算 popup 区域背景的有效亮度（面板×op+
+    // 桌面×(1-op)），与文字色对比不足时翻转文字深浅
+    void UpdateAdaptiveTextTheme(const RECT& popup_rect);
     void DrawProcRow(HDC hdc, int y, const ProcDisplayInfo& proc, bool is_upload);
     void DrawSectionTitle(HDC hdc, int y, const wchar_t* title, bool is_upload);
     void PositionWindow(const RECT& anchor_rect);
@@ -99,6 +132,11 @@ private:
 
     // Helpers
     bool IsDarkMode();
+    // 面板主题 = 真实主题（背景/section 条等面板元素用）
+    bool UseDarkTheme() const { return m_dark_mode; }
+    // 文字主题：默认跟随真实主题；ULW 半透明背景下背景观感≈桌面时，
+    // UpdateAdaptiveTextTheme 会按对比度自动翻转文字深浅（撞色保护）
+    bool UseTextTheme() const { return m_text_adaptive ? m_text_dark : m_dark_mode; }
     COLORREF GetBgColor();
     COLORREF GetTextColor();
     COLORREF GetAccentColor(bool is_upload);
@@ -116,6 +154,28 @@ private:
     bool m_visible = false;
     bool m_hovering = false;  // mouse is over the popup itself
     bool m_dark_mode = true;
+
+    // Backdrop state (ApplyBackdrop): mode 0 = plain window, 1 = ULW
+    // layered（透明系三档共用）; m_acrylic_dark = 主题缓存（面板色分档）
+    int m_backdrop_mode = 0;
+    int m_backdrop_effect = 0;      // 0 acrylic / 1 transparent / 2 blur / 3 opaque
+    int m_backdrop_opacity = -1;
+    bool m_acrylic_active = false;  // == (m_backdrop_mode == 1), read by OnPaint
+    bool m_acrylic_dark = true;     // theme the panel color was built for
+    bool m_noise_acrylic = false;   // 亚克力档：面板叠加 Fluent 细噪声（与模糊档可辨）
+    // 文字自适应反色：ULW 半透明背景下文字深浅可脱离主题自动适配
+    bool m_text_dark = false;       // false=浅色文字（深背景），true=深色文字
+    bool m_text_adaptive = false;   // 本显示会话是否翻转过主题文字色
+
+    // ULW 呈现资源：blur 效果层 + 32bpp DIB 表面 + coverage 双底 pass
+    HWND m_blur_hwnd = nullptr;
+    HDC m_ulw_dc = nullptr;
+    HBITMAP m_ulw_bmp = nullptr;
+    void* m_ulw_bits = nullptr;
+    int m_ulw_w = 0, m_ulw_h = 0;
+    HDC m_cov_a_dc = nullptr;  HBITMAP m_cov_a_bmp = nullptr;  void* m_cov_a_bits = nullptr;
+    HDC m_cov_c_dc = nullptr;  HBITMAP m_cov_c_bmp = nullptr;  void* m_cov_c_bits = nullptr;
+    int m_cov_w = 0, m_cov_h = 0;
 
     // Data
     std::vector<ProcDisplayInfo> m_procs;
@@ -137,6 +197,7 @@ private:
     HFONT m_font_normal = nullptr;   // Segoe UI -15
     HFONT m_font_small = nullptr;    // Microsoft YaHei -13 (section title + detail button)
     HPEN m_pen_separator = nullptr;  // row separator
+    bool m_pen_dark = true;          // theme the cached separator pen was built for
 
     // IsDarkMode cache
     bool m_dark_mode_cached = true;

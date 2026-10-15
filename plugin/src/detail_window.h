@@ -65,6 +65,14 @@ public:
     // hovering a TM window). OFF = only TM's native tooltip carries our info.
     bool GetPopupEnabled() const { return m_popup_enabled; }
     void SetPopupEnabled(bool v) { m_popup_enabled = v; }
+    // 悬浮窗背景效果：0=自动（系统支持时亚克力，否则整窗透明度），
+    // 1=强制整窗透明度（逃生门：Win10 上亚克力窗口移动偶有一帧延迟）
+    int GetPopupEffect() const { return m_popup_effect; }
+    void SetPopupEffect(int v) { m_popup_effect = v; }
+    // 悬浮窗不透明度 10-100（默认 100=不透明；亚克力模式控制背景浓度，
+    // 整窗模式控制窗口整体 alpha）
+    int GetPopupOpacity() const { return m_popup_opacity; }
+    void SetPopupOpacity(int v) { m_popup_opacity = v; }
     // 界面语言设置："auto"（跟随 TM）或具体 BCP-47（如 "en-US"）
     const std::wstring& GetLangSetting() const { return m_lang; }
     void SetLangSetting(const std::wstring& v) { m_lang = v; }
@@ -285,6 +293,8 @@ private:
     int m_refresh_ms = 500;         // plugin data refresh interval (ms)
     bool m_show_speed_items = true; // show Up/Down items in TM main window/taskbar
     bool m_popup_enabled = true;    // hover popup enabled (default ON; setting: settings.json "popup_enabled")
+    int m_popup_effect = 0;         // 悬浮窗背景效果 0=亚克力 1=透明 2=模糊 3=不透明 (settings.json "popup_effect")
+    int m_popup_opacity = 100;      // 悬浮窗不透明度 10-100 (settings.json "popup_opacity")
     std::wstring m_lang = L"auto";  // 界面语言：auto=跟随 TM，或具体 BCP-47
 
     // Columns - real-time

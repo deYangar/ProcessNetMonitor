@@ -940,7 +940,7 @@ const wchar_t* CProcessNetPlugin::GetInfo(PluginInfoIndex i) {
     case TMI_DESCRIPTION: return L"Per-process network speed";
     case TMI_AUTHOR: return L"deYangar";
     case TMI_COPYRIGHT: return L"MIT";
-    case TMI_VERSION: return L"1.17.1";
+    case TMI_VERSION: return L"1.18.0";
     case TMI_URL: return L"https://github.com/deYangar/ProcessNetMonitor";
     default: return L"";
     }
@@ -1466,6 +1466,19 @@ static void OptionsApplyLang(HWND hwnd) {
     SetWindowTextW(GetDlgItem(hwnd, 1020), TR(L"启用悬浮网速提示（关闭后仅 TrafficMonitor 官方悬停提示）"));
     SetWindowTextW(GetDlgItem(hwnd, 1015), TR(L"\u754C\u9762\u8BED\u8A00"));
     SetWindowTextW(GetDlgItem(hwnd, 1019), TR(L"\u989C\u8272\u6A21\u5F0F"));
+    SetWindowTextW(GetDlgItem(hwnd, 1021), TR(L"悬浮窗背景"));
+    SetWindowTextW(GetDlgItem(hwnd, 1023), TR(L"悬浮窗透明度（10-100，10 最透 100 最实，不透明模式除外）"));
+    // 重填背景效果下拉（保持当前选择）
+    HWND hEffCombo = GetDlgItem(hwnd, 1022);
+    if (hEffCombo) {
+        int cur_e = (int)SendMessageW(hEffCombo, CB_GETCURSEL, 0, 0);
+        SendMessageW(hEffCombo, CB_RESETCONTENT, 0, 0);
+        SendMessageW(hEffCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"亚克力"));
+        SendMessageW(hEffCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"透明"));
+        SendMessageW(hEffCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"模糊"));
+        SendMessageW(hEffCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"不透明"));
+        SendMessageW(hEffCombo, CB_SETCURSEL, cur_e < 0 ? 0 : cur_e, 0);
+    }
     // 重填颜色模式下拉（保持当前选择）
     HWND hColorCombo = GetDlgItem(hwnd, 1018);
     if (hColorCombo) {
@@ -1718,6 +1731,15 @@ static void OptionsAdjustLayout(HWND hwnd) {
 }
 
 
+// 透明度编辑框的启用状态：TranslucentTB 语义下 tint 颜色 alpha=背景浓度，
+// 三种透明系模式（亚克力/透明/模糊）都开放调节；仅「不透明」（eff==3，
+// 无效果层）禁用
+static void OptionsUpdateOpacityEnabled(HWND hwnd, int eff) {
+    BOOL enable = (eff != 3);
+    EnableWindow(GetDlgItem(hwnd, 1024), enable);
+    EnableWindow(GetDlgItem(hwnd, 1023), enable);
+}
+
 static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE: {
@@ -1842,12 +1864,41 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             SendMessageW(hColorCombo, CB_SETCURSEL, CDetailWindow::GetColorMode(), 0);
         }
 
+        // 悬浮窗背景效果 label + combo（TranslucentTB 模式集：亚克力=系统
+        // 磨砂，透明=无模糊纯透，模糊=仅模糊无亚克力噪声，不透明=普通窗口）
+        CreateWindowW(L"STATIC", TR(L"悬浮窗背景"),
+            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 10, 326, 90, 20, hwnd, (HMENU)1021, nullptr, nullptr);
+        HWND hEffCombo = CreateWindowW(L"COMBOBOX", L"",
+            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+            100, 324, 190, 120, hwnd, (HMENU)1022, nullptr, nullptr);
+        {
+            SendMessageW(hEffCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"亚克力"));
+            SendMessageW(hEffCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"透明"));
+            SendMessageW(hEffCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"模糊"));
+            SendMessageW(hEffCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"不透明"));
+            SendMessageW(hEffCombo, CB_SETCURSEL,
+                         CProcessNetPlugin::Instance().m_detail.GetPopupEffect(), 0);
+        }
+
+        // 悬浮窗透明度 label + edit（10-100；tint 背景浓度，文字始终不
+        // 透明保持清晰。10 最透，100 最实，不透明模式下禁用）
+        CreateWindowW(L"STATIC", TR(L"悬浮窗透明度（10-100，10 最透 100 最实，不透明模式除外）"),
+            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 10, 354, 260, 20, hwnd, (HMENU)1023, nullptr, nullptr);
+        wchar_t opacity_buf[16];
+        swprintf_s(opacity_buf, L"%d", CProcessNetPlugin::Instance().m_detail.GetPopupOpacity());
+        CreateWindowW(L"EDIT", opacity_buf,
+            WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
+            100, 352, 60, 24, hwnd, (HMENU)1024, nullptr, nullptr);
+        // 亚克力模式下该行禁用（浓度固定为系统默认）
+        OptionsUpdateOpacityEnabled(hwnd,
+            CProcessNetPlugin::Instance().m_detail.GetPopupEffect());
+
         // OK button
         CreateWindowW(L"BUTTON", L"OK",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 380, 334, 75, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 380, 390, 75, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
         // Cancel button
         CreateWindowW(L"BUTTON", L"Cancel",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 465, 334, 75, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 465, 390, 75, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
         // Use the proper UI font (Segoe UI 9pt) on every child control -
         // default is the bitmap 'System' font (jagged, ugly).
         EnumChildWindows(hwnd, OptionsSetFontProc, (LPARAM)GetStockObject(DEFAULT_GUI_FONT));
@@ -1894,6 +1945,19 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
                 plugin.m_popup_pinned = false;
                 plugin.m_popup.Hide();
             }
+
+            // 悬浮窗背景效果 + 透明度：保存后立即应用（可见时当场刷新；
+            // 隐藏时属性也已就位，下次显示直接带效果）
+            int eff_sel = (int)SendMessageW(GetDlgItem(hwnd, 1022), CB_GETCURSEL, 0, 0);
+            if (eff_sel < 0 || eff_sel > 3) eff_sel = 0;
+            wchar_t op_buf[16] = {};
+            GetDlgItemTextW(hwnd, 1024, op_buf, 16);
+            int opacity = _wtoi(op_buf);
+            if (opacity < 10) opacity = 10;
+            if (opacity > 100) opacity = 100;
+            plugin.m_detail.SetPopupEffect(eff_sel);
+            plugin.m_detail.SetPopupOpacity(opacity);
+            plugin.m_popup.ApplyBackdrop(eff_sel, opacity);
 
             // IP 库代理
             wchar_t proxy_buf[512] = {};
@@ -1942,6 +2006,19 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             }
             return 0;
         }
+        // 悬浮窗背景下拉：切换即时生效（同颜色模式语义），并联动透明度
+        // 编辑行的启用状态（不透明=无效果层，禁用）
+        if (LOWORD(wp) == 1022 && HIWORD(wp) == CBN_SELCHANGE) {
+            int eff_sel = (int)SendMessageW(GetDlgItem(hwnd, 1022), CB_GETCURSEL, 0, 0);
+            if (eff_sel >= 0 && eff_sel <= 3) {
+                auto& plugin = CProcessNetPlugin::Instance();
+                plugin.m_detail.SetPopupEffect(eff_sel);
+                plugin.m_detail.SaveSettings();
+                plugin.m_popup.ApplyBackdrop(eff_sel, plugin.m_detail.GetPopupOpacity());
+                OptionsUpdateOpacityEnabled(hwnd, eff_sel);
+            }
+            return 0;
+        }
         // 立即更新 IP 库
         if (LOWORD(wp) == 1009) {
             IpGeo::Instance().ForceUpdate();
@@ -1981,7 +2058,7 @@ ITMPlugin::OptionReturn CProcessNetPlugin::ShowOptionsDialog(void* hParent) {
         L"ProcessNetMonitorOptionsDlg",
         TR(L"\x63D2\x4EF6\x8BBE\x7F6E"),
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        0, 0, 650, 433,
+        0, 0, 650, 490,
         (HWND)hParent, nullptr, GetModuleHandleW(NULL), nullptr
     );
     
