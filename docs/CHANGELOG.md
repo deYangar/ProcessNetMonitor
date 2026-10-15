@@ -4,6 +4,9 @@
 
 ## 版本历史
 
+### v1.17.1 (2026-10-07)
+- **修复悬浮窗悬停提示被注入工具顶掉后永久失灵**（两种实测触发：GamePP 睡眠唤醒+切屏后重装钩子；RDP 接管会话后的不明注入）：popup 窗口的 `GWLP_WNDPROC` 子类化被第三方注入 DLL 替换后，hover 状态机的 `WM_TIMER` 全部流入 `DefWindowProc`，`HoverTick` 永不执行，悬浮窗从此哑掉且无任何报错，重启 TM 才能恢复。新增 message-only 看门狗窗口（原生注册 wndproc、非子类化、`EnumWindows` 扫不到）：1s tick 在 owning thread 校验 popup 的 `GWLP_WNDPROC`，被顶立即重装 `StaticWndProc` 并重挂 100ms hover timer，`m_watchdog_heals` 计数留诊断；注入式顶掉 harness 实测 984/985/1000ms 自愈、可重复
+
 ### v1.17.0 (2026-10-01)
 - **修复详情窗口最小化后无法恢复**（v1.16.7，issue #18）：详情窗口此前是 `WS_EX_TOOLWINDOW`（不占任务栏），点最小化按钮后 `SW_MINIMIZE` 只会退化成经典 iconic 小标题条孤零零停在桌面，窗口全自绘、无系统菜单，没有任何恢复入口。改为 `WS_EX_APPWINDOW`：窗口进任务栏，最小化后点任务栏图标即可恢复原大小（火绒式），Win+D 最小化再按同样可恢复；重新打开（TM 菜单/双击悬浮窗）时先清除可能残留的最小化状态，避免 `SetWindowPos` 尺寸被系统忽略导致重开仍是细条
 - **详情窗口连接行高/归属地缓存**（v1.12.0 起的性能欠账）：`GetConnRowHeight` 此前每次调用都 CreateCompatibleDC+DrawText 现场测高加 IpGeo 查询，展开多连接进程后每秒重绘与每次 hit-test 反复全量重算；现挂 `SubProcess` mutable 缓存（行高/geo 文本按连接缓存，geo 列宽或字体变化时按布局代次整批失效），RebuildRows 的子进程恢复列表同步搬运缓存字段
