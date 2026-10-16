@@ -18,29 +18,6 @@ CTooltipPopup* CTooltipPopup::s_instance = nullptr;
 HINSTANCE s_dll_hinst = nullptr;
 volatile bool g_shutting_down = false;
 
-// 临时诊断（2026-10-16 拖动实时反色不生效排查）：管线判定数据落盘到
-// exe 同目录 backdrop_trace.log（TM 自己在此写 global_cfg.ini，排除
-// plugins 子目录 ACL 变量）。定位后删
-static void BackdropTrace(const char* line) {
-    if (!line) return;
-    HMODULE self = nullptr;
-    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                       (LPCWSTR)&BackdropTrace, &self);
-    wchar_t path[MAX_PATH] = {};
-    if (!self || !GetModuleFileNameW(self, path, MAX_PATH)) return;
-    wchar_t* slash = wcsrchr(path, L'\\');
-    if (!slash) return;
-    *slash = 0;
-    wchar_t file[MAX_PATH];
-    swprintf_s(file, MAX_PATH, L"%s\\backdrop_trace.log", path);
-    FILE* f = _wfopen(file, L"a");
-    if (!f) return;
-    fputs(line, f);
-    fputc('\n', f);
-    fclose(f);
-}
-
 void SafeDestroyWindow(HWND hwnd) {
     if (!hwnd) return;
     // Detach IME first so third-party IME hooks (e.g. Sogou) don't run inside
@@ -353,7 +330,6 @@ bool CTooltipPopup::Initialize(HINSTANCE hInst) {
     if (m_watchdog_hwnd)
         SetTimer(m_watchdog_hwnd, TIMER_WATCHDOG, 1000, nullptr);
 
-    BackdropTrace("[init] popup initialized");
     return true;
 }
 
@@ -931,11 +907,8 @@ void CTooltipPopup::ClearLayeredSurfaceForCapture() {
     POINT src = { 0, 0 };
     BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
     HDC screen = GetDC(NULL);
-    BOOL ok = UpdateLayeredWindow(m_hwnd, screen, NULL, &size, m_ulw_dc, &src, 0, &bf, ULW_ALPHA);
+    UpdateLayeredWindow(m_hwnd, screen, NULL, &size, m_ulw_dc, &src, 0, &bf, ULW_ALPHA);
     ReleaseDC(NULL, screen);
-    char line[128];
-    sprintf_s(line, 128, "[clear] ulw_ret=%d size=%dx%d", (int)ok, m_ulw_w, m_ulw_h);
-    BackdropTrace(line);
 }
 
 // affinity 无闪截屏：WDA_EXCLUDEFROMCAPTURE 期间窗口从一切屏幕捕获中
@@ -947,12 +920,6 @@ void CTooltipPopup::ClearLayeredSurfaceForCapture() {
 bool CTooltipPopup::CaptureSnapNoFlash(const RECT& popup_rect, int w, int h) {
     if (!m_hwnd || !m_snap_dc || !m_snap_bits) return false;
     if (!SetWindowDisplayAffinity(m_hwnd, WDA_EXCLUDEFROMCAPTURE)) {
-        if (m_affinity_ok) {   // 只记一次：失败原因进日志（提权/老系统诊断）
-            char line[128];
-            sprintf_s(line, 128, "[affinity] set-failed gle=%lu (static refresh disabled)",
-                      GetLastError());
-            BackdropTrace(line);
-        }
         m_affinity_ok = false;
         return false;
     }
@@ -973,7 +940,7 @@ bool CTooltipPopup::CaptureSnapNoFlash(const RECT& popup_rect, int w, int h) {
 //      干净；静止刷新在 affinity 不可用时不跑，不会走这条闪的路）
 // 亮度公式承自旧 UpdateAdaptiveTextTheme：观感亮度与主题文字色对比
 // 不足则翻转深浅
-void CTooltipPopup::RefreshBackdrop(const RECT& popup_rect, bool trace) {
+void CTooltipPopup::RefreshBackdrop(const RECT& popup_rect) {
     m_text_adaptive = false;
     m_text_dark = m_dark_mode;
     if (!m_acrylic_active) return;
@@ -1020,14 +987,6 @@ void CTooltipPopup::RefreshBackdrop(const RECT& popup_rect, bool trace) {
         screen_lum = (double)lums[mid];   // 中位亮度
     }
 
-    if (trace) {
-        char line[192];
-        sprintf_s(line, 192, "[snap] vis=%d rect=(%d,%d)-(%d,%d) lum=%.1f op=%d",
-                  (int)m_visible, popup_rect.left, popup_rect.top,
-                  popup_rect.right, popup_rect.bottom, screen_lum, op);
-        BackdropTrace(line);
-    }
-
     // 反色判定（高浓度背景≈面板色，主题色已保证对比）
     if (screen_lum < 0.0 || op >= 80) return;
     COLORREF panel = GetBgColor();
@@ -1041,14 +1000,6 @@ void CTooltipPopup::RefreshBackdrop(const RECT& popup_rect, bool trace) {
         // 撞色：翻转文字深浅
         m_text_dark = !m_dark_mode;
         m_text_adaptive = true;
-    }
-    if (trace) {
-        char line[192];
-        sprintf_s(line, 192,
-                  "[judge] panel_lum=%.1f bg_lum=%.1f text_lum=%.1f diff=%.1f flip=%d adapt=%d text_dark=%d",
-                  panel_lum, bg_lum, text_lum, fabs(bg_lum - text_lum), (int)flip,
-                  (int)m_text_adaptive, (int)m_text_dark);
-        BackdropTrace(line);
     }
 }
 
@@ -1369,17 +1320,15 @@ void CTooltipPopup::PositionWindow(const RECT& anchor_rect) {
         RefreshBackdrop(will);
         m_last_snap_rect = will;
         m_last_refresh_tick = GetTickCount64();
-        BackdropTrace("[poswin] judge(first-show)");
     } else if (m_acrylic_active && m_affinity_ok &&
                !EqualRect(&will, &m_last_snap_rect)) {
         bool text_dark_before = m_text_dark;
         bool adapt_before = m_text_adaptive;
-        RefreshBackdrop(will, false);
+        RefreshBackdrop(will);
         m_last_snap_rect = will;
         m_last_refresh_tick = GetTickCount64();
         if (m_text_dark != text_dark_before || m_text_adaptive != adapt_before) {
             InvalidateRect(m_hwnd, NULL, FALSE);
-            BackdropTrace("[poswin] text-flip(move)");
         }
     }
 
@@ -1435,12 +1384,6 @@ void CTooltipPopup::ApplyBackdrop(int effect, int opacity) {
     bool want_layered = (effect != 3);
     int target = want_layered ? 1 : 0;
     bool dark = IsDarkMode();
-    {
-        char line[160];
-        sprintf_s(line, 160, "[apply] effect=%d opacity=%d target=%d mode=%d acrylic=%d",
-                  effect, opacity, target, m_backdrop_mode, (int)m_acrylic_active);
-        BackdropTrace(line);
-    }
     if (target == m_backdrop_mode &&
         (target != 1 || (effect == m_backdrop_effect &&
                          dark == m_acrylic_dark &&
@@ -1570,11 +1513,10 @@ void CTooltipPopup::UpdateData(const std::vector<ProcDisplayInfo>& procs,
             } else if (GetTickCount64() - m_last_refresh_tick >= 300) {
                 bool text_dark_before = m_text_dark;
                 bool adapt_before = m_text_adaptive;
-                RefreshBackdrop(cur, false);
+                RefreshBackdrop(cur);
                 m_last_refresh_tick = GetTickCount64();
                 if (m_text_dark != text_dark_before || m_text_adaptive != adapt_before) {
                     InvalidateRect(m_hwnd, NULL, FALSE);
-                    BackdropTrace("[tick] text-flip(refresh)");
                 }
             }
         }

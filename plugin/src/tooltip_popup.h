@@ -124,8 +124,8 @@ private:
     void DestroyBlurLayer();
     // 背景亮度采样 + 文字反色判定：affinity 无闪截屏 popup 区域 → 均值
     // （截到的已是 blur 层模糊画面，天然平滑）→ 亮度公式承自旧
-    // UpdateAdaptiveTextTheme。trace=false 静止刷新路径不打日志
-    void RefreshBackdrop(const RECT& popup_rect, bool trace = true);
+    // UpdateAdaptiveTextTheme
+    void RefreshBackdrop(const RECT& popup_rect);
     // affinity 无闪截屏：WDA_EXCLUDEFROMCAPTURE 期间窗口从一切屏幕捕获
     // 中剔除、用户肉眼显示不受影响——BitBlt 拿到窗口脚下真实背景，全程
     // 窗口可见零闪。写 m_snap 并返回 true；设置失败（Win10 2004 前的
