@@ -940,6 +940,12 @@ void CTooltipPopup::ClearLayeredSurfaceForCapture() {
 bool CTooltipPopup::CaptureSnapNoFlash(const RECT& popup_rect, int w, int h) {
     if (!m_hwnd || !m_snap_dc || !m_snap_bits) return false;
     if (!SetWindowDisplayAffinity(m_hwnd, WDA_EXCLUDEFROMCAPTURE)) {
+        if (m_affinity_ok) {   // 只记一次：失败原因进日志（提权/老系统诊断）
+            char line[128];
+            sprintf_s(line, 128, "[affinity] set-failed gle=%lu (static refresh disabled)",
+                      GetLastError());
+            BackdropTrace(line);
+        }
         m_affinity_ok = false;
         return false;
     }
@@ -980,19 +986,32 @@ void CTooltipPopup::RefreshBackdrop(const RECT& popup_rect, bool trace) {
         ReleaseDC(NULL, scr);
     }
 
-    // 均值亮度（4px 步进采样足够；截到的画面已是模糊合成结果）
-    long long lum_sum = 0;
-    int lum_n = 0;
+    // 亮度判定（4px 步进采样足够；截到的画面已是模糊合成结果）。
+    // 只按左侧进程名列区域判（咩咩 2026-10-16 指定）：文字深浅对比的
+    // 主体是进程名/标题，右侧 SPEED_AREA_W 是流速数字列，右半边亮暗
+    // 与文字可读性无关。取**中位数**而非均值：局部黑块（窗口边缘压
+    // 到深色内容，<50%）不该拉偏整列判色——「绝大部分白就按白判」
+    // 正是中位数的语义（咩咩 13:38 实测：进程列沾一条黑边就误翻白字）
+    int judge_w = w - SPEED_AREA_W + (int)(10 * m_dpi_scale);
+    if (judge_w < w / 2) judge_w = w / 2;   // 布局异常时保底半宽
+    if (judge_w > w) judge_w = w;
+    std::vector<unsigned short> lums;
+    lums.reserve((size_t)((h / 4 + 1) * (judge_w / 4 + 1)));
     {
         unsigned char* p8 = (unsigned char*)m_snap_bits;
         for (int y = 0; y < h; y += 4)
-            for (int x = 0; x < w; x += 4) {
+            for (int x = 0; x < judge_w; x += 4) {
                 size_t i = ((size_t)y * w + x) * 4;
-                lum_sum += (299 * p8[i + 2] + 587 * p8[i + 1] + 114 * p8[i]) / 1000;
-                lum_n++;
+                lums.push_back((unsigned short)(
+                    (299 * p8[i + 2] + 587 * p8[i + 1] + 114 * p8[i]) / 1000));
             }
     }
-    double screen_lum = lum_n ? (double)lum_sum / lum_n : -1.0;
+    double screen_lum = -1.0;
+    if (!lums.empty()) {
+        size_t mid = lums.size() / 2;
+        std::nth_element(lums.begin(), lums.begin() + mid, lums.end());
+        screen_lum = (double)lums[mid];   // 中位亮度
+    }
 
     if (trace) {
         char line[192];
@@ -1335,13 +1354,26 @@ void CTooltipPopup::PositionWindow(const RECT& anchor_rect) {
     if (y < work.top) y = work.top + margin;
 
     // 文字反色判定（首显：窗口未上屏，截屏天然干净）。背景磨砂由
-    // blur 层 DWM 实时合成，移动中无需任何重采样
+    // blur 层 DWM 实时合成，移动中无需任何重采样——但文字深浅要跟随
+    // 背景亮度：显示中的矩形变化（anchor 跟随/拖动/避让）也即时重判
+    // （affinity 截屏零闪，拖动实时反色是咩咩点名过的需求）
     RECT will = { x, y, x + pw, y + ph };
     if (m_acrylic_active && !m_visible) {
         RefreshBackdrop(will);
         m_last_snap_rect = will;
         m_last_refresh_tick = GetTickCount64();
         BackdropTrace("[poswin] judge(first-show)");
+    } else if (m_acrylic_active && m_affinity_ok &&
+               !EqualRect(&will, &m_last_snap_rect)) {
+        bool text_dark_before = m_text_dark;
+        bool adapt_before = m_text_adaptive;
+        RefreshBackdrop(will, false);
+        m_last_snap_rect = will;
+        m_last_refresh_tick = GetTickCount64();
+        if (m_text_dark != text_dark_before || m_text_adaptive != adapt_before) {
+            InvalidateRect(m_hwnd, NULL, FALSE);
+            BackdropTrace("[poswin] text-flip(move)");
+        }
     }
 
     // 双层呈现：blur 效果层先就位（同 rect），内容层随后压在其上
@@ -1512,23 +1544,26 @@ void CTooltipPopup::UpdateData(const std::vector<ProcDisplayInfo>& procs,
     m_status = status ? status : L"";
     if (m_visible) {
         // 静止期反色判定（方案 A'）：背景磨砂由 blur 层 DWM 逐帧实时合
-        // 成无需插件刷新，只有文字深浅需要低频跟随背景亮度。静止判据=
-        // 当前矩形与上次判定一致（拖动中不判，避免翻字闪烁）；周期
-        // 300ms；affinity 不可用（老系统）不跑——清空法截屏每周期闪一
-        // 次不可接受，文字色停留在首显判定。判定变化才重绘
+        // 成无需插件刷新，只有文字深浅需要低频跟随背景亮度。矩形与判定
+        // 基准不同=刚移动过（PositionWindow 移动路径已即时判定）：重置
+        // 基准与节流钟，稳定 300ms 后本循环接管——否则旧基准永不相等，
+        // 静止判定一次都不会跑（2026-10-16 咩咩实测字不实时反色的根
+        // 因）。affinity 不可用（老系统）不跑；判定变化才重绘
         RECT cur;
         GetWindowRect(m_hwnd, &cur);
-        if (m_acrylic_active && m_affinity_ok &&
-            EqualRect(&cur, &m_last_snap_rect) &&
-            GetTickCount64() - m_last_refresh_tick >= 300) {
-            bool text_dark_before = m_text_dark;
-            bool adapt_before = m_text_adaptive;
-            RefreshBackdrop(cur, false);
-            m_last_refresh_tick = GetTickCount64();
-            if (m_text_dark != text_dark_before || m_text_adaptive != adapt_before) {
+        if (m_acrylic_active && m_affinity_ok) {
+            if (!EqualRect(&cur, &m_last_snap_rect)) {
                 m_last_snap_rect = cur;
-                InvalidateRect(m_hwnd, NULL, FALSE);
-                BackdropTrace("[tick] text-flip(refresh)");
+                m_last_refresh_tick = GetTickCount64();
+            } else if (GetTickCount64() - m_last_refresh_tick >= 300) {
+                bool text_dark_before = m_text_dark;
+                bool adapt_before = m_text_adaptive;
+                RefreshBackdrop(cur, false);
+                m_last_refresh_tick = GetTickCount64();
+                if (m_text_dark != text_dark_before || m_text_adaptive != adapt_before) {
+                    InvalidateRect(m_hwnd, NULL, FALSE);
+                    BackdropTrace("[tick] text-flip(refresh)");
+                }
             }
         }
         // Recalculate size: new processes may have appeared since we first showed
