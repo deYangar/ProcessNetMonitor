@@ -891,6 +891,13 @@ void CTooltipPopup::ComposeLayeredSurface(int w, int h) {
                 int fr = (pa[i + 2] - inv) * 255 / cov255;
                 int fg = (pa[i + 1] - inv) * 255 / cov255;
                 int fb = (pa[i]     - inv) * 255 / cov255;
+                // ClearType 亚像素覆盖率的通道差经 f 还原落进内容色：
+                // 黑字叠黑背景时边缘呈紫边（白字在白 pass 全 255、f 解出
+                // 纯白，天然无此问题）。向通道均值收敛——子像素信息保留
+                // 在 cov 标量里（锐度不变），颜色污染清零；彩字边缘轻微
+                // 去饱和（1-2px 半透明带，肉眼不可辨）
+                int fm = (fr + fg + fb) / 3;
+                fr = fg = fb = fm;
                 int pnr = max(0, pr + nz), png = max(0, pg + nz), pnb = max(0, pb + nz);
                 int er = fr * cov255 / 255 + pnr * bg_a / 255 * inv / 255;
                 int eg = fg * cov255 / 255 + png * bg_a / 255 * inv / 255;
