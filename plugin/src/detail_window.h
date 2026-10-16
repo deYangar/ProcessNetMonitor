@@ -162,7 +162,13 @@ private:
 
     // Helpers
     bool IsDarkMode();
-    HICON GetProcessIcon(const std::wstring& exe_path);
+    // Process icon, frame-split extraction（review P2，与悬浮窗同款）：
+    // 绘制路径只查缓存（LookupProcessIcon，miss 记入 m_icon_pending），
+    // 同步提取（ExtractProcessIcon，含磁盘 IO）由 PumpIconExtraction
+    // 分帧驱动（OnPaint 末尾每帧 1 个 + Invalidate 自驱动链）
+    HICON LookupProcessIcon(const std::wstring& exe_path);
+    HICON ExtractProcessIcon(const std::wstring& exe_path);
+    bool PumpIconExtraction(int count);
 
     // Colors
     COLORREF GetBgColor();
@@ -401,6 +407,8 @@ private:
 
     // Icon cache
     std::unordered_map<std::wstring, HICON> m_icon_cache;
+    // 待提取图标队列（LookupProcessIcon miss 入队，PumpIconExtraction 消费）
+    std::vector<std::wstring> m_icon_pending;
     
     // PacketCapture pointer for connection details
     PacketCapture* m_capture = nullptr;

@@ -71,9 +71,6 @@ public:
 
     std::wstring m_status;   // status/warning line (empty = none)
 
-    // Process icon cache
-    HICON GetProcessIcon(const std::wstring& exe_path);
-
     // Public for standalone WndProc access
     LRESULT HandleMessage(UINT msg, WPARAM wp, LPARAM lp);
 
@@ -154,6 +151,13 @@ private:
     // move under the cursor (button ends up missed, 2026-09-21).
     bool IsCursorNear() const;
 
+    // Process icon, frame-split extraction（review P2）：绘制路径只查缓存
+    // （LookupProcessIcon，miss 记入 m_icon_pending），同步提取
+    // （ExtractProcessIcon，含磁盘 IO）由 PumpIconExtraction 分帧驱动
+    HICON LookupProcessIcon(const std::wstring& exe_path);
+    HICON ExtractProcessIcon(const std::wstring& exe_path);
+    bool PumpIconExtraction(int count);
+
     // State
     HWND m_hwnd = nullptr;
     HINSTANCE m_hinst = nullptr;
@@ -206,6 +210,8 @@ private:
 
     // Icon cache: exe_path -> HICON
     std::unordered_map<std::wstring, HICON> m_icon_cache;
+    // 待提取图标队列（LookupProcessIcon miss 入队，PumpIconExtraction 消费）
+    std::vector<std::wstring> m_icon_pending;
 
     // Cached GDI objects (created once, reused in OnPaint)
     HFONT m_font_normal = nullptr;   // Microsoft YaHei -14 (process name + header)

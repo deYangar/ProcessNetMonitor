@@ -118,26 +118,56 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
 }
 
 // ============================================================
-// Helper: extract icon from exe path
+// Helper: process icon extraction (frame-split, review P2)
 // ============================================================
 
-HICON CTooltipPopup::GetProcessIcon(const std::wstring& exe_path) {
-    if (exe_path.empty()) return nullptr;
+// 缓存 key 容量保护（review 低危1）：exe 路径超长时 swprintf_s 失败把
+// key 置空串，所有超长路径进程共享空 key、图标张冠李戴。超长路径不参
+// 与缓存与提取（留空位）——深网络路径/UWP 才可能超，概率极低
+static const size_t PNM_ICON_KEY_MAX_PATH = 512;
 
-    // 缓存 key = 路径 + 当前显示尺寸（DPI 变化后尺寸不同，各自取图）
+// UNC 或远程映射盘：Shell 工厂/ExtractAssociatedIcon 的同步磁盘 IO 在
+// 断开的映射盘上可卡数秒（review P2），网络路径跳过它们
+static bool PNM_IsNetworkPath(const std::wstring& path) {
+    if (path.size() >= 2 && path[0] == L'\\' && path[1] == L'\\') return true;
+    if (path.size() >= 3 && path[1] == L':' && path[2] == L'\\') {
+        wchar_t root[4] = { path[0], L':', L'\\', 0 };
+        return GetDriveTypeW(root) == DRIVE_REMOTE;
+    }
+    return false;
+}
+
+// 只查缓存（O(1) 零 IO）。miss 时把路径记入提取队列（去重）并返回
+// nullptr——绘制路径画空位占位，真图标由 PumpIconExtraction 分帧提取
+// 后的重绘填充
+HICON CTooltipPopup::LookupProcessIcon(const std::wstring& exe_path) {
+    if (exe_path.empty() || exe_path.size() >= PNM_ICON_KEY_MAX_PATH) return nullptr;
     int want = max(16, ICON_SIZE);
     wchar_t key[600];
     swprintf_s(key, 600, L"%s|%d", exe_path.c_str(), want);
     auto it = m_icon_cache.find(key);
     if (it != m_icon_cache.end()) return it->second;
+    if (std::find(m_icon_pending.begin(), m_icon_pending.end(), exe_path)
+            == m_icon_pending.end()) {
+        m_icon_pending.push_back(exe_path);
+    }
+    return nullptr;
+}
 
+// 同步提取一个进程图标（Shell 图像工厂 + 两级兜底）。只被
+// PumpIconExtraction 调用，不进 WM_PAINT——GetImage 缓存未命中时同步
+// 做磁盘 IO + 高质量缩放（单个 5-20ms），悬浮窗一屏 ~10 行、详情窗
+// 几十上百行逐个提取会卡首帧（review P2）
+HICON CTooltipPopup::ExtractProcessIcon(const std::wstring& exe_path) {
+    bool net = PNM_IsNetworkPath(exe_path);
+    int want = max(16, ICON_SIZE);
     HICON hIcon = nullptr;
 
     // 首选：Shell 图像工厂按目标尺寸渲染（咩咩反馈 logo 锯齿，2026-10-16：
     // 旧路径 SHGFI_SMALLICON 拿 16×16 再被 DrawIconEx 最近邻拉到 22px——
     // 放大+无平滑=硬边锯齿。GetImage 内部从大图标高质量下缩并保留
     // alpha 抗锯齿，高 DPI 场景的系统正解）
-    {
+    if (!net) {
         IShellItemImageFactory* factory = nullptr;
         if (SUCCEEDED(SHCreateItemFromParsingName(exe_path.c_str(), nullptr,
                                                   IID_PPV_ARGS(&factory)))) {
@@ -164,7 +194,8 @@ HICON CTooltipPopup::GetProcessIcon(const std::wstring& exe_path) {
     }
 
     if (!hIcon) {
-        // 兜底 1：大图标（32px 源，仍优于 SMALLICON 的 16px）
+        // 兜底 1：大图标（32px 源，仍优于 SMALLICON 的 16px）。
+        // USEFILEATTRIBUTES 不碰文件系统——零磁盘 IO，网络路径同样可用
         SHFILEINFOW sfi = {};
         if (SHGetFileInfoW(exe_path.c_str(), 0, &sfi, sizeof(sfi),
                            SHGFI_ICON | SHGFI_LARGEICON | SHGFI_USEFILEATTRIBUTES)) {
@@ -172,16 +203,30 @@ HICON CTooltipPopup::GetProcessIcon(const std::wstring& exe_path) {
         }
     }
 
-    if (!hIcon) {
-        // 兜底 2：ExtractAssociatedIcon（32px）
+    if (!hIcon && !net) {
+        // 兜底 2：ExtractAssociatedIcon（32px，要打开文件——网络路径跳过）
         wchar_t path_buf[MAX_PATH] = {};
         wcsncpy_s(path_buf, MAX_PATH, exe_path.c_str(), _TRUNCATE);
         WORD idx = 0;
         hIcon = ExtractAssociatedIconW(m_hinst, path_buf, &idx);
     }
-
-    m_icon_cache[key] = hIcon;
     return hIcon;
+}
+
+// 分帧提取：一次最多 count 个（含失败 nullptr 的负缓存——防止不可取图
+// 的路径每帧重复入队）。有产出返回 true，调用方触发重绘把新图标上屏
+bool CTooltipPopup::PumpIconExtraction(int count) {
+    bool produced = false;
+    while (count-- > 0 && !m_icon_pending.empty()) {
+        std::wstring path = m_icon_pending.front();
+        m_icon_pending.erase(m_icon_pending.begin());
+        int want = max(16, ICON_SIZE);
+        wchar_t key[600];
+        swprintf_s(key, 600, L"%s|%d", path.c_str(), want);
+        m_icon_cache[key] = ExtractProcessIcon(path);
+        produced = true;
+    }
+    return produced;
 }
 
 // ============================================================
@@ -352,8 +397,13 @@ LRESULT CTooltipPopup::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
 
     case WM_TIMER:
-        if (wp == TIMER_HOVER)
+        if (wp == TIMER_HOVER) {
+            // 图标分帧提取：每 tick 补 2 个未缓存图标后重绘（首帧空位
+            // 占位，~1s 内逐个亮起，提取不再卡 WM_PAINT）
+            if (PumpIconExtraction(2))
+                InvalidateRect(m_hwnd, NULL, FALSE);
             CProcessNetPlugin::Instance().HoverTick();
+        }
         return 0;
 
     case WM_PNM_REFRESH:
@@ -611,7 +661,7 @@ void CTooltipPopup::DrawProcRow(HDC hdc, int y, const ProcDisplayInfo& proc, boo
     int x = PADDING + 2;
 
     // 1. Process icon
-    HICON hIcon = GetProcessIcon(proc.exe_path);
+    HICON hIcon = LookupProcessIcon(proc.exe_path);
     if (hIcon) {
         DrawIconEx(hdc, x, y + (ROW_HEIGHT - ICON_SIZE) / 2, hIcon,
                    ICON_SIZE, ICON_SIZE, 0, NULL, DI_NORMAL);
