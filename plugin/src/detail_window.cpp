@@ -98,6 +98,13 @@ CDetailWindow::~CDetailWindow() {
     for (auto& b : m_br_row) { if (b) DeleteObject(b); }
     if (m_br_hover) DeleteObject(m_br_hover);
     if (m_br_child) DeleteObject(m_br_child);
+    // 类注销（与悬浮窗同款，review C2）：热卸载重载场景防新 DLL 沿用
+    // 指向已卸载代码的残留类；进程退出时窗口未销毁则反注册失败，无害
+    if (m_hinst) {
+        wchar_t cls[64];
+        swprintf_s(cls, 64, L"PNMDetail_%p", (void*)this);
+        UnregisterClassW(cls, m_hinst);
+    }
     s_instance = nullptr;
 }
 

@@ -89,7 +89,6 @@ LRESULT CALLBACK CTooltipPopup::WatchdogProc(HWND hwnd, UINT msg, WPARAM wp, LPA
             // proc) and HoverTick is dead. Re-install both.
             SetWindowLongPtrW(popup, GWLP_WNDPROC, (LONG_PTR)StaticWndProc);
             SetTimer(popup, TIMER_HOVER, 100, nullptr);
-            s_instance->m_watchdog_heals++;
         }
         return 0;
     }
@@ -232,6 +231,19 @@ CTooltipPopup::~CTooltipPopup() {
     if (m_font_normal) DeleteObject(m_font_normal);
     if (m_font_small) DeleteObject(m_font_small);
     if (m_pen_separator) DeleteObject(m_pen_separator);
+    // 类注销：当前 TM 无插件热重载不会触发，但若未来支持热卸载且新 DLL
+    // 分到同一 hInst 地址，残留的已注册类会让 CreateWindow 沿用指向已
+    // 卸载代码的 wndproc（review C2）。进程退出路径窗口未销毁时反注册
+    // 失败，无害
+    if (m_hinst) {
+        wchar_t cls[64];
+        swprintf_s(cls, 64, L"PNMTooltip_%p", m_hinst);
+        UnregisterClassW(cls, m_hinst);
+        swprintf_s(cls, 64, L"PNMWatchdog_%p", m_hinst);
+        UnregisterClassW(cls, m_hinst);
+        swprintf_s(cls, 64, L"PNMBlur_%p", m_hinst);
+        UnregisterClassW(cls, m_hinst);
+    }
     s_instance = nullptr;
 }
 
@@ -708,8 +720,11 @@ void CTooltipPopup::EnsureBlurLayer() {
 
     wchar_t className[64];
     swprintf_s(className, 64, L"PNMBlur_%p", m_hinst);
-    static bool registered = false;
-    if (!registered) {
+    // 以类名实际查重（不依赖进程级 static 标志）：热卸载重载后类可能
+    // 仍存活，static 标志却已归零导致重复注册失败（review C2）
+    WNDCLASSEXW wcExist = {};
+    wcExist.cbSize = sizeof(wcExist);
+    if (!GetClassInfoExW(m_hinst, className, &wcExist)) {
         WNDCLASSEXW wcB = {};
         wcB.cbSize = sizeof(wcB);
         wcB.lpfnWndProc = DefWindowProcW;
@@ -717,7 +732,6 @@ void CTooltipPopup::EnsureBlurLayer() {
         wcB.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
         wcB.lpszClassName = className;
         RegisterClassExW(&wcB);
-        registered = true;
     }
     m_blur_hwnd = CreateWindowExW(
         WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,  // 点击穿透

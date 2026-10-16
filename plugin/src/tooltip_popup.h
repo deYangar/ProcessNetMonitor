@@ -54,9 +54,6 @@ public:
     bool IsVisible() const { return m_visible; }
     bool IsHovering() const { return m_hovering; }
     HWND GetHwnd() const { return m_hwnd; }
-    // Times the watchdog re-installed the subclass (diagnostics; 0 in a
-    // clean session)
-    UINT GetWatchdogHeals() const { return m_watchdog_heals; }
 
     // Backdrop effect for the popup (popup_effect setting):
     //   0 = acrylic  (自绘模糊管线 + 噪声)
@@ -94,7 +91,6 @@ private:
     // the hover timer from the owning thread when it finds them replaced.
     static LRESULT CALLBACK WatchdogProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
     HWND m_watchdog_hwnd = nullptr;
-    UINT m_watchdog_heals = 0;
 
     // Layout & rendering
     void CalcLayout(HDC hdc, int& out_w, int& out_h, int& out_up_count, int& out_down_count);
