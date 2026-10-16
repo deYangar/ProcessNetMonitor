@@ -123,7 +123,7 @@ private:
     // 桌面×(1-op)），与文字色对比不足时翻转文字深浅
     void UpdateAdaptiveTextTheme(const RECT& popup_rect);
     void DrawProcRow(HDC hdc, int y, const ProcDisplayInfo& proc, bool is_upload);
-    void DrawSectionTitle(HDC hdc, int y, const wchar_t* title, bool is_upload);
+    void DrawSectionTitle(HDC hdc, int y, const wchar_t* title, bool is_upload, bool hover);
     void PositionWindow(const RECT& anchor_rect);
 
     // DPI handling (per-monitor, same approach as TM's DPIFromRect)
@@ -242,6 +242,16 @@ public:
 
     // "查看详细" button rect (updated in OnPaint)
     RECT m_rcDetailBtn = {};
+
+    // Hover 反馈（2026-10-16 咩咩反馈按钮无接入效果突兀）：两个 section
+    // 标题条 + 查看详细按钮。矩形由 DrawContent 记录（与 m_rcDetailBtn
+    // 同模式），WM_MOUSEMOVE 命中测试，状态翻转才整窗重绘（ULW 三表面
+    // 全量重绘成本与每秒数据刷新同级，进出区域是低频事件）
+    bool m_hover_up = false;
+    bool m_hover_down = false;
+    bool m_hover_btn = false;
+    RECT m_rcSectionUp = {};
+    RECT m_rcSectionDown = {};
 
     static CTooltipPopup* s_instance;
 };

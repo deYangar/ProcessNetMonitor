@@ -427,7 +427,32 @@ LRESULT CTooltipPopup::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
             m_tracking = true;
         }
         m_hovering = true;
+        {
+            // Hover 反馈：状态翻转才重绘（移动过程零开销）
+            POINT pt = { (short)LOWORD(lp), (short)HIWORD(lp) };
+            bool up = PtInRect(&m_rcSectionUp, pt) != FALSE;
+            bool down = PtInRect(&m_rcSectionDown, pt) != FALSE;
+            bool btn = PtInRect(&m_rcDetailBtn, pt) != FALSE;
+            if (up != m_hover_up || down != m_hover_down || btn != m_hover_btn) {
+                m_hover_up = up;
+                m_hover_down = down;
+                m_hover_btn = btn;
+                InvalidateRect(m_hwnd, NULL, FALSE);
+            }
+        }
         return 0;
+
+    case WM_SETCURSOR:
+        // 查看详细按钮上手型光标，其余箭头（HTCLIENT 恒定，见 WM_NCHITTEST）
+        if (LOWORD(lp) == HTCLIENT) {
+            POINT pt;
+            GetCursorPos(&pt);
+            ScreenToClient(m_hwnd, &pt);
+            SetCursor(LoadCursor(nullptr,
+                      PtInRect(&m_rcDetailBtn, pt) ? IDC_HAND : IDC_ARROW));
+            return TRUE;
+        }
+        return DefWindowProcW(m_hwnd, msg, wp, lp);
 
     case WM_LBUTTONDOWN:
         // Only open detail window when clicking the "查看详细" button
@@ -456,6 +481,11 @@ LRESULT CTooltipPopup::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
 void CTooltipPopup::OnMouseLeave() {
     m_tracking = false;
     m_hovering = false;
+    // 清 hover 高亮（有状态翻转才重绘）
+    if (m_hover_up || m_hover_down || m_hover_btn) {
+        m_hover_up = m_hover_down = m_hover_btn = false;
+        if (m_hwnd) InvalidateRect(m_hwnd, NULL, FALSE);
+    }
     // Don't hide immediately - the hover timer handles hide delays
 }
 
@@ -572,9 +602,11 @@ void CTooltipPopup::DrawBackground(HDC hdc, int w, int h, bool content_only) {
     DeleteObject(hPen);
 }
 
-void CTooltipPopup::DrawSectionTitle(HDC hdc, int y, const wchar_t* title, bool is_upload) {
-    // Section title bar with slightly different bg
-    HBRUSH hBrush = CreateSolidBrush(GetSectionBgColor());
+void CTooltipPopup::DrawSectionTitle(HDC hdc, int y, const wchar_t* title, bool is_upload, bool hover) {
+    // Section title bar with slightly different bg（hover 提亮一档）
+    COLORREF sec_bg = GetSectionBgColor();
+    if (hover) sec_bg = UseDarkTheme() ? RGB(60, 60, 60) : RGB(227, 227, 227);
+    HBRUSH hBrush = CreateSolidBrush(sec_bg);
     int bar_h = (int)(20 * m_dpi_scale);
     RECT rc = { PADDING - 2, y, 0, y + bar_h }; // will set right later
     // We'll draw a small rounded rect behind the title text
@@ -590,7 +622,7 @@ void CTooltipPopup::DrawSectionTitle(HDC hdc, int y, const wchar_t* title, bool 
     // Use round rect for section bg
     int radius = max(2, (int)(6 * m_dpi_scale));
     HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, hBrush);
-    HPEN hNullPen = CreatePen(PS_SOLID, 0, GetSectionBgColor());
+    HPEN hNullPen = CreatePen(PS_SOLID, 0, sec_bg);
     HPEN hOldPen = (HPEN)SelectObject(hdc, hNullPen);
     RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom + 2, radius, radius);
     SelectObject(hdc, hOldBrush);
@@ -971,7 +1003,8 @@ void CTooltipPopup::DrawContent(HDC dc, int w, int h, bool content_only) {
     }
 
     // === Upload section ===
-    DrawSectionTitle(dc, y, TR(L"\u25B2 \u5B9E\u65F6\u4E0A\u4F20"), true);
+    m_rcSectionUp = { PADDING - 2, y, w - PADDING + 2, y + (int)(20 * m_dpi_scale) + 2 };
+    DrawSectionTitle(dc, y, TR(L"\u25B2 \u5B9E\u65F6\u4E0A\u4F20"), true, m_hover_up);
     y += SECTION_H;
 
     // Upload section: show processes with upload activity first, then fill with historical
@@ -1000,7 +1033,8 @@ void CTooltipPopup::DrawContent(HDC dc, int w, int h, bool content_only) {
     y += GAP_H;
 
     // === Download section ===
-    DrawSectionTitle(dc, y, TR(L"\u25BC \u5B9E\u65F6\u4E0B\u8F7D"), false);
+    m_rcSectionDown = { PADDING - 2, y, w - PADDING + 2, y + (int)(20 * m_dpi_scale) + 2 };
+    DrawSectionTitle(dc, y, TR(L"\u25BC \u5B9E\u65F6\u4E0B\u8F7D"), false, m_hover_down);
     y += SECTION_H;
 
     // Download section: show processes with download activity first, then fill
@@ -1029,8 +1063,17 @@ void CTooltipPopup::DrawContent(HDC dc, int w, int h, bool content_only) {
 
     // === "\u67E5\u770B\u8BE6\u7EC6" button ===
     m_rcDetailBtn = { PADDING, y, w - PADDING, y + BTN_H };
-    HBRUSH hBtnBrush = CreateSolidBrush(UseTextTheme() ? RGB(50, 50, 54) : RGB(235, 235, 235));
-    HPEN hBtnPen = CreatePen(PS_SOLID, 1, UseTextTheme() ? RGB(70, 70, 74) : RGB(210, 210, 210));
+    // hover：背景提亮一档 + accent 描边 + 文字提亮（与 section 条同一方向）
+    COLORREF btn_bg  = UseTextTheme() ? RGB(50, 50, 54)  : RGB(235, 235, 235);
+    COLORREF btn_pen = UseTextTheme() ? RGB(70, 70, 74)  : RGB(210, 210, 210);
+    COLORREF btn_txt = UseTextTheme() ? RGB(255, 165, 0) : RGB(230, 126, 34);
+    if (m_hover_btn) {
+        btn_bg  = UseTextTheme() ? RGB(68, 68, 74)  : RGB(222, 222, 222);
+        btn_pen = UseTextTheme() ? RGB(255, 165, 0) : RGB(230, 126, 34);
+        btn_txt = UseTextTheme() ? RGB(255, 190, 80) : RGB(196, 100, 16);
+    }
+    HBRUSH hBtnBrush = CreateSolidBrush(btn_bg);
+    HPEN hBtnPen = CreatePen(PS_SOLID, 1, btn_pen);
     HBRUSH hOldBtnBrush = (HBRUSH)SelectObject(dc, hBtnBrush);
     HPEN hOldBtnPen = (HPEN)SelectObject(dc, hBtnPen);
     RoundRect(dc, m_rcDetailBtn.left, m_rcDetailBtn.top, m_rcDetailBtn.right, m_rcDetailBtn.bottom,
@@ -1041,7 +1084,7 @@ void CTooltipPopup::DrawContent(HDC dc, int w, int h, bool content_only) {
     DeleteObject(hBtnPen);
 
     HFONT hOldBtnFont = (HFONT)SelectObject(dc, m_font_small);
-    SetTextColor(dc, UseTextTheme() ? RGB(255, 165, 0) : RGB(230, 126, 34));
+    SetTextColor(dc, btn_txt);
     DrawTextW(dc, TR(L"\u67E5\u770B\u8BE6\u7EC6"), -1, &m_rcDetailBtn, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
     SelectObject(dc, hOldBtnFont);
 
@@ -1548,6 +1591,7 @@ void CTooltipPopup::Hide() {
         m_visible = false;
         m_hovering = false;
         m_tracking = false;
+        m_hover_up = m_hover_down = m_hover_btn = false;
     }
 }
 
