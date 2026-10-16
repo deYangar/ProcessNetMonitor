@@ -948,9 +948,14 @@ void CTooltipPopup::RefreshBackdrop(const RECT& popup_rect) {
     int w = popup_rect.right - popup_rect.left;
     int h = popup_rect.bottom - popup_rect.top;
     if (w <= 0 || h <= 0) return;
-    if (!EnsureLayeredSurface(w, h)) return;
 
     int op = m_backdrop_opacity < 0 ? 100 : m_backdrop_opacity;
+    // 高浓度（>=80%）背景≈面板色，主题文字色已保证对比——无需截屏
+    // 判定。原判断在截屏+采样之后，浓度高档每 300ms 一轮的截屏与遍历
+    // 采样全是无用功；提前到截屏之前直接保持开头的主题复位返回
+    if (op >= 80) return;
+
+    if (!EnsureLayeredSurface(w, h)) return;
 
     if (!CaptureSnapNoFlash(popup_rect, w, h)) {
         if (m_visible) ClearLayeredSurfaceForCapture();
@@ -987,8 +992,8 @@ void CTooltipPopup::RefreshBackdrop(const RECT& popup_rect) {
         screen_lum = (double)lums[mid];   // 中位亮度
     }
 
-    // 反色判定（高浓度背景≈面板色，主题色已保证对比）
-    if (screen_lum < 0.0 || op >= 80) return;
+    // 反色判定（op>=80 已在截屏前提前返回）
+    if (screen_lum < 0.0) return;
     COLORREF panel = GetBgColor();
     double panel_lum = (299.0 * GetRValue(panel) + 587.0 * GetGValue(panel)
                         + 114.0 * GetBValue(panel)) / 1000.0;
@@ -1313,15 +1318,19 @@ void CTooltipPopup::PositionWindow(const RECT& anchor_rect) {
 
     // 文字反色判定（首显：窗口未上屏，截屏天然干净）。背景磨砂由
     // blur 层 DWM 实时合成，移动中无需任何重采样——但文字深浅要跟随
-    // 背景亮度：显示中的矩形变化（anchor 跟随/拖动/避让）也即时重判
-    // （affinity 截屏零闪，拖动实时反色是咩咩点名过的需求）
+    // 背景亮度：显示中的矩形变化（anchor 跟随/拖动/避让）重判，节流
+    // 到 250ms（单轮截屏+判定 2-6ms 在 UI 线程，拖动 10Hz 全跑低端机
+    // 帧率有感知；翻转本身带迟滞带，250ms 更新观感无差）。跳过期间
+    // m_last_snap_rect 保持旧值，移动停止后由 UpdateData 的静止判定
+    // （300ms）接管补判
     RECT will = { x, y, x + pw, y + ph };
     if (m_acrylic_active && !m_visible) {
         RefreshBackdrop(will);
         m_last_snap_rect = will;
         m_last_refresh_tick = GetTickCount64();
     } else if (m_acrylic_active && m_affinity_ok &&
-               !EqualRect(&will, &m_last_snap_rect)) {
+               !EqualRect(&will, &m_last_snap_rect) &&
+               GetTickCount64() - m_last_refresh_tick >= 250) {
         bool text_dark_before = m_text_dark;
         bool adapt_before = m_text_adaptive;
         RefreshBackdrop(will);
