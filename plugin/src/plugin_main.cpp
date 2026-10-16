@@ -1625,6 +1625,38 @@ static void OptionsAdjustLayout(HWND hwnd) {
         if (right > max_right) max_right = right;
     }
 
+    // Step 1.6: label+control rows — the control must sit right of its
+    // (just re-measured) label. Step 1 widens STATIC labels to their text;
+    // without this pass a long translation (English "Popup backdrop",
+    // "Color scheme") runs under the fixed-x combo/edit that was positioned
+    // for Chinese (2026-10-16 咩咩 screenshot). Chinese keeps the original
+    // x via min_x, so the dialog never gets wider than it has to be.
+    struct LabelRow { int label_id; int ctrl_id; int min_x; };
+    const LabelRow rows[] = {
+        { 1015, 1014, 90 },   // 界面语言 + combo
+        { 1019, 1018, 100 },  // 颜色模式 + combo
+        { 1021, 1022, 100 },  // 悬浮窗背景 + combo
+        { 1023, 1024, 100 },  // 悬浮窗透明度 + edit
+    };
+    for (const auto& row : rows) {
+        HWND hLab = GetDlgItem(hwnd, row.label_id);
+        HWND hCtrl = GetDlgItem(hwnd, row.ctrl_id);
+        if (!hLab || !hCtrl) continue;
+        RECT rl, rcc;
+        GetWindowRect(hLab, &rl);
+        GetWindowRect(hCtrl, &rcc);
+        MapWindowPoints(HWND_DESKTOP, hwnd, (LPPOINT)&rl, 2);
+        MapWindowPoints(HWND_DESKTOP, hwnd, (LPPOINT)&rcc, 2);
+        int new_x = rl.right + 8;
+        if (new_x < row.min_x) new_x = row.min_x;
+        if (new_x != rcc.left) {
+            SetWindowPos(hCtrl, nullptr, new_x, rcc.top, 0, 0,
+                         SWP_NOSIZE | SWP_NOZORDER);
+        }
+        int right = new_x + (rcc.right - rcc.left);
+        if (right > max_right) max_right = right;
+    }
+
     if (hOld) SelectObject(hdc, hOld);
     ReleaseDC(hwnd, hdc);
 
