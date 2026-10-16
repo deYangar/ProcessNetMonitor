@@ -74,6 +74,38 @@ inline void FormatBytes(uint64_t bytes, wchar_t* buf, int n) {
 }
 
 // ============================================================
+// OS version gate
+// RtlGetVersion via GetProcAddress: the truth-telling API (no
+// VerifyVersionInfo compatibility lie), and never enters the import
+// table so the DLL keeps loading on any Windows.
+// ============================================================
+
+// OS build number (15063 = Win10 1703, 19041 = 2004, ...). False only if
+// RtlGetVersion itself is unavailable (pre-2000 - not a real scenario).
+inline bool PNM_GetOSBuild(DWORD& build) {
+    typedef LONG(WINAPI* PFN_RtlGetVersion)(PRTL_OSVERSIONINFOW);
+    static DWORD cached = 0;
+    static bool resolved = false;
+    if (!resolved) {
+        resolved = true;
+        auto fn = (PFN_RtlGetVersion)GetProcAddress(
+            GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion");
+        RTL_OSVERSIONINFOW vi = { sizeof(vi) };
+        if (fn && fn(&vi) == 0) cached = vi.dwBuildNumber;
+    }
+    build = cached;
+    return cached != 0;
+}
+
+// SWCA accent blur/acrylic (ACCENT_ENABLE_BLURBEHIND/ACRYLICBLURBEHIND)
+// actually renders starting with Win10 1703 (build 15063). Below that the
+// popup's acrylic/blur backdrops silently degrade to plain transparency.
+inline bool PNM_IsAccentBlurSupported() {
+    DWORD build = 0;
+    return PNM_GetOSBuild(build) && build >= 15063;
+}
+
+// ============================================================
 // DPI / multi-monitor helpers
 // Same approach as TrafficMonitor's own DPIFromRect:
 // MonitorFromRect + shcore!GetDpiForMonitor(MDT_EFFECTIVE_DPI).

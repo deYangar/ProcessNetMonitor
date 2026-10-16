@@ -1452,6 +1452,29 @@ static BOOL CALLBACK OptionsSetFontProc(HWND h, LPARAM lp) {
 static void OptionsAdjustLayout(HWND hwnd);
 
 // 语言切换后刷新选项对话框全部文本（控件文本是创建时用 TR() 固化的）
+// 悬浮窗背景效果下拉填充（对话框创建 / 语言切换重填共用）。低系统
+// （<Win10 1703，SWCA 磨砂不渲染）给亚克力/模糊两项加需求标注——仍可
+// 选择，保存与生效处统一降级透明档
+static void OptionsFillEffectCombo(HWND hEffCombo, int cur_sel) {
+    if (!hEffCombo) return;
+    bool blur_ok = PNM_IsAccentBlurSupported();
+    SendMessageW(hEffCombo, CB_RESETCONTENT, 0, 0);
+    SendMessageW(hEffCombo, CB_ADDSTRING, 0,
+        (LPARAM)TR(blur_ok ? L"亚克力" : L"亚克力（需 Win10 1703+）"));
+    SendMessageW(hEffCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"透明"));
+    SendMessageW(hEffCombo, CB_ADDSTRING, 0,
+        (LPARAM)TR(blur_ok ? L"模糊" : L"模糊（需 Win10 1703+）"));
+    SendMessageW(hEffCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"不透明"));
+    SendMessageW(hEffCombo, CB_SETCURSEL, cur_sel < 0 ? 0 : cur_sel, 0);
+}
+
+// 低系统保存校正：亚克力/模糊在 <Win10 1703 上不可渲染，存档值直接落
+// 透明档（与 ApplyBackdrop 生效降级同规则，配置与观感永远一致）
+static int OptionsClampEffectForOS(int eff) {
+    if ((eff == 0 || eff == 2) && !PNM_IsAccentBlurSupported()) return 1;
+    return eff;
+}
+
 static void OptionsApplyLang(HWND hwnd) {
     if (!hwnd) return;
     SetWindowTextW(hwnd, TR(L"\x63D2\x4EF6\x8BBE\x7F6E"));
@@ -1469,16 +1492,8 @@ static void OptionsApplyLang(HWND hwnd) {
     SetWindowTextW(GetDlgItem(hwnd, 1021), TR(L"悬浮窗背景"));
     SetWindowTextW(GetDlgItem(hwnd, 1023), TR(L"悬浮窗透明度（10-100，10 最透 100 最实，不透明模式除外）"));
     // 重填背景效果下拉（保持当前选择）
-    HWND hEffCombo = GetDlgItem(hwnd, 1022);
-    if (hEffCombo) {
-        int cur_e = (int)SendMessageW(hEffCombo, CB_GETCURSEL, 0, 0);
-        SendMessageW(hEffCombo, CB_RESETCONTENT, 0, 0);
-        SendMessageW(hEffCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"亚克力"));
-        SendMessageW(hEffCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"透明"));
-        SendMessageW(hEffCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"模糊"));
-        SendMessageW(hEffCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"不透明"));
-        SendMessageW(hEffCombo, CB_SETCURSEL, cur_e < 0 ? 0 : cur_e, 0);
-    }
+    OptionsFillEffectCombo(GetDlgItem(hwnd, 1022),
+        (int)SendMessageW(GetDlgItem(hwnd, 1022), CB_GETCURSEL, 0, 0));
     // 重填颜色模式下拉（保持当前选择）
     HWND hColorCombo = GetDlgItem(hwnd, 1018);
     if (hColorCombo) {
@@ -1903,14 +1918,9 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         HWND hEffCombo = CreateWindowW(L"COMBOBOX", L"",
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
             100, 324, 190, 120, hwnd, (HMENU)1022, nullptr, nullptr);
-        {
-            SendMessageW(hEffCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"亚克力"));
-            SendMessageW(hEffCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"透明"));
-            SendMessageW(hEffCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"模糊"));
-            SendMessageW(hEffCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"不透明"));
-            SendMessageW(hEffCombo, CB_SETCURSEL,
-                         CProcessNetPlugin::Instance().m_detail.GetPopupEffect(), 0);
-        }
+        OptionsFillEffectCombo(hEffCombo,
+            OptionsClampEffectForOS(
+                CProcessNetPlugin::Instance().m_detail.GetPopupEffect()));
 
         // 悬浮窗透明度 label + edit（10-100；tint 背景浓度，文字始终不
         // 透明保持清晰。10 最透，100 最实，不透明模式下禁用）
@@ -1982,6 +1992,7 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             // 隐藏时属性也已就位，下次显示直接带效果）
             int eff_sel = (int)SendMessageW(GetDlgItem(hwnd, 1022), CB_GETCURSEL, 0, 0);
             if (eff_sel < 0 || eff_sel > 3) eff_sel = 0;
+            eff_sel = OptionsClampEffectForOS(eff_sel);
             wchar_t op_buf[16] = {};
             GetDlgItemTextW(hwnd, 1024, op_buf, 16);
             int opacity = _wtoi(op_buf);
@@ -2042,6 +2053,10 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         // 编辑行的启用状态（不透明=无效果层，禁用）
         if (LOWORD(wp) == 1022 && HIWORD(wp) == CBN_SELCHANGE) {
             int eff_sel = (int)SendMessageW(GetDlgItem(hwnd, 1022), CB_GETCURSEL, 0, 0);
+            int orig_sel = eff_sel;
+            eff_sel = OptionsClampEffectForOS(eff_sel);
+            if (eff_sel != orig_sel)   // 低系统降级：下拉同步跳到透明档，让降级可见
+                SendMessageW(GetDlgItem(hwnd, 1022), CB_SETCURSEL, eff_sel, 0);
             if (eff_sel >= 0 && eff_sel <= 3) {
                 auto& plugin = CProcessNetPlugin::Instance();
                 plugin.m_detail.SetPopupEffect(eff_sel);

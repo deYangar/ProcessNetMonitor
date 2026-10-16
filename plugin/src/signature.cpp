@@ -173,9 +173,33 @@ static bool VerifyEmbeddedTrust(const std::wstring& path) {
 
 // Catalog signature: find the matching .cat in catroot by file hash and
 // verify the catalog's own embedded Microsoft signature.
+//
+// ⚠️ The *2 catalog APIs (CryptCATAdminAcquireContext2 / CalcHash...2) are
+// Win8-only wintrust exports. They MUST be resolved via GetProcAddress:
+// a static import leaves a symbol Win7's wintrust.dll doesn't have, and the
+// loader then rejects the whole DLL (plugin fails to load with error 127 on
+// every Win7 - dumpbin-verified 2026-10-16, broken since v1.12.0). The plain
+// XP-era APIs stay statically linked and are the fallback path.
+typedef BOOL(WINAPI* PFN_CryptCATAdminAcquireContext2)(
+    HCATADMIN*, const GUID*, PCWSTR, void*, DWORD);
+typedef BOOL(WINAPI* PFN_CryptCATAdminCalcHashFromFileHandle2)(
+    HCATADMIN, HANDLE, DWORD*, BYTE*, DWORD);
+
 static bool VerifyCatalogSignature(const std::wstring& path) {
+    HMODULE wt = GetModuleHandleW(L"wintrust.dll");  // statically linked, already loaded
+    auto acq2 = wt ? (PFN_CryptCATAdminAcquireContext2)GetProcAddress(
+                         wt, "CryptCATAdminAcquireContext2") : nullptr;
+    auto hash2 = wt ? (PFN_CryptCATAdminCalcHashFromFileHandle2)GetProcAddress(
+                          wt, "CryptCATAdminCalcHashFromFileHandle2") : nullptr;
+
     HCATADMIN hAdmin = nullptr;
-    if (!CryptCATAdminAcquireContext2(&hAdmin, nullptr, BCRYPT_SHA256_ALGORITHM, nullptr, 0)) {
+    bool use2 = false;   // strict pairing: SHA256 context + hash2, or legacy both
+    if (acq2 && hash2 &&
+        acq2(&hAdmin, nullptr, BCRYPT_SHA256_ALGORITHM, nullptr, 0)) {
+        // Win8+: SHA256 catalog hash (matches Win10/11 catroot)
+        use2 = true;
+    } else {
+        // Win7-: SHA1 catalog system (AcquireContext default algorithm)
         if (!CryptCATAdminAcquireContext(&hAdmin, nullptr, 0)) return false;
     }
     bool ok = false;
@@ -184,7 +208,10 @@ static bool VerifyCatalogSignature(const std::wstring& path) {
     if (hFile != INVALID_HANDLE_VALUE) {
         BYTE hash[64];
         DWORD hashLen = sizeof(hash);
-        if (CryptCATAdminCalcHashFromFileHandle2(hAdmin, hFile, &hashLen, hash, 0)) {
+        bool hashed = use2
+            ? hash2(hAdmin, hFile, &hashLen, hash, 0) != 0
+            : CryptCATAdminCalcHashFromFileHandle(hFile, &hashLen, hash, 0) != 0;
+        if (hashed) {
             HCATINFO hCat = CryptCATAdminEnumCatalogFromHash(hAdmin, hash, hashLen, 0, nullptr);
             if (hCat) {
                 CATALOG_INFO ci = {};

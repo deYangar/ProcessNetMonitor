@@ -1415,6 +1415,11 @@ void CTooltipPopup::ApplyBackdrop(int effect, int opacity) {
     if (opacity < 10) opacity = 10;
     if (opacity > 100) opacity = 100;
     if (effect < 0 || effect > 3) effect = 0;
+    // 低系统门控：SWCA accent 3/4（真系统磨砂）Win10 1703 起才渲染，更早
+    // 系统亚克力/模糊档自动降级透明档——黑窗 blur 层在 Win7 Aero 上近全
+    // 黑、Basic（无 DWM）下纯黑块，不可交付（2026-10-16 兼容审查）
+    if ((effect == 0 || effect == 2) && !PNM_IsAccentBlurSupported())
+        effect = 1;
 
     // 模式集：0=亚克力 1=透明 2=模糊 3=不透明。透明系三档（0/1/2）全部
     // 走 ULW per-pixel（实测本机 DWM 对含内容的 SWCA 窗口忽略 tint alpha，
