@@ -297,7 +297,15 @@ bool Reload() {
         std::wstring fallback = LangFileFromBcp47(target);
         if (Load(dir + L"\\" + fallback)) return true;
     }
-    // 3) 中文兜底：不加载任何文件，TR 返回中文原文
+    // 3) 中文兜底：不加载任何文件，TR 返回中文原文。必须清空当前表——
+    // 语言目录通常只有 English.ini（中文=零文件设计），从英语切回
+    // auto/zh 时若保留旧表，TR 将永远停在英语（2026-10-16 咩咩实测：
+    // 「跟随系统」无法恢复中文）。旧表保留（延迟析构）防悬垂指针
+    AcquireSRWLockExclusive(&g_lock);
+    g_old_tables.push_back(std::make_shared<std::map<std::wstring, std::wstring>>(std::move(g_table)));
+    if (g_old_tables.size() > 8) g_old_tables.erase(g_old_tables.begin());
+    g_table.clear();
+    ReleaseSRWLockExclusive(&g_lock);
     return false;
 }
 
