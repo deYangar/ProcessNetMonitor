@@ -208,26 +208,27 @@ private:
     int ROW_HEIGHT = 32;
     int ICON_SIZE = 22;
     int CORNER_RADIUS = 8;
-    int MIN_WIDTH = 300;
+    int MIN_WIDTH = 260;
     int HEADER_H = 34;      // total speed header band
     int SECTION_H = 24;     // section title step
     int GAP_H = 4;          // gap between upload/download sections
     int BTN_AREA_H = 28;    // "查看详细" button band
     int BTN_H = 24;         // button inner height
-    int SPEED_AREA_W = 110; // right-aligned speed column width
+    int SPEED_AREA_W = 85;  // right-aligned speed column width（110→85，2026-10-16
+                            // 咩咩反馈进程名-流速间留白大；"10.8 KB/s" ~65px 仍宽裕）
     int STATUS_H = 18;      // status/warning line height (0 = hidden)
 
     static const int BASE_PADDING = 12;
     static const int BASE_ROW_HEIGHT = 32;
     static const int BASE_ICON_SIZE = 22;
     static const int BASE_CORNER_RADIUS = 8;
-    static const int BASE_MIN_WIDTH = 300;
+    static const int BASE_MIN_WIDTH = 260;
     static const int BASE_HEADER_H = 34;
     static const int BASE_SECTION_H = 24;
     static const int BASE_GAP_H = 4;
     static const int BASE_BTN_AREA_H = 28;
     static const int BASE_BTN_H = 24;
-    static const int BASE_SPEED_AREA_W = 110;
+    static const int BASE_SPEED_AREA_W = 85;
     static const int BASE_STATUS_H = 18;
 
     float m_dpi_scale = 1.0f;

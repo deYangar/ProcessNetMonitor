@@ -556,9 +556,12 @@ void CTooltipPopup::CalcLayout(HDC hdc, int& out_w, int& out_h, int& out_up_coun
     // of stretching the window (user request 2026-08-04).
     // Name column: ~20 chars at 100% DPI (SunloginClient fits, longer names
     // get ellipsized by DrawProcRow's truncation logic).
-    const int NAME_COL_W = (int)(105 * m_dpi_scale);
+    // 2026-10-16 咩咩反馈「进程名和流速之间留白大」：速度右对齐贴右缘，
+    // 间隙=窗口宽-两段文本宽，收窄四件套（名字列 105→90 / 列间隔 12→8 /
+    // 速度列 110→85 / 窗口下限 300→260）整体收 ~40px，长名照旧省略
+    const int NAME_COL_W = (int)(90 * m_dpi_scale);
     out_w = PADDING + ICON_SIZE + (int)(6 * m_dpi_scale) + NAME_COL_W
-            + (int)(12 * m_dpi_scale) + SPEED_AREA_W + PADDING;
+            + (int)(8 * m_dpi_scale) + SPEED_AREA_W + PADDING;
     out_w = max(out_w, MIN_WIDTH);
 
     out_h = PADDING + HEADER_H
