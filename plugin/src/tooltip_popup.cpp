@@ -18,6 +18,29 @@ CTooltipPopup* CTooltipPopup::s_instance = nullptr;
 HINSTANCE s_dll_hinst = nullptr;
 volatile bool g_shutting_down = false;
 
+// 临时诊断（2026-10-16 拖动实时反色不生效排查）：管线判定数据落盘到
+// exe 同目录 backdrop_trace.log（TM 自己在此写 global_cfg.ini，排除
+// plugins 子目录 ACL 变量）。定位后删
+static void BackdropTrace(const char* line) {
+    if (!line) return;
+    HMODULE self = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       (LPCWSTR)&BackdropTrace, &self);
+    wchar_t path[MAX_PATH] = {};
+    if (!self || !GetModuleFileNameW(self, path, MAX_PATH)) return;
+    wchar_t* slash = wcsrchr(path, L'\\');
+    if (!slash) return;
+    *slash = 0;
+    wchar_t file[MAX_PATH];
+    swprintf_s(file, MAX_PATH, L"%s\\backdrop_trace.log", path);
+    FILE* f = _wfopen(file, L"a");
+    if (!f) return;
+    fputs(line, f);
+    fputc('\n', f);
+    fclose(f);
+}
+
 void SafeDestroyWindow(HWND hwnd) {
     if (!hwnd) return;
     // Detach IME first so third-party IME hooks (e.g. Sogou) don't run inside
@@ -31,63 +54,6 @@ void SafeDestroyWindow(HWND hwnd) {
 }
 
 // ============================================================
-// Window composition: acrylic backdrop (Win10 1803+ / Win11).
-// SetWindowCompositionAttribute 是未公开 API，但它是系统通知中心/开始菜单
-// 亚克力面板的同款机制，TranslucentTB 等项目依赖十年未变。经典组合：
-// ACCENT_ENABLE_ACRYLICBLURBEHIND + DwmExtendFrameIntoClientArea(-1) ——
-// 客户区纯黑像素=玻璃（透出系统模糊），彩色内容照常显示，GDI 不写 alpha
-// 也能工作（黑色透明规则只吞 RGB(0,0,0)，本类全部前景色最浅 RGB(30,30,30)）。
-enum PNM_ACCENT_STATE {
-    PNM_ACCENT_DISABLED = 0,
-    PNM_ACCENT_ENABLE_TRANSPARENTGRADIENT = 2,   // TranslucentTB "Clear"
-    PNM_ACCENT_ENABLE_BLURBEHIND = 3,            // TranslucentTB "Blur"
-    PNM_ACCENT_ENABLE_ACRYLICBLURBEHIND = 4,     // TranslucentTB "Acrylic"
-};
-struct PNM_ACCENT_POLICY {
-    int nAccentState;
-    int nFlags;
-    UINT nColor;       // ABGR: alpha<<24 | B<<16 | G<<8 | R
-    int nAnimationId;
-};
-struct PNM_WINDOWCOMPOSITIONATTRIBDATA {
-    int nAttribute;    // 19 = WCA_ACCENT_POLICY
-    void* pData;
-    ULONG dataSize;
-};
-typedef BOOL(WINAPI* PFN_SetWindowCompositionAttribute)(HWND, PNM_WINDOWCOMPOSITIONATTRIBDATA*);
-
-static PFN_SetWindowCompositionAttribute PNM_GetSWCA() {
-    static PFN_SetWindowCompositionAttribute pfn = nullptr;
-    static bool tried = false;
-    if (!tried) {
-        tried = true;
-        HMODULE user32 = GetModuleHandleW(L"user32.dll");
-        if (user32)
-            pfn = (PFN_SetWindowCompositionAttribute)GetProcAddress(
-                user32, "SetWindowCompositionAttribute");
-    }
-    return pfn;
-}
-
-// ACCENT_ENABLE_ACRYLICBLURBEHIND 需要 Win10 1803 (build 17134)+。
-// RtlGetVersion 不受 manifest 兼容性声明影响（GetVersionEx 会按兼容模式谎报）。
-bool CTooltipPopup::AcrylicSupported() {
-    static int cached = -1;
-    if (cached < 0) {
-        typedef LONG(WINAPI* PFN_RtlGetVersion)(void*);  // PRTL_OSVERSIONINFOW
-        HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-        PFN_RtlGetVersion pfn = ntdll
-            ? (PFN_RtlGetVersion)GetProcAddress(ntdll, "RtlGetVersion") : nullptr;
-        cached = 0;
-        if (pfn) {
-            OSVERSIONINFOW vi = {};  // layout-compatible with RTL_OSVERSIONINFOW
-            vi.dwOSVersionInfoSize = sizeof(vi);
-            if (pfn(&vi) == 0 && vi.dwBuildNumber >= 17134)
-                cached = 1;
-        }
-    }
-    return cached != 0;
-}
 // Helper: find TrafficMonitor's native tooltip windows
 // ============================================================
 
@@ -272,20 +238,17 @@ CTooltipPopup::~CTooltipPopup() {
             m_hwnd = nullptr;
         }
     }
-    // ULW + coverage 双底色渲染资源释放；blur 效果层窗口销毁
-    if (m_blur_hwnd) {
-        if (!g_shutting_down) SafeDestroyWindow(m_blur_hwnd);
-        m_blur_hwnd = nullptr;
-    }
-    HDC cov_dcs[3] = { m_cov_a_dc, m_cov_c_dc, m_ulw_dc };
-    HBITMAP cov_bmps[3] = { m_cov_a_bmp, m_cov_c_bmp, m_ulw_bmp };
-    for (int i = 0; i < 3; i++) {
+    DestroyBlurLayer();
+    // ULW + coverage 双底色 + 采样表面资源释放
+    HDC cov_dcs[4] = { m_cov_a_dc, m_cov_c_dc, m_ulw_dc, m_snap_dc };
+    HBITMAP cov_bmps[4] = { m_cov_a_bmp, m_cov_c_bmp, m_ulw_bmp, m_snap_bmp };
+    for (int i = 0; i < 4; i++) {
         if (cov_dcs[i]) DeleteDC(cov_dcs[i]);
         if (cov_bmps[i]) DeleteObject(cov_bmps[i]);
     }
-    m_cov_a_dc = m_cov_c_dc = m_ulw_dc = nullptr;
-    m_cov_a_bmp = m_cov_c_bmp = m_ulw_bmp = nullptr;
-    m_cov_a_bits = m_cov_c_bits = m_ulw_bits = nullptr;
+    m_cov_a_dc = m_cov_c_dc = m_ulw_dc = m_snap_dc = nullptr;
+    m_cov_a_bmp = m_cov_c_bmp = m_ulw_bmp = m_snap_bmp = nullptr;
+    m_cov_a_bits = m_cov_c_bits = m_ulw_bits = m_snap_bits = nullptr;
     for (auto& [path, icon] : m_icon_cache) {
         if (icon) DestroyIcon(icon);
     }
@@ -351,10 +314,16 @@ bool CTooltipPopup::Initialize(HINSTANCE hInst) {
     // Subclass: replace the WndProc with ours
     SetWindowLongPtrW(m_hwnd, GWLP_WNDPROC, (LONG_PTR)StaticWndProc);
 
-    // Enable rounded corners via DWM (Windows 11+)
-    int corner_pref = 2; // DWMWCP_ROUND
+    // 圆角由 ULW 表面 alpha 自绘（ComposeLayeredSurface 的几何 coverage）。
+    // DWM 侧显式「不要圆角」：删除设置≠禁用（DWMWCP_DEFAULT 仍可能被
+    // 系统策略圆角并附带背板/阴影——2026-10-16 咩咩反馈的窗外一圈暗晕，
+    // 第一轮只删设置没禁掉）。DONOTROUND + NC 渲染策略禁用双保险
+    int corner_pref = 1;  // DWMWCP_DONOTROUND
     DwmSetWindowAttribute(m_hwnd, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */,
                           &corner_pref, sizeof(corner_pref));
+    int nc_policy = 2;    // DWMNCRP_DISABLED
+    DwmSetWindowAttribute(m_hwnd, 2 /* DWMWA_NCRENDERING_POLICY */,
+                          &nc_policy, sizeof(nc_policy));
 
     // Set initial window region for rounded corners (will be updated on resize)
     HRGN rgn = CreateRoundRectRgn(0, 0, 300, 400, CORNER_RADIUS * 2, CORNER_RADIUS * 2);
@@ -384,6 +353,7 @@ bool CTooltipPopup::Initialize(HINSTANCE hInst) {
     if (m_watchdog_hwnd)
         SetTimer(m_watchdog_hwnd, TIMER_WATCHDOG, 1000, nullptr);
 
+    BackdropTrace("[init] popup initialized");
     return true;
 }
 
@@ -579,8 +549,9 @@ void CTooltipPopup::CalcLayout(HDC hdc, int& out_w, int& out_h, int& out_up_coun
 void CTooltipPopup::DrawBackground(HDC hdc, int w, int h, bool content_only) {
     if (m_acrylic_active) {
         // ULW 模式：coverage pass（白/黑底）上只画边框线——背景由
-        // ComposeLayeredSurface 的面板色×opacity alpha 提供；边框作为
-        // 内容参与双底色解算（精确半透明边缘）
+        // ComposeLayeredSurface 提供（自绘档=烘焙模糊背景，透明档=
+        // 面板色×opacity alpha）；边框作为内容参与双底色解算（精确
+        // 半透明边缘）
         HPEN hPen = CreatePen(PS_SOLID, 1, UseTextTheme() ? RGB(55, 55, 55) : RGB(220, 220, 220));
         HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
         HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
@@ -709,18 +680,53 @@ void CTooltipPopup::DrawProcRow(HDC hdc, int y, const ProcDisplayInfo& proc, boo
 }
 
 // ============================================================
-// ULW per-pixel presentation + blur 效果层
+// ULW per-pixel presentation + 自绘模糊背景管线
 // ============================================================
 
 // 实测（2026-10-16 harness 四轮 + SWCA 探针矩阵）：本机 DWM 对含内容
 // 像素的 SWCA 窗口忽略 tint alpha（一律全浓度渲染）——「浓度」在 SWCA
-// 单窗口架构上必然失控。终局：透明系三档全部走 UpdateLayeredWindow
-// （premultiplied per-pixel，语义文档稳定），磨砂由独立 blur 层提供。
+// 单窗口架构上必然失控。终局（方案 B，2026-10-16 咩咩拍板）：背景像素
+// ============================================================
+// SWCA（SetWindowCompositionAttribute，未公开但自 Win8 起稳定存在）
+// ============================================================
 
-// blur 效果层：无内容的纯黑窗（黑刷类）——「全透窗口」路径下 SWCA tint
-// alpha 语义正常（探针实证递变），设近全透 tint 只取系统模糊。优先系统
-// 真 Acrylic 材质（DWMSBT_TRANSIENTWINDOW：噪声/饱和度/luminosity），
-// Win11 22H2 以下回退 SWCA
+enum PNM_ACCENT_STATE {
+    PNM_ACCENT_DISABLED = 0,
+    PNM_ACCENT_ENABLE_TRANSPARENTGRADIENT = 2,   // TranslucentTB "Clear"
+    PNM_ACCENT_ENABLE_BLURBEHIND = 3,            // TranslucentTB "Blur"
+    PNM_ACCENT_ENABLE_ACRYLICBLURBEHIND = 4,     // TranslucentTB "Acrylic"
+};
+
+struct PNM_ACCENT_POLICY {
+    int nAccentState;
+    int nFlags;
+    UINT nColor;       // ABGR: alpha<<24 | B<<16 | G<<8 | R
+    int nAnimationId;
+};
+struct PNM_WINDOWCOMPOSITIONATTRIBDATA {
+    int nAttribute;    // 19 = WCA_ACCENT_POLICY
+    void* pData;
+    ULONG dataSize;
+};
+typedef BOOL(WINAPI* PFN_SetWindowCompositionAttribute)(HWND, PNM_WINDOWCOMPOSITIONATTRIBDATA*);
+
+static PFN_SetWindowCompositionAttribute PNM_GetSWCA() {
+    static PFN_SetWindowCompositionAttribute pfn = nullptr;
+    static bool tried = false;
+    if (!tried) {
+        tried = true;
+        HMODULE user32 = GetModuleHandleW(L"user32.dll");
+        if (user32)
+            pfn = (PFN_SetWindowCompositionAttribute)GetProcAddress(
+                user32, "SetWindowCompositionAttribute");
+    }
+    return pfn;
+}
+
+// blur 效果层（方案 A'，2026-10-16 咩咩拍板回归系统实时通道）：无内容
+// 纯黑窗 + SWCA 只取系统模糊（tint alpha=1 近全透）。DWM 硬件逐帧合成
+// ——背后视频/滚动实时跟随（探针实测 50-100ms），零 CPU 永不闪。上
+// 层 ULW 内容层以 panel×op 半透明盖在其上（浓度公式探针实测精确吻合）
 void CTooltipPopup::EnsureBlurLayer() {
     if (m_blur_hwnd) return;
 
@@ -743,16 +749,18 @@ void CTooltipPopup::EnsureBlurLayer() {
         0, 0, 300, 400, NULL, NULL, m_hinst, NULL);
     if (!m_blur_hwnd) return;
 
+    // blur 层圆角跟 ULW 层对齐（模糊直角会从圆角外露出）
     int corner_pref = 2;  // DWMWCP_ROUND
     DwmSetWindowAttribute(m_blur_hwnd, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */,
                           &corner_pref, sizeof(corner_pref));
     MARGINS glass = { -1, -1, -1, -1 };
     DwmExtendFrameIntoClientArea(m_blur_hwnd, &glass);
 
-    // ⚠️ 不用 DWMSBT_TRANSIENTWINDOW：26300 实测纯黑 GDI 窗上它只渲染
-    // 材质 tint 纯色（不透不模糊，lap_var=0.0）——透明要求真 alpha 通道。
-    // SWCA ACRYLICBLURBEHIND + 近全透 tint 实测提供真 blur behind
-    // （lap_var≈24）。亚克力/模糊两档的区分由上层面板噪声纹理实现
+    // ⚠️ 不用 DWMSBT：26300 实测纯黑 GDI 窗上只渲染 tint 纯色（不透不
+    // 模糊，2026-10-16 二次复核 extend/bare 两姿势同样死）。SWCA
+    // ACRYLICBLURBEHIND + 近全透 tint 实测提供真 blur behind（探针
+    // tools/systembackdrop_probe：棋盘 lap_var 2.3 vs 无模糊数千）。
+    // 亚克力/模糊两档的区分由上层面板噪声纹理实现（st3/st4 渲染已合并）
     PNM_ACCENT_POLICY policy = {};
     policy.nAccentState = PNM_ACCENT_ENABLE_ACRYLICBLURBEHIND;
     policy.nColor = 0x01000000;  // alpha=1：只取系统模糊，不叠色
@@ -769,37 +777,19 @@ void CTooltipPopup::DestroyBlurLayer() {
     m_blur_hwnd = nullptr;
 }
 
-// DWMWA_SYSTEMBACKDROP_TYPE 需要 Win11 22H2 (build 22621)+
-bool CTooltipPopup::SystemBackdropSupported() {
-    static int cached = -1;
-    if (cached < 0) {
-        typedef LONG(WINAPI* PFN_RtlGetVersion)(void*);
-        HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-        PFN_RtlGetVersion pfn = ntdll
-            ? (PFN_RtlGetVersion)GetProcAddress(ntdll, "RtlGetVersion") : nullptr;
-        cached = 0;
-        if (pfn) {
-            OSVERSIONINFOW vi = {};
-            vi.dwOSVersionInfoSize = sizeof(vi);
-            if (pfn(&vi) == 0 && vi.dwBuildNumber >= 22621)
-                cached = 1;
-        }
-    }
-    return cached != 0;
-}
-
-// ULW 表面（32bpp DIB）+ coverage 双底 pass（A 白底 / C 黑底）。尺寸变化
-// 时整体重建；直接像素访问
+// ULW 表面（32bpp DIB）+ coverage 双底 pass（A 白底 / C 黑底）+ 背景
+// 采样表面。尺寸变化时整体重建；直接像素访问
 bool CTooltipPopup::EnsureLayeredSurface(int w, int h) {
     if (w <= 0 || h <= 0) return false;
-    if (m_ulw_dc && m_ulw_bmp && m_cov_a_dc && m_cov_c_dc &&
+    if (m_ulw_dc && m_ulw_bmp && m_cov_a_dc && m_cov_c_dc && m_snap_dc &&
         w == m_ulw_w && h == m_ulw_h)
         return true;
 
-    struct { HDC* dc; HBITMAP* bmp; void** bits; } surfs[3] = {
-        { &m_cov_a_dc, &m_cov_a_bmp, &m_cov_a_bits },
-        { &m_cov_c_dc, &m_cov_c_bmp, &m_cov_c_bits },
-        { &m_ulw_dc, &m_ulw_bmp, &m_ulw_bits },
+    struct { HDC* dc; HBITMAP* bmp; void** bits; int bw, bh; } surfs[4] = {
+        { &m_cov_a_dc, &m_cov_a_bmp, &m_cov_a_bits, w, h },
+        { &m_cov_c_dc, &m_cov_c_bmp, &m_cov_c_bits, w, h },
+        { &m_ulw_dc, &m_ulw_bmp, &m_ulw_bits, w, h },
+        { &m_snap_dc, &m_snap_bmp, &m_snap_bits, w, h },
     };
     for (auto& s : surfs) {
         if (*s.dc) { DeleteDC(*s.dc); *s.dc = nullptr; }
@@ -807,8 +797,8 @@ bool CTooltipPopup::EnsureLayeredSurface(int w, int h) {
         *s.bits = nullptr;
         BITMAPINFO bi = {};
         bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        bi.bmiHeader.biWidth = w;
-        bi.bmiHeader.biHeight = -h;   // top-down
+        bi.bmiHeader.biWidth = s.bw;
+        bi.bmiHeader.biHeight = -s.bh;   // top-down
         bi.bmiHeader.biPlanes = 1;
         bi.bmiHeader.biBitCount = 32;
         bi.bmiHeader.biCompression = BI_RGB;
@@ -827,11 +817,12 @@ bool CTooltipPopup::EnsureLayeredSurface(int w, int h) {
 // coverage 双底色解覆盖率（白底 A / 黑底 C 各画一遍）：
 //   c = 1 - (A - C) / 255      （真实覆盖率，三通道均值消抖动）
 //   f = (A - 255×(1-c)) / c    （还原内容色）
-// 直接在 ULW 表面上合成 premultiplied ARGB：
-//   纯背景 (c=0)  → rgb = panel×op, a = op（透出 blur 层/桌面）
+// 直接在 ULW 表面上合成 premultiplied ARGB。透明系三档统一公式（方案 A'）：
+//   纯背景 (c=0)  → rgb = panel×op（预乘）, a = op——透出 blur 层系统
+//                   模糊（亚克力/模糊档）或桌面（透明档）；亚克力档背景
+//                   叠确定性噪声
 //   实心内容 (c=1) → rgb = f, a = 255
 //   边缘 → a = 255c + op(1-c)；rgb = f×c + panel×op×(1-c)（预乘形式）
-//   圆角 ×几何 coverage。任何单底猜 alpha 的近似（黑晕/描边环）被取代
 void CTooltipPopup::ComposeLayeredSurface(int w, int h) {
     if (!m_cov_a_bits || !m_cov_c_bits || !m_ulw_bits) return;
     unsigned char* pa = (unsigned char*)m_cov_a_bits;
@@ -865,6 +856,16 @@ void CTooltipPopup::ComposeLayeredSurface(int w, int h) {
             size_t i = ((size_t)y * w + x) * 4;
             int da = (pa[i] - pc[i]) + (pa[i + 1] - pc[i + 1]) + (pa[i + 2] - pc[i + 2]);
             int cov255 = 255 - (da + 1) / 3;   // 内容覆盖率 c×255
+
+            // 亚克力噪声（Fluent 亚克力与纯模糊的标志性区别；确定性
+            // 哈希避免逐帧闪烁）——叠在半透明面板色上，随浓度透出
+            int nz = 0;
+            if (m_noise_acrylic) {
+                nz = ((x * 73856093) ^ (y * 19349663)) & 7;  // 0..7
+                nz = nz - 3;                                   // -3..+3
+            }
+
+            // ---- 透明系统一公式（透出 blur 层系统模糊 / 桌面）----
             int a = cov255 + (bg_a * (255 - cov255) + 127) / 255;
             a = (int)(a * cov + 0.5f);
             if (a <= 0) {
@@ -877,28 +878,23 @@ void CTooltipPopup::ComposeLayeredSurface(int w, int h) {
                 pw[i + 1] = (unsigned char)min(255, (int)(pc[i + 1] * cov + 0.5f));
                 pw[i + 2] = (unsigned char)min(255, (int)(pc[i + 2] * cov + 0.5f));
             } else if (cov255 <= 0) {
-                // 纯背景：panel×op 预乘；亚克力档叠加细噪声（Fluent 亚克力
-                // 与纯模糊的标志性区别；确定性哈希避免逐帧闪烁）
-                int nz = 0;
-                if (m_noise_acrylic) {
-                    nz = ((x * 73856093) ^ (y * 19349663)) & 7;  // 0..7
-                    nz = nz - 3;                                   // -3..+3
-                }
-                int bb = pb * bg_a / 255 + nz;
-                int bgg = pg * bg_a / 255 + nz;
-                int brr = pr * bg_a / 255 + nz;
-                pw[i]     = (unsigned char)max(0, min(255, (int)(bb * cov + 0.5f)));
-                pw[i + 1] = (unsigned char)max(0, min(255, (int)(bgg * cov + 0.5f)));
-                pw[i + 2] = (unsigned char)max(0, min(255, (int)(brr * cov + 0.5f)));
+                // 纯背景：panel(+噪声)×op 预乘
+                int bb = max(0, min(255, pb + nz)) * bg_a / 255;
+                int bgg = max(0, min(255, pg + nz)) * bg_a / 255;
+                int brr = max(0, min(255, pr + nz)) * bg_a / 255;
+                pw[i]     = (unsigned char)min(255, (int)(bb * cov + 0.5f));
+                pw[i + 1] = (unsigned char)min(255, (int)(bgg * cov + 0.5f));
+                pw[i + 2] = (unsigned char)min(255, (int)(brr * cov + 0.5f));
             } else {
-                // 边缘：内容与背景层的预乘复合
+                // 边缘：内容与背景层的预乘复合（背景带噪声）
                 int inv = 255 - cov255;        // 255(1-c)
                 int fr = (pa[i + 2] - inv) * 255 / cov255;
                 int fg = (pa[i + 1] - inv) * 255 / cov255;
                 int fb = (pa[i]     - inv) * 255 / cov255;
-                int er = fr * cov255 / 255 + pr * bg_a / 255 * inv / 255;
-                int eg = fg * cov255 / 255 + pg * bg_a / 255 * inv / 255;
-                int eb = fb * cov255 / 255 + pb * bg_a / 255 * inv / 255;
+                int pnr = max(0, pr + nz), png = max(0, pg + nz), pnb = max(0, pb + nz);
+                int er = fr * cov255 / 255 + pnr * bg_a / 255 * inv / 255;
+                int eg = fg * cov255 / 255 + png * bg_a / 255 * inv / 255;
+                int eb = fb * cov255 / 255 + pnb * bg_a / 255 * inv / 255;
                 pw[i]     = (unsigned char)max(0, min(255, (int)(eb * cov + 0.5f)));
                 pw[i + 1] = (unsigned char)max(0, min(255, (int)(eg * cov + 0.5f)));
                 pw[i + 2] = (unsigned char)max(0, min(255, (int)(er * cov + 0.5f)));
@@ -915,60 +911,118 @@ void CTooltipPopup::ComposeLayeredSurface(int w, int h) {
     ReleaseDC(NULL, screen);
 }
 
-// 文字自适应反色：ULW 背景是半透明面板（op×panel + (1-op)×背后内容），
-// 低浓度时背景观感≈桌面——主题文字色可能与背景撞色。显示前截屏该区域
-// 算有效背景亮度，与「主题文字色的对比」不足阈值则翻转文字深浅
-void CTooltipPopup::UpdateAdaptiveTextTheme(const RECT& popup_rect) {
+// 截屏前把 ULW 表面清空提交：窗口可见时直接 BitBlt 会把自己截进去
+// （探针实证：带/不带 CAPTUREBLT 均 100% 自截），提交全透明表面后同步
+// 立即截则 0% 自截。清空→截屏→新表面提交都在同一消息处理内完成，
+// DWM 合成看不到中间帧。清空提交带新尺寸时窗口同步 resize（透明状态
+// 下不可见，无副作用）
+void CTooltipPopup::ClearLayeredSurfaceForCapture() {
+    if (!m_hwnd || !m_ulw_dc || !m_ulw_bits || m_ulw_w <= 0 || m_ulw_h <= 0)
+        return;
+    memset(m_ulw_bits, 0, (size_t)m_ulw_w * m_ulw_h * 4);
+    SIZE size = { m_ulw_w, m_ulw_h };
+    POINT src = { 0, 0 };
+    BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+    HDC screen = GetDC(NULL);
+    BOOL ok = UpdateLayeredWindow(m_hwnd, screen, NULL, &size, m_ulw_dc, &src, 0, &bf, ULW_ALPHA);
+    ReleaseDC(NULL, screen);
+    char line[128];
+    sprintf_s(line, 128, "[clear] ulw_ret=%d size=%dx%d", (int)ok, m_ulw_w, m_ulw_h);
+    BackdropTrace(line);
+}
+
+// affinity 无闪截屏：WDA_EXCLUDEFROMCAPTURE 期间窗口从一切屏幕捕获中
+// 剔除、用户肉眼显示不受影响——BitBlt 拿到窗口脚下真实桌面，全程窗口
+// 可见零闪。探针实测（tools/affinity_probe，2026-10-16）：对 ULW 分层
+// 窗口即时生效（无需等合成帧）、可逆，SRCCOPY/CAPTUREBLT 两 flag 均剔除。
+// 设置失败（Win10 2004 前的老系统）记 m_affinity_ok=false 永久禁用静止
+// 刷新——那种系统只能清空法，每周期闪一次不可接受
+bool CTooltipPopup::CaptureSnapNoFlash(const RECT& popup_rect, int w, int h) {
+    if (!m_hwnd || !m_snap_dc || !m_snap_bits) return false;
+    if (!SetWindowDisplayAffinity(m_hwnd, WDA_EXCLUDEFROMCAPTURE)) {
+        m_affinity_ok = false;
+        return false;
+    }
+    HDC scr = GetDC(NULL);
+    BitBlt(m_snap_dc, 0, 0, w, h, scr, popup_rect.left, popup_rect.top,
+           SRCCOPY | CAPTUREBLT);
+    ReleaseDC(NULL, scr);
+    SetWindowDisplayAffinity(m_hwnd, 0);
+    return true;
+}
+
+// 背景亮度采样 + 文字反色判定（方案 A'：背景磨砂由 blur 层系统实时合
+// 成，本函数只负责文字深浅跟随背景亮度）。截屏来源两通道：
+//   a) affinity 无闪截屏——窗口从捕获中剔除、显示不受影响（探针
+//      tools/affinity_probe 实测 ULW 即时生效可逆）；亚克力/模糊档截到
+//      的正是 blur 层的模糊画面（天然平滑，均值稳定）
+//   b) 清空表面→截屏——affinity 不可用的兜底（首显时窗口未上屏天然
+//      干净；静止刷新在 affinity 不可用时不跑，不会走这条闪的路）
+// 亮度公式承自旧 UpdateAdaptiveTextTheme：观感亮度与主题文字色对比
+// 不足则翻转深浅
+void CTooltipPopup::RefreshBackdrop(const RECT& popup_rect, bool trace) {
     m_text_adaptive = false;
     m_text_dark = m_dark_mode;
     if (!m_acrylic_active) return;
 
-    int op = m_backdrop_opacity < 0 ? 100 : m_backdrop_opacity;
-    if (op >= 80) return;  // 高浓度背景≈面板色，主题色已保证对比
-
     int w = popup_rect.right - popup_rect.left;
     int h = popup_rect.bottom - popup_rect.top;
     if (w <= 0 || h <= 0) return;
-    // 降采样截屏算亮度（4px 步进足够）
-    HDC scr = GetDC(NULL);
-    HDC mem = CreateCompatibleDC(scr);
-    BITMAPINFO bi = {};
-    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bi.bmiHeader.biWidth = w; bi.bmiHeader.biHeight = -h;
-    bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32;
-    void* bits = nullptr;
-    HBITMAP bmp = CreateDIBSection(NULL, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
-    if (!bmp) { DeleteDC(mem); ReleaseDC(NULL, scr); return; }
-    HGDIOBJ old = SelectObject(mem, bmp);
-    BitBlt(mem, 0, 0, w, h, scr, popup_rect.left, popup_rect.top, SRCCOPY | CAPTUREBLT);
-    SelectObject(mem, old);
+    if (!EnsureLayeredSurface(w, h)) return;
 
-    // ⚠️ 像素遍历必须在 DeleteObject 之前——DIB 的 bits 归位图所有，
-    // 删了再读就是 use-after-free（0:53 崩溃根因：堆被打坏后 TM 死在
-    // 无辜的 vector 赋值里）
-    long long lum_sum = 0; int n = 0;
-    unsigned char* p8 = (unsigned char*)bits;
-    for (int y = 0; y < h; y += 4)
-        for (int x = 0; x < w; x += 4) {
-            size_t i = ((size_t)y * w + x) * 4;
-            lum_sum += (299 * p8[i + 2] + 587 * p8[i + 1] + 114 * p8[i]) / 1000;
-            n++;
-        }
-    DeleteObject(bmp);
-    DeleteDC(mem);
-    ReleaseDC(NULL, scr);
-    if (!n) return;
-    double screen_lum = (double)lum_sum / n;
+    int op = m_backdrop_opacity < 0 ? 100 : m_backdrop_opacity;
+
+    if (!CaptureSnapNoFlash(popup_rect, w, h)) {
+        if (m_visible) ClearLayeredSurfaceForCapture();
+        HDC scr = GetDC(NULL);
+        BitBlt(m_snap_dc, 0, 0, w, h, scr, popup_rect.left, popup_rect.top,
+               SRCCOPY | CAPTUREBLT);
+        ReleaseDC(NULL, scr);
+    }
+
+    // 均值亮度（4px 步进采样足够；截到的画面已是模糊合成结果）
+    long long lum_sum = 0;
+    int lum_n = 0;
+    {
+        unsigned char* p8 = (unsigned char*)m_snap_bits;
+        for (int y = 0; y < h; y += 4)
+            for (int x = 0; x < w; x += 4) {
+                size_t i = ((size_t)y * w + x) * 4;
+                lum_sum += (299 * p8[i + 2] + 587 * p8[i + 1] + 114 * p8[i]) / 1000;
+                lum_n++;
+            }
+    }
+    double screen_lum = lum_n ? (double)lum_sum / lum_n : -1.0;
+
+    if (trace) {
+        char line[192];
+        sprintf_s(line, 192, "[snap] vis=%d rect=(%d,%d)-(%d,%d) lum=%.1f op=%d",
+                  (int)m_visible, popup_rect.left, popup_rect.top,
+                  popup_rect.right, popup_rect.bottom, screen_lum, op);
+        BackdropTrace(line);
+    }
+
+    // 反色判定（高浓度背景≈面板色，主题色已保证对比）
+    if (screen_lum < 0.0 || op >= 80) return;
     COLORREF panel = GetBgColor();
     double panel_lum = (299.0 * GetRValue(panel) + 587.0 * GetGValue(panel)
                         + 114.0 * GetBValue(panel)) / 1000.0;
     double bg_lum = (op / 100.0) * panel_lum + (1.0 - op / 100.0) * screen_lum;
     // 文字色亮度（深色主题=浅字 240 / 浅色主题=深字 30）
     double text_lum = m_dark_mode ? 240.0 : 30.0;
-    if (fabs(bg_lum - text_lum) < 70.0) {
+    bool flip = (fabs(bg_lum - text_lum) < 70.0);
+    if (flip) {
         // 撞色：翻转文字深浅
         m_text_dark = !m_dark_mode;
         m_text_adaptive = true;
+    }
+    if (trace) {
+        char line[192];
+        sprintf_s(line, 192,
+                  "[judge] panel_lum=%.1f bg_lum=%.1f text_lum=%.1f diff=%.1f flip=%d adapt=%d text_dark=%d",
+                  panel_lum, bg_lum, text_lum, fabs(bg_lum - text_lum), (int)flip,
+                  (int)m_text_adaptive, (int)m_text_dark);
+        BackdropTrace(line);
     }
 }
 
@@ -1280,11 +1334,14 @@ void CTooltipPopup::PositionWindow(const RECT& anchor_rect) {
     if (y + ph > work.bottom) y = work.bottom - ph - margin;
     if (y < work.top) y = work.top + margin;
 
-    // 文字自适应反色：首次显示（m_visible 尚未置位）时截屏该区域算背景
-    // 有效亮度——此刻窗口还没上屏，截到的是纯桌面/背后内容
-    if (!m_visible) {
-        RECT will = { x, y, x + pw, y + ph };
-        UpdateAdaptiveTextTheme(will);
+    // 文字反色判定（首显：窗口未上屏，截屏天然干净）。背景磨砂由
+    // blur 层 DWM 实时合成，移动中无需任何重采样
+    RECT will = { x, y, x + pw, y + ph };
+    if (m_acrylic_active && !m_visible) {
+        RefreshBackdrop(will);
+        m_last_snap_rect = will;
+        m_last_refresh_tick = GetTickCount64();
+        BackdropTrace("[poswin] judge(first-show)");
     }
 
     // 双层呈现：blur 效果层先就位（同 rect），内容层随后压在其上
@@ -1297,14 +1354,17 @@ void CTooltipPopup::PositionWindow(const RECT& anchor_rect) {
 
     // Update window region for rounded corners (fixes black corner issue).
     // Skipped in layered mode: the rounded shape lives in the ULW alpha
-    // (SetWindowRgn would tear the layered surface); the blur layer's
-    // DWMWA_WINDOW_CORNER_PREFERENCE rounding takes over underneath.
+    // (SetWindowRgn would tear the layered surface).
     if (!m_acrylic_active) {
         HRGN rgn = CreateRoundRectRgn(0, 0, pw, ph, CORNER_RADIUS * 2, CORNER_RADIUS * 2);
         SetWindowRgn(m_hwnd, rgn, FALSE);
     }
 
     m_visible = true;
+
+    // 重采样的「清空表面 → 新表面」之间不落消息间隙：同步画一帧提交
+    // ULW，DWM 合成不到中间的全透明帧（重定位/拖动跟随路径全走这里）
+    if (m_acrylic_active) UpdateWindow(m_hwnd);
 
     // Start mouse tracking
     if (!m_tracking) {
@@ -1326,12 +1386,17 @@ void CTooltipPopup::ApplyBackdrop(int effect, int opacity) {
 
     // 模式集：0=亚克力 1=透明 2=模糊 3=不透明。透明系三档（0/1/2）全部
     // 走 ULW per-pixel（实测本机 DWM 对含内容的 SWCA 窗口忽略 tint alpha，
-    // 浓度不可控——ULW 是唯一稳定通道）；亚克力/模糊额外挂 blur 效果层
-    // （亚克力=系统 Acrylic 材质优先，模糊同为 SWCA blur），透明档不挂。
-    // AcrylicSupported() 在此架构里只约束 blur 层的 SWCA 兜底
+    // 浓度不可控——ULW 是唯一稳定通道）。磨砂由自绘模糊管线提供（方案
+    // B）：亚克力=模糊烘焙+噪声，模糊=纯模糊烘焙，透明=真半透明不烘焙
     bool want_layered = (effect != 3);
     int target = want_layered ? 1 : 0;
     bool dark = IsDarkMode();
+    {
+        char line[160];
+        sprintf_s(line, 160, "[apply] effect=%d opacity=%d target=%d mode=%d acrylic=%d",
+                  effect, opacity, target, m_backdrop_mode, (int)m_acrylic_active);
+        BackdropTrace(line);
+    }
     if (target == m_backdrop_mode &&
         (target != 1 || (effect == m_backdrop_effect &&
                          dark == m_acrylic_dark &&
@@ -1340,7 +1405,6 @@ void CTooltipPopup::ApplyBackdrop(int effect, int opacity) {
 
     // --- Tear down: leave layered mode ----------------------------------
     if (m_backdrop_mode == 1 && target != 1) {
-        DestroyBlurLayer();
         m_acrylic_active = false;
         // ULW 用过 WS_EX_LAYERED：复位成普通窗口（下一轮显示前普通
         // 双缓冲路径直接 BitBlt 即可，LWA_ALPHA 从未设置过）
@@ -1355,10 +1419,10 @@ void CTooltipPopup::ApplyBackdrop(int effect, int opacity) {
         SetWindowRgn(m_hwnd, nullptr, FALSE);
         LONG_PTR ex = GetWindowLongPtrW(m_hwnd, GWL_EXSTYLE);
         SetWindowLongPtrW(m_hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED);
-        // blur 效果层：亚克力/模糊档挂（SWCA 真模糊）；「透明」档无模糊。
-        // 亚克力的 Fluent 质感=blur 层+面板噪声纹理（m_noise_acrylic），
-        // 模糊档=纯磨砂无噪声——两档在 26300 上由此可辨（SWCA st3/st4
-        // 渲染已合并，实测无差）
+        // blur 效果层：亚克力/模糊档挂（SWCA 系统实时模糊）；「透明」档
+        // 无模糊。亚克力的 Fluent 质感=blur 层+面板噪声纹理（m_noise_
+        // acrylic），模糊档=纯磨砂无噪声——两档在 26300 上由此可辨
+        // （SWCA st3/st4 渲染已合并，实测无差）
         m_noise_acrylic = (effect == 0);
         if (effect == 0 || effect == 2) {
             EnsureBlurLayer();
@@ -1375,11 +1439,14 @@ void CTooltipPopup::ApplyBackdrop(int effect, int opacity) {
         HRGN rgn = CreateRoundRectRgn(0, 0, rc.right, rc.bottom,
                                       CORNER_RADIUS * 2, CORNER_RADIUS * 2);
         SetWindowRgn(m_hwnd, rgn, FALSE);
+        if (m_blur_hwnd) DestroyBlurLayer();
     }
 
     m_backdrop_mode = target;
     m_backdrop_effect = effect;
     m_backdrop_opacity = opacity;
+    // 效果/浓度变了：反色判定基准作废，下次显示时重判
+    m_last_snap_rect = {};
     InvalidateRect(m_hwnd, NULL, FALSE);
 }
 
@@ -1444,6 +1511,26 @@ void CTooltipPopup::UpdateData(const std::vector<ProcDisplayInfo>& procs,
     m_total_down = total_down;
     m_status = status ? status : L"";
     if (m_visible) {
+        // 静止期反色判定（方案 A'）：背景磨砂由 blur 层 DWM 逐帧实时合
+        // 成无需插件刷新，只有文字深浅需要低频跟随背景亮度。静止判据=
+        // 当前矩形与上次判定一致（拖动中不判，避免翻字闪烁）；周期
+        // 300ms；affinity 不可用（老系统）不跑——清空法截屏每周期闪一
+        // 次不可接受，文字色停留在首显判定。判定变化才重绘
+        RECT cur;
+        GetWindowRect(m_hwnd, &cur);
+        if (m_acrylic_active && m_affinity_ok &&
+            EqualRect(&cur, &m_last_snap_rect) &&
+            GetTickCount64() - m_last_refresh_tick >= 300) {
+            bool text_dark_before = m_text_dark;
+            bool adapt_before = m_text_adaptive;
+            RefreshBackdrop(cur, false);
+            m_last_refresh_tick = GetTickCount64();
+            if (m_text_dark != text_dark_before || m_text_adaptive != adapt_before) {
+                m_last_snap_rect = cur;
+                InvalidateRect(m_hwnd, NULL, FALSE);
+                BackdropTrace("[tick] text-flip(refresh)");
+            }
+        }
         // Recalculate size: new processes may have appeared since we first showed
         RECT old_rc;
         GetWindowRect(m_hwnd, &old_rc);
@@ -1595,6 +1682,9 @@ void CTooltipPopup::Hide() {
         m_hovering = false;
         m_tracking = false;
         m_hover_up = m_hover_down = m_hover_btn = false;
+        // 反色判定基准过期：下次显示时 PositionWindow 必重判（隐含期间
+        // 背后内容已变化）
+        m_last_snap_rect = {};
     }
 }
 

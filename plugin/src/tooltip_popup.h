@@ -59,16 +59,13 @@ public:
     UINT GetWatchdogHeals() const { return m_watchdog_heals; }
 
     // Backdrop effect for the popup (popup_effect setting):
-    //   0 = acrylic  (ULW + blur 效果层)
-    //   1 = transparent (纯 ULW，无模糊)
-    //   2 = blur     (ULW + blur 效果层)
+    //   0 = acrylic  (自绘模糊管线 + 噪声)
+    //   1 = transparent (纯 ULW 真半透明，无模糊)
+    //   2 = blur     (自绘模糊管线，无噪声)
     //   3 = opaque   (plain window)
-    // opacity: 10-100 = ULW 背景像素 alpha（面板浓度），文字始终不透明；
+    // opacity: 10-100 = 面板色混入模糊背景的比例（浓度），文字始终不透明；
     // 仅不透明模式禁用。Idempotent; call before showing.
     void ApplyBackdrop(int effect, int opacity);
-    static bool AcrylicSupported();
-    // DWMWA_SYSTEMBACKDROP_TYPE（系统 Acrylic 材质）需要 Win11 22H2+
-    static bool SystemBackdropSupported();
     bool IsAcrylicActive() const { return m_acrylic_active; }
 
     // Set the TrafficMonitor window handle so the popup can detect its native
@@ -110,18 +107,32 @@ private:
     // ---- ULW per-pixel 呈现（透明系三档的唯一实现） ----
     // 实测（2026-10-16 harness+探针矩阵）本机 DWM 对「含内容像素的 SWCA
     // 窗口」忽略 tint alpha（一律全浓度）——滑条在 SWCA 上必然无效。
-    // UpdateLayeredWindow 是唯一语义稳定的 per-pixel 通道：
-    //   背景 = 面板色×opacity（预乘），透出 blur 层/桌面
-    //   内容 = 不透明（coverage 解出精确半透明边缘）
-    // 亚克力/模糊的磨砂由独立 blur 层提供（无内容纯黑窗，SWCA 只取
-    // 模糊——全透窗口路径的 tint 语义正常）；「透明」档不挂 blur 层。
-    void EnsureBlurLayer();
-    void DestroyBlurLayer();
+    // UpdateLayeredWindow 是唯一语义稳定的 per-pixel 通道。
+    // 背景磨砂（方案 A'，2026-10-16 咩咩拍板）= 系统实时模糊双层架构：
+    //   底层 blur 效果层：纯黑窗 + SWCA BLURBEHIND（26300 实测真模糊
+    //   lap_var≈24，探针 tools/systembackdrop_probe），DWM 硬件逐帧合成
+    //   ——背后视频/滚动实时跟随（实测 50-100ms 内），零 CPU 永不闪
+    //   上层内容层（本窗 ULW）：背景=面板色×浓度预乘半透明盖在 blur 上
+    //   （浓度公式探针实测精确吻合 73 vs 理论 74），内容不透明，圆角走
+    //   ULW alpha；亚克力档面板叠确定性噪声（与模糊档可辨）
+    //   透明档 = 不挂 blur 层，真半透明透实时桌面
+    //   文字反色：affinity 无闪截屏低频判定（300ms，blur 层画面天然平滑）
     bool EnsureLayeredSurface(int w, int h);
     void ComposeLayeredSurface(int w, int h);
-    // 文字自适应反色：显示前截屏算 popup 区域背景的有效亮度（面板×op+
-    // 桌面×(1-op)），与文字色对比不足时翻转文字深浅
-    void UpdateAdaptiveTextTheme(const RECT& popup_rect);
+    // blur 效果层（亚克力/模糊档挂）：无内容纯黑窗 + SWCA 只取系统模糊
+    void EnsureBlurLayer();
+    void DestroyBlurLayer();
+    // 背景亮度采样 + 文字反色判定：affinity 无闪截屏 popup 区域 → 均值
+    // （截到的已是 blur 层模糊画面，天然平滑）→ 亮度公式承自旧
+    // UpdateAdaptiveTextTheme。trace=false 静止刷新路径不打日志
+    void RefreshBackdrop(const RECT& popup_rect, bool trace = true);
+    // affinity 无闪截屏：WDA_EXCLUDEFROMCAPTURE 期间窗口从一切屏幕捕获
+    // 中剔除、用户肉眼显示不受影响——BitBlt 拿到窗口脚下真实背景，全程
+    // 窗口可见零闪。写 m_snap 并返回 true；设置失败（Win10 2004 前的
+    // 老系统）返回 false，调用方回退清空法
+    bool CaptureSnapNoFlash(const RECT& popup_rect, int w, int h);
+    // 兜底自截规避（affinity 不可用的回退路径）：清空 ULW 表面后截屏
+    void ClearLayeredSurfaceForCapture();
     void DrawProcRow(HDC hdc, int y, const ProcDisplayInfo& proc, bool is_upload);
     void DrawSectionTitle(HDC hdc, int y, const wchar_t* title, bool is_upload, bool hover);
     void PositionWindow(const RECT& anchor_rect);
@@ -156,19 +167,19 @@ private:
     bool m_dark_mode = true;
 
     // Backdrop state (ApplyBackdrop): mode 0 = plain window, 1 = ULW
-    // layered（透明系三档共用）; m_acrylic_dark = 主题缓存（面板色分档）
+    // layered（透明系三档共用）+ 底下挂 blur 效果层（亚克力/模糊档）
     int m_backdrop_mode = 0;
     int m_backdrop_effect = 0;      // 0 acrylic / 1 transparent / 2 blur / 3 opaque
     int m_backdrop_opacity = -1;
     bool m_acrylic_active = false;  // == (m_backdrop_mode == 1), read by OnPaint
     bool m_acrylic_dark = true;     // theme the panel color was built for
     bool m_noise_acrylic = false;   // 亚克力档：面板叠加 Fluent 细噪声（与模糊档可辨）
+    HWND m_blur_hwnd = nullptr;     // blur 效果层（SWCA 系统模糊，点击穿透）
     // 文字自适应反色：ULW 半透明背景下文字深浅可脱离主题自动适配
     bool m_text_dark = false;       // false=浅色文字（深背景），true=深色文字
     bool m_text_adaptive = false;   // 本显示会话是否翻转过主题文字色
 
-    // ULW 呈现资源：blur 效果层 + 32bpp DIB 表面 + coverage 双底 pass
-    HWND m_blur_hwnd = nullptr;
+    // ULW 呈现资源：32bpp DIB 表面 + coverage 双底 pass + 采样表面
     HDC m_ulw_dc = nullptr;
     HBITMAP m_ulw_bmp = nullptr;
     void* m_ulw_bits = nullptr;
@@ -176,6 +187,14 @@ private:
     HDC m_cov_a_dc = nullptr;  HBITMAP m_cov_a_bmp = nullptr;  void* m_cov_a_bits = nullptr;
     HDC m_cov_c_dc = nullptr;  HBITMAP m_cov_c_bmp = nullptr;  void* m_cov_c_bits = nullptr;
     int m_cov_w = 0, m_cov_h = 0;
+    // 背景采样表面（反色判定）：affinity 截屏原样（w×h）
+    HDC m_snap_dc = nullptr;   HBITMAP m_snap_bmp = nullptr;   void* m_snap_bits = nullptr;
+    RECT m_last_snap_rect = {};     // 上次采样的矩形（节流比对基准）
+    // 静止期反色判定（2026-10-16）：blur 层由 DWM 逐帧实时合成无需刷
+    // 新，只有文字深浅需要低频跟随背景亮度。affinity 不可用（老系统）
+    // 时不做静止判定（首显判定仍在——那时窗口未上屏，截屏天然干净）
+    ULONGLONG m_last_refresh_tick = 0;
+    bool m_affinity_ok = true;
 
     // Data
     std::vector<ProcDisplayInfo> m_procs;
