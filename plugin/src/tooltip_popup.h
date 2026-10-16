@@ -143,7 +143,11 @@ private:
     bool UseTextTheme() const { return m_text_adaptive ? m_text_dark : m_dark_mode; }
     COLORREF GetBgColor();
     COLORREF GetTextColor();
-    COLORREF GetAccentColor(bool is_upload);
+    // 强调色（橙=上传 绿=下载）。on_panel=true 画在实心自绘底上（section
+    // 标题条）：跟面板主题走，不随反色翻转——实心底的可见底色永远是
+    // 自身填充色，与磨砂背景无关；false 画在半透明磨砂上（速度数字）：
+    // 跟文字主题走，随反色翻转保对比
+    COLORREF GetAccentColor(bool is_upload, bool on_panel = false);
     COLORREF GetSectionBgColor();
 
     // True while the cursor is inside/near the popup rect (~32px margin):

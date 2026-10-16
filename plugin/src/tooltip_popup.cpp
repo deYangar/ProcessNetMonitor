@@ -509,9 +509,12 @@ COLORREF CTooltipPopup::GetTextColor() {
     return UseTextTheme() ? RGB(240, 240, 240) : RGB(30, 30, 30);
 }
 
-COLORREF CTooltipPopup::GetAccentColor(bool is_upload) {
-    if (is_upload) return UseTextTheme() ? RGB(255, 165, 0) : RGB(230, 126, 34);  // orange
-    return UseTextTheme() ? RGB(80, 200, 120) : RGB(46, 160, 67);                // green
+COLORREF CTooltipPopup::GetAccentColor(bool is_upload, bool on_panel) {
+    // UseDarkTheme()/UseTextTheme() 的 true 都表示「深色语境配亮色」，
+    // 两分支色值一致；区别只在反色翻转时是否跟随
+    bool light = on_panel ? UseDarkTheme() : UseTextTheme();
+    if (is_upload) return light ? RGB(255, 165, 0) : RGB(230, 126, 34);  // orange
+    return light ? RGB(80, 200, 120) : RGB(46, 160, 67);                // green
 }
 
 COLORREF CTooltipPopup::GetSectionBgColor() {
@@ -589,8 +592,8 @@ void CTooltipPopup::DrawBackground(HDC hdc, int w, int h, bool content_only) {
         // ULW 模式：coverage pass（白/黑底）上只画边框线——背景由
         // ComposeLayeredSurface 提供（自绘档=烘焙模糊背景，透明档=
         // 面板色×opacity alpha）；边框作为内容参与双底色解算（精确
-        // 半透明边缘）
-        HPEN hPen = CreatePen(PS_SOLID, 1, UseTextTheme() ? RGB(55, 55, 55) : RGB(220, 220, 220));
+        // 半透明边缘）。边框跟面板主题（装饰元素，反色翻转不触碰）
+        HPEN hPen = CreatePen(PS_SOLID, 1, UseDarkTheme() ? RGB(55, 55, 55) : RGB(220, 220, 220));
         HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
         HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
         Rectangle(hdc, 0, 0, w, h);
@@ -642,9 +645,10 @@ void CTooltipPopup::DrawSectionTitle(HDC hdc, int y, const wchar_t* title, bool 
     DeleteObject(hBrush);
     DeleteObject(hNullPen);
 
-    // Draw title text with accent color
+    // Draw title text with accent color. 标题条是实心自绘底：文字跟面板
+    // 主题（on_panel=true），不随反色翻转——翻成暗橙叠深色条上对比度塌
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, GetAccentColor(is_upload));
+    SetTextColor(hdc, GetAccentColor(is_upload, true));
 
     HFONT hOldFont = (HFONT)SelectObject(hdc, m_font_small);
 
@@ -1178,14 +1182,18 @@ void CTooltipPopup::DrawContent(HDC dc, int w, int h, bool content_only) {
 
     // === "\u67E5\u770B\u8BE6\u7EC6" button ===
     m_rcDetailBtn = { PADDING, y, w - PADDING, y + BTN_H };
-    // hover：背景提亮一档 + accent 描边 + 文字提亮（与 section 条同一方向）
-    COLORREF btn_bg  = UseTextTheme() ? RGB(50, 50, 54)  : RGB(235, 235, 235);
-    COLORREF btn_pen = UseTextTheme() ? RGB(70, 70, 74)  : RGB(210, 210, 210);
-    COLORREF btn_txt = UseTextTheme() ? RGB(255, 165, 0) : RGB(230, 126, 34);
+    // 实心自绘控件：底色/描边/文字整套跟面板主题——按钮可见底色永远
+    // 是自身不透明填充色，磨砂背景透不进来，反色翻转不触碰（曾整体误
+    // 挂 UseTextTheme，反色时按钮跟着翻成亮灰底，2026-10-16 咩咩实测
+    // 抓出）。hover：背景提亮一档 + accent 描边 + 文字提亮（与 section
+    // 条同一方向）
+    COLORREF btn_bg  = UseDarkTheme() ? RGB(50, 50, 54)  : RGB(235, 235, 235);
+    COLORREF btn_pen = UseDarkTheme() ? RGB(70, 70, 74)  : RGB(210, 210, 210);
+    COLORREF btn_txt = UseDarkTheme() ? RGB(255, 165, 0) : RGB(230, 126, 34);
     if (m_hover_btn) {
-        btn_bg  = UseTextTheme() ? RGB(68, 68, 74)  : RGB(222, 222, 222);
-        btn_pen = UseTextTheme() ? RGB(255, 165, 0) : RGB(230, 126, 34);
-        btn_txt = UseTextTheme() ? RGB(255, 190, 80) : RGB(196, 100, 16);
+        btn_bg  = UseDarkTheme() ? RGB(68, 68, 74)  : RGB(222, 222, 222);
+        btn_pen = UseDarkTheme() ? RGB(255, 165, 0) : RGB(230, 126, 34);
+        btn_txt = UseDarkTheme() ? RGB(255, 190, 80) : RGB(196, 100, 16);
     }
     HBRUSH hBtnBrush = CreateSolidBrush(btn_bg);
     HPEN hBtnPen = CreatePen(PS_SOLID, 1, btn_pen);
@@ -1549,11 +1557,12 @@ void CTooltipPopup::UpdateAndShow(const std::vector<ProcDisplayInfo>& procs,
     // Per-monitor DPI: the anchor may sit on another monitor with different scaling
     UpdateDpiScale(anchor_rect);
 
-    if (UseTextTheme() != m_pen_dark) {
-        // Recreate separator pen for the new drawing theme
+    if (UseDarkTheme() != m_pen_dark) {
+        // Recreate separator pen for the new panel theme（分隔线是面板
+        // 装饰，跟面板主题；反色翻转只动文字深浅，不该动它）
         if (m_pen_separator) DeleteObject(m_pen_separator);
-        m_pen_separator = CreatePen(PS_SOLID, 1, UseTextTheme() ? RGB(45, 45, 45) : RGB(235, 235, 235));
-        m_pen_dark = UseTextTheme();
+        m_pen_separator = CreatePen(PS_SOLID, 1, UseDarkTheme() ? RGB(45, 45, 45) : RGB(235, 235, 235));
+        m_pen_dark = UseDarkTheme();
     }
 
     // Resize and show
@@ -1744,8 +1753,8 @@ void CTooltipPopup::RecreateScaledResources() {
     m_font_small = CreateFontW((int)(-13 * m_dpi_scale), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
-    m_pen_separator = CreatePen(PS_SOLID, 1, UseTextTheme() ? RGB(45, 45, 45) : RGB(235, 235, 235));
-    m_pen_dark = UseTextTheme();
+    m_pen_separator = CreatePen(PS_SOLID, 1, UseDarkTheme() ? RGB(45, 45, 45) : RGB(235, 235, 235));
+    m_pen_dark = UseDarkTheme();
 }
 
 void CTooltipPopup::Hide() {
