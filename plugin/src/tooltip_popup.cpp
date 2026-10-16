@@ -779,12 +779,24 @@ bool CTooltipPopup::EnsureLayeredSurface(int w, int h) {
         bi.bmiHeader.biBitCount = 32;
         bi.bmiHeader.biCompression = BI_RGB;
         *s.bmp = CreateDIBSection(NULL, &bi, DIB_RGB_COLORS, s.bits, NULL, 0);
-        if (!*s.bmp) return false;
-        *s.dc = CreateCompatibleDC(NULL);
-        SelectObject(*s.dc, *s.bmp);
+        if (*s.bmp) {
+            *s.dc = CreateCompatibleDC(NULL);
+            if (*s.dc) SelectObject(*s.dc, *s.bmp);
+        }
+        if (!*s.bmp || !*s.dc) {
+            // 全有或全无：中途失败时部分表面已是新尺寸而簿记还是旧值，
+            // 下次若目标尺寸恰好等于旧值会命中开头「已就绪」短路，
+            // ComposeLayeredSurface 按错误假设跨新旧表面读写越界。回收
+            // 四个表面、簿记归零
+            for (auto& t : surfs) {
+                if (*t.dc) { DeleteDC(*t.dc); *t.dc = nullptr; }
+                if (*t.bmp) { DeleteObject(*t.bmp); *t.bmp = nullptr; }
+                *t.bits = nullptr;
+            }
+            m_ulw_w = m_ulw_h = 0;
+            return false;
+        }
     }
-    m_cov_w = w;
-    m_cov_h = h;
     m_ulw_w = w;
     m_ulw_h = h;
     return true;

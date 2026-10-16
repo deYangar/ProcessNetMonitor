@@ -186,7 +186,6 @@ private:
     int m_ulw_w = 0, m_ulw_h = 0;
     HDC m_cov_a_dc = nullptr;  HBITMAP m_cov_a_bmp = nullptr;  void* m_cov_a_bits = nullptr;
     HDC m_cov_c_dc = nullptr;  HBITMAP m_cov_c_bmp = nullptr;  void* m_cov_c_bits = nullptr;
-    int m_cov_w = 0, m_cov_h = 0;
     // 背景采样表面（反色判定）：affinity 截屏原样（w×h）
     HDC m_snap_dc = nullptr;   HBITMAP m_snap_bmp = nullptr;   void* m_snap_bits = nullptr;
     RECT m_last_snap_rect = {};     // 上次采样的矩形（节流比对基准）
