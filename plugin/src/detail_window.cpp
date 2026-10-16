@@ -1872,6 +1872,25 @@ LRESULT CDetailWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
         return HTCLIENT;
     }
 
+    case WM_SETCURSOR: {
+        // 无 WS_THICKFRAME 时 DefWindowProc 对边缘命中不设 sizing 光标、一律
+        // 回箭头（tools/cursor_probe 实测 HTLEFT..HTBOTTOMRIGHT 全给 IDC_ARROW），
+        // 光标反馈随自绘 resize 一并接管，否则用户无从得知窗口可拉伸。
+        int ht = LOWORD(lp);
+        if (ht >= HTLEFT && ht <= HTBOTTOMRIGHT) {
+            LPCWSTR id;
+            switch (ht) {
+            case HTLEFT: case HTRIGHT:          id = IDC_SIZEWE;   break;
+            case HTTOPLEFT: case HTBOTTOMRIGHT: id = IDC_SIZENWSE; break;
+            case HTTOPRIGHT: case HTBOTTOMLEFT: id = IDC_SIZENESW; break;
+            default:                             id = IDC_SIZENS;   break;  // HTTOP / HTBOTTOM
+            }
+            SetCursor(LoadCursor(NULL, (LPCWSTR)id));
+            return TRUE;
+        }
+        break;  // 客户区/标题栏：客户区由 OnMouseMove 细化，其余交给 DefWindowProc
+    }
+
     case WM_GETMINMAXINFO: {
         MINMAXINFO* mmi = (MINMAXINFO*)lp;
         mmi->ptMinTrackSize.x = MIN_WIDTH;
