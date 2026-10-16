@@ -194,7 +194,7 @@ private:
     std::unordered_map<std::wstring, HICON> m_icon_cache;
 
     // Cached GDI objects (created once, reused in OnPaint)
-    HFONT m_font_normal = nullptr;   // Segoe UI -15
+    HFONT m_font_normal = nullptr;   // Microsoft YaHei -14 (process name + header)
     HFONT m_font_small = nullptr;    // Microsoft YaHei -13 (section title + detail button)
     HPEN m_pen_separator = nullptr;  // row separator
     bool m_pen_dark = true;          // theme the cached separator pen was built for

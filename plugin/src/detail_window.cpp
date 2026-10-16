@@ -4,6 +4,7 @@
 #include "signature.h"
 #include "ip_geo.h"
 #include <shellapi.h>
+#include <shobjidl.h>
 #include <dwmapi.h>
 #include <algorithm>
 #include <cmath>
@@ -122,22 +123,57 @@ bool CDetailWindow::IsDarkMode() {
 
 HICON CDetailWindow::GetProcessIcon(const std::wstring& exe_path) {
     if (exe_path.empty()) return nullptr;
-    auto it = m_icon_cache.find(exe_path);
+
+    // 缓存 key = 路径 + 显示尺寸（与悬浮窗同款：SHGFI_SMALLICON 的 16px
+    // 硬边位图被拉到 ICON_SIZE 是 logo 锯齿根因，2026-10-16 一并修掉）
+    int want = max(16, ICON_SIZE);
+    wchar_t key[600];
+    swprintf_s(key, 600, L"%s|%d", exe_path.c_str(), want);
+    auto it = m_icon_cache.find(key);
     if (it != m_icon_cache.end()) return it->second;
 
     HICON hIcon = nullptr;
-    SHFILEINFOW sfi = {};
-    if (SHGetFileInfoW(exe_path.c_str(), 0, &sfi, sizeof(sfi),
-                       SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES)) {
-        hIcon = sfi.hIcon;
+
+    // 首选：Shell 图像工厂按目标尺寸渲染（内部从大图标高质量下缩并
+    // 保留 alpha 抗锯齿；ARGB HBITMAP 经 CreateIconIndirect 转 HICON）
+    {
+        IShellItemImageFactory* factory = nullptr;
+        if (SUCCEEDED(SHCreateItemFromParsingName(exe_path.c_str(), nullptr,
+                                                  IID_PPV_ARGS(&factory)))) {
+            SIZE sz = { want, want };
+            HBITMAP hbm = nullptr;
+            if (SUCCEEDED(factory->GetImage(sz, SIIGBF_ICONONLY, &hbm)) && hbm) {
+                BITMAP bm = {};
+                int iw = 0;
+                if (GetObjectW(hbm, sizeof(bm), &bm)) iw = bm.bmWidth;
+                if (iw > 0 && iw <= want * 2) {
+                    HBITMAP mask = CreateBitmap(iw, bm.bmHeight, 1, 1, nullptr);
+                    ICONINFO ii = { TRUE, 0, 0, mask, hbm };
+                    hIcon = CreateIconIndirect(&ii);
+                    DeleteObject(mask);
+                }
+                DeleteObject(hbm);
+            }
+            factory->Release();
+        }
+    }
+
+    if (!hIcon) {
+        // 兜底 1：大图标（32px 源，优于 SMALLICON 的 16px）
+        SHFILEINFOW sfi = {};
+        if (SHGetFileInfoW(exe_path.c_str(), 0, &sfi, sizeof(sfi),
+                           SHGFI_ICON | SHGFI_LARGEICON | SHGFI_USEFILEATTRIBUTES)) {
+            hIcon = sfi.hIcon;
+        }
     }
     if (!hIcon) {
+        // 兜底 2：ExtractAssociatedIcon
         wchar_t path_buf[MAX_PATH] = {};
         wcsncpy_s(path_buf, MAX_PATH, exe_path.c_str(), _TRUNCATE);
         WORD idx = 0;
         hIcon = ExtractAssociatedIconW(m_hinst, path_buf, &idx);
     }
-    m_icon_cache[exe_path] = hIcon;
+    m_icon_cache[key] = hIcon;
     return hIcon;
 }
 

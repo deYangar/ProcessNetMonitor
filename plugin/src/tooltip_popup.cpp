@@ -3,6 +3,7 @@
 #include "utils.h"        
 #include "signature.h"
 #include <shellapi.h>
+#include <shobjidl.h>
 #include <dwmapi.h>
 #include <algorithm>
 #include <cmath>
@@ -181,27 +182,63 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
 HICON CTooltipPopup::GetProcessIcon(const std::wstring& exe_path) {
     if (exe_path.empty()) return nullptr;
 
-    auto it = m_icon_cache.find(exe_path);
+    // 缓存 key = 路径 + 当前显示尺寸（DPI 变化后尺寸不同，各自取图）
+    int want = max(16, ICON_SIZE);
+    wchar_t key[600];
+    swprintf_s(key, 600, L"%s|%d", exe_path.c_str(), want);
+    auto it = m_icon_cache.find(key);
     if (it != m_icon_cache.end()) return it->second;
 
     HICON hIcon = nullptr;
 
-    // Try SHGetFileInfo for exe icon
-    SHFILEINFOW sfi = {};
-    if (SHGetFileInfoW(exe_path.c_str(), 0, &sfi, sizeof(sfi),
-                       SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES)) {
-        hIcon = sfi.hIcon;
+    // 首选：Shell 图像工厂按目标尺寸渲染（咩咩反馈 logo 锯齿，2026-10-16：
+    // 旧路径 SHGFI_SMALLICON 拿 16×16 再被 DrawIconEx 最近邻拉到 22px——
+    // 放大+无平滑=硬边锯齿。GetImage 内部从大图标高质量下缩并保留
+    // alpha 抗锯齿，高 DPI 场景的系统正解）
+    {
+        IShellItemImageFactory* factory = nullptr;
+        if (SUCCEEDED(SHCreateItemFromParsingName(exe_path.c_str(), nullptr,
+                                                  IID_PPV_ARGS(&factory)))) {
+            SIZE sz = { want, want };
+            HBITMAP hbm = nullptr;
+            if (SUCCEEDED(factory->GetImage(sz, SIIGBF_ICONONLY, &hbm)) && hbm) {
+                BITMAP bm = {};
+                int iw = 0, ih = 0;
+                if (GetObjectW(hbm, sizeof(bm), &bm)) {
+                    iw = bm.bmWidth; ih = bm.bmHeight;
+                }
+                if (iw > 0 && iw <= want * 2) {
+                    // GetImage 给 32bpp ARGB 位图；转 HICON（alpha 图标的
+                    // mask 形式上要有效但显示时被忽略）
+                    HBITMAP mask = CreateBitmap(iw, ih, 1, 1, nullptr);
+                    ICONINFO ii = { TRUE, 0, 0, mask, hbm };
+                    hIcon = CreateIconIndirect(&ii);
+                    DeleteObject(mask);
+                }
+                DeleteObject(hbm);
+            }
+            factory->Release();
+        }
     }
 
     if (!hIcon) {
-        // Fallback: try ExtractAssociatedIcon
+        // 兜底 1：大图标（32px 源，仍优于 SMALLICON 的 16px）
+        SHFILEINFOW sfi = {};
+        if (SHGetFileInfoW(exe_path.c_str(), 0, &sfi, sizeof(sfi),
+                           SHGFI_ICON | SHGFI_LARGEICON | SHGFI_USEFILEATTRIBUTES)) {
+            hIcon = sfi.hIcon;
+        }
+    }
+
+    if (!hIcon) {
+        // 兜底 2：ExtractAssociatedIcon（32px）
         wchar_t path_buf[MAX_PATH] = {};
         wcsncpy_s(path_buf, MAX_PATH, exe_path.c_str(), _TRUNCATE);
         WORD idx = 0;
         hIcon = ExtractAssociatedIconW(m_hinst, path_buf, &idx);
     }
 
-    m_icon_cache[exe_path] = hIcon;
+    m_icon_cache[key] = hIcon;
     return hIcon;
 }
 
@@ -1485,15 +1522,21 @@ void CTooltipPopup::RecreateScaledResources() {
     if (m_font_normal) DeleteObject(m_font_normal);
     if (m_font_small) DeleteObject(m_font_small);
     if (m_pen_separator) DeleteObject(m_pen_separator);
-    // 灰度抗锯齿（非 ClearType）：亚克力/透明合成路径上 ClearType 的
-    // sub-pixel 混合按假定不透明背景做 gamma，浅色文字会白化消失——
-    // Fluent/XAML 应用在亚克力上一律灰度 AA，这里对齐
-    m_font_normal = CreateFontW((int)(-16 * m_dpi_scale), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+    // 微软雅黑 + ClearType（咩咩点名，2026-10-16）：coverage 双底 pass 在
+    // 已知不透明底上渲染，ClearType 可用；解出的内容色带 sub-pixel 加权，
+    // 叠到面板色上时边缘会有轻微彩虹纹（ClearType-on-wrong-background），
+    // 深色面板/噪声亚克力下基本不可见。若实测彩边扎眼，回退方案是
+    // ANTIALIASED_QUALITY 或在 Compose 里向亮度均值收敛三通道
+    // 字号/字重（2026-10-16 咩咩反馈「变大变粗」）：雅黑字面比 Segoe UI
+    // 大一圈（汉字撑满 em 框），-16 视觉大一号；SEMIBOLD 叠雅黑 Regular
+    // 本身的粗笔画=明显粗体。回归 FW_NORMAL + -14（雅黑≈Segoe×7/8 视觉
+    // 等价），字体与 ClearType 保留
+    m_font_normal = CreateFontW((int)(-14 * m_dpi_scale), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                 ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+                                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
     m_font_small = CreateFontW((int)(-13 * m_dpi_scale), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
+                                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
     m_pen_separator = CreatePen(PS_SOLID, 1, UseTextTheme() ? RGB(45, 45, 45) : RGB(235, 235, 235));
     m_pen_dark = UseTextTheme();
 }
