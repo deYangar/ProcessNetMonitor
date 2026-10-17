@@ -8,11 +8,14 @@
 #include <algorithm>
 #include <cmath>
 
+// WinSDK 26100 不再带 msimg32.h，但 AlphaBlend/BLENDFUNCTION 已并入
+// wingdi.h（随 windows.h 进来）——只需链 msimg32.lib
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "imm32.lib")
+#pragma comment(lib, "msimg32.lib")
 
 CTooltipPopup* CTooltipPopup::s_instance = nullptr;
 HINSTANCE s_dll_hinst = nullptr;
@@ -275,7 +278,6 @@ CTooltipPopup::~CTooltipPopup() {
     }
     if (m_font_normal) DeleteObject(m_font_normal);
     if (m_font_small) DeleteObject(m_font_small);
-    if (m_font_speed) DeleteObject(m_font_speed);
     if (m_pen_separator) DeleteObject(m_pen_separator);
     // 类注销：当前 TM 无插件热重载不会触发，但若未来支持热卸载且新 DLL
     // 分到同一 hInst 地址，残留的已注册类会让 CreateWindow 沿用指向已
@@ -510,13 +512,14 @@ COLORREF CTooltipPopup::GetTextColor() {
     return UseTextTheme() ? RGB(240, 240, 240) : RGB(30, 30, 30);
 }
 
-COLORREF CTooltipPopup::GetAccentColor(bool is_upload, bool on_panel) {
-    // UseDarkTheme()/UseTextTheme() 的 true 都表示「深色语境配亮色」，
-    // 两分支色值一致；区别只在反色翻转时是否跟随
-    bool light = on_panel ? UseDarkTheme() : UseTextTheme();
-    // 速度列（on_panel=false）：右侧区域亮度独立判定翻转——左判定管不到
-    // 速度列背后的亮暗，亮变体叠亮背景对比塌（见头文件注释）
-    if (!on_panel && (is_upload ? m_speed_flip_up : m_speed_flip_down))
+COLORREF CTooltipPopup::GetAccentColor(bool is_upload) {
+    // 深浅判定全窗口统一：UseTextTheme()（反色判定后的文字深浅）+ 右列
+    // 独立翻转（m_speed_flip）。标题条实心自绘底时代曾让标题走面板主
+    // 题且不翻转（2026-10-18 实心底退役，与速度列统一——咩咩拍板）
+    bool light = UseTextTheme();
+    // 速度列（右列）亮度独立判定翻转：亮变体叠亮背景对比塌（见头文件
+    // 注释）；标题与速度列同调用同翻转，颜色恒一致
+    if (is_upload ? m_speed_flip_up : m_speed_flip_down)
         light = !light;
     // 橙亮变体（2026-10-17 咩咩对比图四选一收敛 #4）：纯橙 B=0 真机浊、
     // B=64 泛白（暖色低饱和灰白化人眼敏感），终选降亮去饱和系——亮度
@@ -625,40 +628,72 @@ void CTooltipPopup::DrawBackground(HDC hdc, int w, int h, bool content_only) {
     DeleteObject(hPen);
 }
 
+// hover 薄纱：GDI 无原生半透明填充，用 1×1 不透明 DIB + AlphaBlend
+// SourceConstantAlpha 拉伸铺矩形（深色主题白纱提亮/浅色黑纱压暗）。浓度
+// 26/255≈10% 对齐降级档 hover 的提亮幅度（44→60）
+static void DrawHoverWash(HDC hdc, const RECT* rc, bool dark_theme) {
+    BITMAPINFO bi = {};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = 1;
+    bi.bmiHeader.biHeight = 1;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HDC mem = CreateCompatibleDC(hdc);
+    HBITMAP dib = CreateDIBSection(hdc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (dib && bits && mem) {
+        unsigned char* px = (unsigned char*)bits;
+        px[0] = px[1] = px[2] = dark_theme ? 255 : 0;  // B,G,R 纯色，浓度走常量 α
+        px[3] = 0;
+        HGDIOBJ old = SelectObject(mem, dib);
+        BLENDFUNCTION bf = { AC_SRC_OVER, 0, 26, 0 };
+        AlphaBlend(hdc, rc->left, rc->top, rc->right - rc->left, rc->bottom - rc->top,
+                   mem, 0, 0, 1, 1, bf);
+        SelectObject(mem, old);
+    }
+    if (dib) DeleteObject(dib);
+    if (mem) DeleteDC(mem);
+}
+
 void CTooltipPopup::DrawSectionTitle(HDC hdc, int y, const wchar_t* title, bool is_upload, bool hover) {
-    // Section title bar with slightly different bg（hover 提亮一档）
-    COLORREF sec_bg = GetSectionBgColor();
-    if (hover) sec_bg = UseDarkTheme() ? RGB(60, 60, 60) : RGB(227, 227, 227);
-    HBRUSH hBrush = CreateSolidBrush(sec_bg);
-    int bar_h = (int)(20 * m_dpi_scale);
-    RECT rc = { PADDING - 2, y, 0, y + bar_h }; // will set right later
-    // We'll draw a small rounded rect behind the title text
-    SIZE sz;
-    GetTextExtentPoint32W(hdc, title, (int)wcslen(title), &sz);
-    rc.right = PADDING + sz.cx + 12;
-    // Actually let's just fill a full-width bar
-    // Get client rect
     RECT client;
     GetClientRect(m_hwnd, &client);
-    rc.right = client.right - PADDING + 2;
+    int bar_h = (int)(20 * m_dpi_scale);
 
-    // Use round rect for section bg
-    int radius = max(2, (int)(6 * m_dpi_scale));
-    HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, hBrush);
-    HPEN hNullPen = CreatePen(PS_SOLID, 0, sec_bg);
-    HPEN hOldPen = (HPEN)SelectObject(hdc, hNullPen);
-    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom + 2, radius, radius);
-    SelectObject(hdc, hOldBrush);
-    SelectObject(hdc, hOldPen);
-    DeleteObject(hBrush);
-    DeleteObject(hNullPen);
+    if (m_acrylic_active) {
+        // ULW 模式：标题条不画实心底——跟进程行一样直接坐半透明面板
+        // （2026-10-17 咩咩：固定底色块与进程速度区背景不一致）。hover
+        // 反馈改薄纱：AlphaBlend 均匀半透明在 coverage 双底解算下是精
+        // 确解（A-C=(1-α)·255 逐通道一致，f 还原为纱色），无色偏伪色
+        if (hover) {
+            RECT wash = { PADDING - 2, y, client.right - PADDING + 2, y + bar_h + 2 };
+            DrawHoverWash(hdc, &wash, UseDarkTheme());
+        }
+    } else {
+        // 降级档（Win7/关背板，整窗实心面板）：保留实心条，深一档区分区块
+        COLORREF sec_bg = GetSectionBgColor();
+        if (hover) sec_bg = UseDarkTheme() ? RGB(60, 60, 60) : RGB(227, 227, 227);
+        RECT rc = { PADDING - 2, y, client.right - PADDING + 2, y + bar_h + 2 };
+        int radius = max(2, (int)(6 * m_dpi_scale));
+        HBRUSH hBrush = CreateSolidBrush(sec_bg);
+        HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, hBrush);
+        HPEN hNullPen = CreatePen(PS_SOLID, 0, sec_bg);
+        HPEN hOldPen = (HPEN)SelectObject(hdc, hNullPen);
+        RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
+        SelectObject(hdc, hOldBrush);
+        SelectObject(hdc, hOldPen);
+        DeleteObject(hBrush);
+        DeleteObject(hNullPen);
+    }
 
-    // Draw title text with accent color. 标题条是实心自绘底：文字跟面板
-    // 主题（on_panel=true），不随反色翻转——翻成暗橙叠深色条上对比度塌
+    // 标题文字与速度列同款观感（2026-10-18 咩咩）：同色（同一判定同翻
+    // 转）+ 同字体 m_font_normal（-14 常规雅黑；半粗版实测=GDI 就近匹
+    // 配成 Bold 粗体，观感过粗，咩咩拍板回归常规）
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, GetAccentColor(is_upload, true));
+    SetTextColor(hdc, GetAccentColor(is_upload));
 
-    HFONT hOldFont = (HFONT)SelectObject(hdc, m_font_small);
+    HFONT hOldFont = (HFONT)SelectObject(hdc, m_font_normal);
 
     RECT text_rc = { PADDING + 2, y, client.right - PADDING, y + (int)(22 * m_dpi_scale) };
     DrawTextW(hdc, title, -1, &text_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
@@ -718,7 +753,9 @@ void CTooltipPopup::DrawProcRow(HDC hdc, int y, const ProcDisplayInfo& proc, boo
 
     SetTextColor(hdc, GetAccentColor(is_upload));
     RECT spd_rc = { client.right - PADDING - SPEED_AREA_W, y, client.right - PADDING, y + ROW_HEIGHT };
-    SelectObject(hdc, m_font_speed);   // 速度数字半粗（支柱一）：函数尾恢复 hOldFont
+    SelectObject(hdc, m_font_normal);  // 速度数字回归常规（2026-10-18 咩咩：半粗实
+                                       // 渲染为 Bold 过粗；透明化后判定/翻转精确，
+                                       // 靠颜色本身说话）：函数尾恢复 hOldFont
     DrawTextW(hdc, spd_buf, -1, &spd_rc, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
 
     // 4. Subtle separator line
@@ -1834,7 +1871,6 @@ void CTooltipPopup::UpdateDpiScale(const RECT& anchor_rect) {
 void CTooltipPopup::RecreateScaledResources() {
     if (m_font_normal) DeleteObject(m_font_normal);
     if (m_font_small) DeleteObject(m_font_small);
-    if (m_font_speed) DeleteObject(m_font_speed);
     if (m_pen_separator) DeleteObject(m_pen_separator);
     // 微软雅黑 + ClearType（咩咩点名，2026-10-16）：coverage 双底 pass 在
     // 已知不透明底上渲染，ClearType 可用；解出的内容色带 sub-pixel 加权，
@@ -1849,13 +1885,6 @@ void CTooltipPopup::RecreateScaledResources() {
                                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                  CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
     m_font_small = CreateFontW((int)(-13 * m_dpi_scale), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
-    // 速度列数字专用半粗（支柱一，2026-10-17 咩咩拍板）：雅黑数字字形简
-    // 单，半粗不糊；彩字感知亮度低于白字 28%，半粗补回笔画物理存在感。
-    // 半粗笔画更宽→ClearType 全覆盖区更多、亚像素死点更少，与解算层
-    // 相辅。SPEED_AREA_W=85 容纳半粗余量（"99.9 MB/s"≈74px）
-    m_font_speed = CreateFontW((int)(-14 * m_dpi_scale), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                  CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
     m_pen_separator = CreatePen(PS_SOLID, 1, UseDarkTheme() ? RGB(45, 45, 45) : RGB(235, 235, 235));

@@ -143,11 +143,10 @@ private:
     bool UseTextTheme() const { return m_text_adaptive ? m_text_dark : m_dark_mode; }
     COLORREF GetBgColor();
     COLORREF GetTextColor();
-    // 强调色（橙=上传 绿=下载）。on_panel=true 画在实心自绘底上（section
-    // 标题条）：跟面板主题走，不随反色翻转——实心底的可见底色永远是
-    // 自身填充色，与磨砂背景无关；false 画在半透明磨砂上（速度数字）：
-    // 跟文字主题走，随反色翻转保对比
-    COLORREF GetAccentColor(bool is_upload, bool on_panel = false);
+    // 强调色（橙=上传 绿=下载），速度数字与区块标题共用：深浅跟文字主题
+    // 走并随右列独立翻转保对比。标题条实心自绘底时代曾有 on_panel 分支
+    // （跟面板主题不翻转），2026-10-18 实心底退役后统一（咩咩拍板）
+    COLORREF GetAccentColor(bool is_upload);
     COLORREF GetSectionBgColor();
 
     // True while the cursor is inside/near the popup rect (~32px margin):
@@ -224,11 +223,8 @@ private:
     std::vector<std::wstring> m_icon_pending;
 
     // Cached GDI objects (created once, reused in OnPaint)
-    HFONT m_font_normal = nullptr;   // Microsoft YaHei -14 (process name + header)
-    HFONT m_font_small = nullptr;    // Microsoft YaHei -13 (section title + detail button)
-    HFONT m_font_speed = nullptr;    // Microsoft YaHei -14 FW_SEMIBOLD（速度列数字专用：
-                                      // 彩字感知亮度低于白字 28%，同 1px 笔画存在感弱，
-                                      // 半粗补物理字重；ecfc8c2 回退常规体只针对正文）
+    HFONT m_font_normal = nullptr;   // Microsoft YaHei -14 (process name + header + speed + section title)
+    HFONT m_font_small = nullptr;    // Microsoft YaHei -13 (status line + detail button)
     HPEN m_pen_separator = nullptr;  // row separator
     bool m_pen_dark = true;          // theme the cached separator pen was built for
 
