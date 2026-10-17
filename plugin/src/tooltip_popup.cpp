@@ -513,6 +513,10 @@ COLORREF CTooltipPopup::GetAccentColor(bool is_upload, bool on_panel) {
     // UseDarkTheme()/UseTextTheme() 的 true 都表示「深色语境配亮色」，
     // 两分支色值一致；区别只在反色翻转时是否跟随
     bool light = on_panel ? UseDarkTheme() : UseTextTheme();
+    // 速度列（on_panel=false）：右侧区域亮度独立判定翻转——左判定管不到
+    // 速度列背后的亮暗，亮变体叠亮背景对比塌（见头文件注释）
+    if (!on_panel && (is_upload ? m_speed_flip_up : m_speed_flip_down))
+        light = !light;
     if (is_upload) return light ? RGB(255, 165, 0) : RGB(230, 126, 34);  // orange
     return light ? RGB(80, 200, 120) : RGB(46, 160, 67);                // green
 }
@@ -891,10 +895,21 @@ void CTooltipPopup::ComposeLayeredSurface(int w, int h) {
     int bg_a = op * 255 / 100;
     int r = max(2, CORNER_RADIUS);
 
+    // 行缓冲三遍：解算（圆角几何+内容色逐通道）→ 亚像素死点双向回填 →
+    // 合成。死点（αc≤1，黑 pass 量化归零区）的内容色在两 pass 里数学上
+    // 不可辨识（覆盖率为零时内容色系数为零），唯一信息源是横向邻像素
+    // ——同笔画内侧同通道必有覆盖。不回填则饱和通道（橙字的 R）在笔画
+    // 边缘被联合均值压暗 ~78%，雅黑小字 1-2px 笔画视觉显著变细（咩咩
+    // 2026-10-17「太细看不清」）；回填后离线验证全通道保色 maxd=1
+    std::vector<int> frow((size_t)w * 3);          // 内容色 [B,G,R]
+    std::vector<int> crow((size_t)w);              // cov255
+    std::vector<float> grow((size_t)w);            // 圆角几何 coverage
+    std::vector<unsigned char> drow((size_t)w);    // 死点掩码 bit0=B 1=G 2=R
+
     for (int y = 0; y < h; y++) {
         float cy = y + 0.5f;
+        // pass A：圆角几何 coverage + 内容色逐通道解算（死点先落联合 fs）
         for (int x = 0; x < w; x++) {
-            // 圆角几何 coverage（1px 抗锯齿带）
             float cov = 1.0f;
             float cx = x + 0.5f, ccx = -1.0f, ccy = -1.0f;
             if (x < r && y < r) { ccx = (float)r; ccy = (float)r; }
@@ -912,6 +927,66 @@ void CTooltipPopup::ComposeLayeredSurface(int w, int h) {
             size_t i = ((size_t)y * w + x) * 4;
             int da = (pa[i] - pc[i]) + (pa[i + 1] - pc[i + 1]) + (pa[i + 2] - pc[i + 2]);
             int cov255 = 255 - (da + 1) / 3;   // 内容覆盖率 c×255
+            grow[x] = cov;
+            crow[x] = cov255;
+            drow[x] = 0;
+            if (cov255 >= 255) {
+                // 实心：黑 pass 原值即真彩内容色
+                frow[x * 3 + 0] = pc[i];
+                frow[x * 3 + 1] = pc[i + 1];
+                frow[x * 3 + 2] = pc[i + 2];
+            } else if (cov255 > 0) {
+                // 每通道覆盖率 αc=255-pa_c+pc_c（两 pass 之差），f_c=
+                // pc_c·255/αc——黑底 pass 像素是内容色×该通道亚像素覆盖
+                // 率的预乘，除以各自的 αc 后通道差不再泄入内容色：黑字
+                // 解出纯黑（紫边根治，等价 416690a 均值收敛）、彩字逐通
+                // 道保真（均值收敛在彩字上把边缘洗成土灰）。αc≤1 的通
+                // 道黑 pass 量化已归零，先落三通道联合 fs（黑白灰字下联
+                // 合是精确解），pass B 再用邻像素真值回填
+                int ab = 255 - pa[i]     + pc[i];
+                int ag = 255 - pa[i + 1] + pc[i + 1];
+                int ar = 255 - pa[i + 2] + pc[i + 2];
+                int fs = (pc[i] + pc[i + 1] + pc[i + 2]) * 255 / (3 * cov255);
+                frow[x * 3 + 0] = ab > 1 ? pc[i]     * 255 / ab : fs;
+                frow[x * 3 + 1] = ag > 1 ? pc[i + 1] * 255 / ag : fs;
+                frow[x * 3 + 2] = ar > 1 ? pc[i + 2] * 255 / ar : fs;
+                drow[x] = (unsigned char)((ab <= 1 ? 1 : 0) | (ag <= 1 ? 2 : 0)
+                                        | (ar <= 1 ? 4 : 0));
+            } else {
+                frow[x * 3 + 0] = frow[x * 3 + 1] = frow[x * 3 + 2] = 0;
+            }
+        }
+        // pass B：死点双向回填（跑两遍使 2 列宽死点带链式闭合；邻=内容
+        // 像素且该通道已解——邻值是同字真实解算，精度高于 fs 均值估计；
+        // 两侧都不可用时保留 fs 兜底）
+        for (int rep = 0; rep < 2; rep++) {
+            for (int x = 0; x < w; x++) {
+                if (!drow[x] || crow[x] <= 0) continue;
+                for (int c = 0; c < 3; c++) {
+                    int bit = 1 << c;
+                    if (!(drow[x] & bit)) continue;
+                    bool got = false;
+                    int v = 0;
+                    if (x > 0 && crow[x - 1] > 0 && !(drow[x - 1] & bit)) {
+                        v = frow[(x - 1) * 3 + c]; got = true;
+                    }
+                    if (x + 1 < w && crow[x + 1] > 0 && !(drow[x + 1] & bit)) {
+                        int rv = frow[(x + 1) * 3 + c];
+                        v = got ? max(v, rv) : rv; got = true;
+                    }
+                    if (got) {
+                        frow[x * 3 + c] = v;
+                        drow[x] = (unsigned char)(drow[x] & ~bit);
+                    }
+                }
+            }
+        }
+        // pass C：合成（公式与历史版一致，覆盖率仍取三通道均值——灰度
+        // AA，ULW 标量 alpha 体系不变）
+        for (int x = 0; x < w; x++) {
+            size_t i = ((size_t)y * w + x) * 4;
+            float cov = grow[x];
+            int cov255 = crow[x];
 
             // 亚克力噪声（Fluent 亚克力与纯模糊的标志性区别；确定性
             // 哈希避免逐帧闪烁）——叠在半透明面板色上，随浓度透出
@@ -930,9 +1005,9 @@ void CTooltipPopup::ComposeLayeredSurface(int w, int h) {
             }
             if (cov255 >= 255) {
                 // 实心内容
-                pw[i]     = (unsigned char)min(255, (int)(pc[i]     * cov + 0.5f));
-                pw[i + 1] = (unsigned char)min(255, (int)(pc[i + 1] * cov + 0.5f));
-                pw[i + 2] = (unsigned char)min(255, (int)(pc[i + 2] * cov + 0.5f));
+                pw[i]     = (unsigned char)min(255, (int)(frow[x * 3 + 0] * cov + 0.5f));
+                pw[i + 1] = (unsigned char)min(255, (int)(frow[x * 3 + 1] * cov + 0.5f));
+                pw[i + 2] = (unsigned char)min(255, (int)(frow[x * 3 + 2] * cov + 0.5f));
             } else if (cov255 <= 0) {
                 // 纯背景：panel(+噪声)×op 预乘
                 int bb = max(0, min(255, pb + nz)) * bg_a / 255;
@@ -944,16 +1019,7 @@ void CTooltipPopup::ComposeLayeredSurface(int w, int h) {
             } else {
                 // 边缘：内容与背景层的预乘复合（背景带噪声）
                 int inv = 255 - cov255;        // 255(1-c)
-                int fr = (pa[i + 2] - inv) * 255 / cov255;
-                int fg = (pa[i + 1] - inv) * 255 / cov255;
-                int fb = (pa[i]     - inv) * 255 / cov255;
-                // ClearType 亚像素覆盖率的通道差经 f 还原落进内容色：
-                // 黑字叠黑背景时边缘呈紫边（白字在白 pass 全 255、f 解出
-                // 纯白，天然无此问题）。向通道均值收敛——子像素信息保留
-                // 在 cov 标量里（锐度不变），颜色污染清零；彩字边缘轻微
-                // 去饱和（1-2px 半透明带，肉眼不可辨）
-                int fm = (fr + fg + fb) / 3;
-                fr = fg = fb = fm;
+                int fr = frow[x * 3 + 2], fg = frow[x * 3 + 1], fb = frow[x * 3 + 0];
                 int pnr = max(0, pr + nz), png = max(0, pg + nz), pnb = max(0, pb + nz);
                 int er = fr * cov255 / 255 + pnr * bg_a / 255 * inv / 255;
                 int eg = fg * cov255 / 255 + png * bg_a / 255 * inv / 255;
@@ -1023,6 +1089,8 @@ bool CTooltipPopup::CaptureSnapNoFlash(const RECT& popup_rect, int w, int h) {
 void CTooltipPopup::RefreshBackdrop(const RECT& popup_rect) {
     m_text_adaptive = false;
     m_text_dark = m_dark_mode;
+    m_speed_flip_up = false;
+    m_speed_flip_down = false;
     if (!m_acrylic_active) return;
 
     int w = popup_rect.right - popup_rect.left;
@@ -1046,23 +1114,26 @@ void CTooltipPopup::RefreshBackdrop(const RECT& popup_rect) {
     }
 
     // 亮度判定（4px 步进采样足够；截到的画面已是模糊合成结果）。
-    // 只按左侧进程名列区域判（咩咩 2026-10-16 指定）：文字深浅对比的
-    // 主体是进程名/标题，右侧 SPEED_AREA_W 是流速数字列，右半边亮暗
-    // 与文字可读性无关。取**中位数**而非均值：局部黑块（窗口边缘压
-    // 到深色内容，<50%）不该拉偏整列判色——「绝大部分白就按白判」
-    // 正是中位数的语义（咩咩 13:38 实测：进程列沾一条黑边就误翻白字）
+    // 主判定只按左侧进程名列区域判（咩咩 2026-10-16 指定）：文字深浅
+    // 对比的主体是进程名/标题。取**中位数**而非均值：局部黑块（窗口边
+    // 缘压到深色内容，<50%）不该拉偏整列判色——「绝大部分白就按白判」
+    // 正是中位数的语义（咩咩 13:38 实测：进程列沾一条黑边就误翻白字）。
+    // 同一轮截屏的右侧速度列区域单独收一份：accent 亮/深变体的独立判
+    // 定用（左右背景亮度分裂时左判定管不到右列）
     int judge_w = w - SPEED_AREA_W + (int)(10 * m_dpi_scale);
     if (judge_w < w / 2) judge_w = w / 2;   // 布局异常时保底半宽
     if (judge_w > w) judge_w = w;
-    std::vector<unsigned short> lums;
+    std::vector<unsigned short> lums, lums_r;
     lums.reserve((size_t)((h / 4 + 1) * (judge_w / 4 + 1)));
     {
         unsigned char* p8 = (unsigned char*)m_snap_bits;
         for (int y = 0; y < h; y += 4)
-            for (int x = 0; x < judge_w; x += 4) {
+            for (int x = 0; x < w; x += 4) {
                 size_t i = ((size_t)y * w + x) * 4;
-                lums.push_back((unsigned short)(
-                    (299 * p8[i + 2] + 587 * p8[i + 1] + 114 * p8[i]) / 1000));
+                unsigned short l = (unsigned short)(
+                    (299 * p8[i + 2] + 587 * p8[i + 1] + 114 * p8[i]) / 1000);
+                if (x < judge_w) lums.push_back(l);
+                else lums_r.push_back(l);
             }
     }
     double screen_lum = -1.0;
@@ -1085,6 +1156,23 @@ void CTooltipPopup::RefreshBackdrop(const RECT& popup_rect) {
         // 撞色：翻转文字深浅
         m_text_dark = !m_dark_mode;
         m_text_adaptive = true;
+    }
+
+    // 速度列 accent 变体独立判定：右列取对比更大的变体（中点判定，各
+    // 色独立）。真彩化后彩字没有土灰均值的「假对比」，亮变体（橙 173/
+    // 绿 155）叠亮背景（如 op 低+白桌面，bg 逼近 200）时字比背景还暗，
+    // 笔画存在感塌掉——咩咩 2026-10-17「太细看不清」的第二根因。存与
+    // 左判定 UseTextTheme() 的差值，GetAccentColor 里做翻转
+    if (!lums_r.empty()) {
+        size_t mid_r = lums_r.size() / 2;
+        std::nth_element(lums_r.begin(), lums_r.begin() + mid_r, lums_r.end());
+        double sbg = (op / 100.0) * panel_lum
+                   + (1.0 - op / 100.0) * (double)lums_r[mid_r];
+        bool want_up_light = sbg < (173.0 + 147.0) / 2;    // 橙两变体中点
+        bool want_down_light = sbg < (155.0 + 115.0) / 2;  // 绿两变体中点
+        bool text_light = UseTextTheme();
+        m_speed_flip_up = want_up_light != text_light;
+        m_speed_flip_down = want_down_light != text_light;
     }
 }
 
@@ -1417,10 +1505,12 @@ void CTooltipPopup::PositionWindow(const RECT& anchor_rect) {
                GetTickCount64() - m_last_refresh_tick >= 250) {
         bool text_dark_before = m_text_dark;
         bool adapt_before = m_text_adaptive;
+        bool speed_up_before = m_speed_flip_up, speed_down_before = m_speed_flip_down;
         RefreshBackdrop(will);
         m_last_snap_rect = will;
         m_last_refresh_tick = GetTickCount64();
-        if (m_text_dark != text_dark_before || m_text_adaptive != adapt_before) {
+        if (m_text_dark != text_dark_before || m_text_adaptive != adapt_before ||
+            m_speed_flip_up != speed_up_before || m_speed_flip_down != speed_down_before) {
             InvalidateRect(m_hwnd, NULL, FALSE);
         }
     }
@@ -1607,9 +1697,11 @@ void CTooltipPopup::UpdateData(const std::vector<ProcDisplayInfo>& procs,
             } else if (GetTickCount64() - m_last_refresh_tick >= 300) {
                 bool text_dark_before = m_text_dark;
                 bool adapt_before = m_text_adaptive;
+                bool speed_up_before = m_speed_flip_up, speed_down_before = m_speed_flip_down;
                 RefreshBackdrop(cur);
                 m_last_refresh_tick = GetTickCount64();
-                if (m_text_dark != text_dark_before || m_text_adaptive != adapt_before) {
+                if (m_text_dark != text_dark_before || m_text_adaptive != adapt_before ||
+                    m_speed_flip_up != speed_up_before || m_speed_flip_down != speed_down_before) {
                     InvalidateRect(m_hwnd, NULL, FALSE);
                 }
             }

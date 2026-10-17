@@ -182,6 +182,12 @@ private:
     // 文字自适应反色：ULW 半透明背景下文字深浅可脱离主题自动适配
     bool m_text_dark = false;       // false=浅色文字（深背景），true=深色文字
     bool m_text_adaptive = false;   // 本显示会话是否翻转过主题文字色
+    // 速度列 accent 亮/深变体独立判定：反色判定只采左侧进程名列（咩咩
+    // 2026-10-16 指定），左右背景亮度分裂时（左暗右亮）亮变体叠亮背景
+    // 对比塌——彩字真彩化后暴露（土灰时代的均值恰好提供了假对比）。
+    // 对右侧速度列区域单独取对比更大的变体（上/下载橙绿分别判）
+    bool m_speed_flip_up = false;
+    bool m_speed_flip_down = false;
 
     // ULW 呈现资源：32bpp DIB 表面 + coverage 双底 pass + 采样表面
     HDC m_ulw_dc = nullptr;
