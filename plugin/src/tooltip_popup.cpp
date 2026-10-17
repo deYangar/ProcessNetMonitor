@@ -524,8 +524,31 @@ COLORREF CTooltipPopup::GetAccentColor(bool is_upload) {
     // 橙亮变体（2026-10-17 咩咩对比图四选一收敛 #4）：纯橙 B=0 真机浊、
     // B=64 泛白（暖色低饱和灰白化人眼敏感），终选降亮去饱和系——亮度
     // 161 对齐绿 155（并排均衡），边缘饱和度 59% 接近绿的 51%（OK 基准）
-    if (is_upload) return light ? RGB(230, 150, 40) : RGB(230, 126, 34);  // orange
-    return light ? RGB(85, 208, 125) : RGB(70, 175, 95);               // green（亮 162 对齐橙 161；深 134 亮背景对比图直选——压饱和防荧光晃眼，咩咩 2026-10-17）
+    COLORREF c = is_upload
+        ? (light ? RGB(230, 150, 40) : RGB(230, 126, 34))   // orange
+        : (light ? RGB(85, 208, 125) : RGB(70, 175, 95));   // green（亮 162 对齐橙 161；深 134 亮背景对比图直选——压饱和防荧光晃眼，咩咩 2026-10-17）
+    // 对比保障（2026-10-18 顺修，咩咩拍板）：变体对亮度带宽只有 15（橙
+    // 147~161）/28（绿 134~162），背景落在变体带 ±45 内（中灰过渡带——
+    // 低浓度+系统压暗后的典型产物）时所选变体与背景差不足，彩字发灰
+    // 「没有高亮」。等比缩放 RGB（色相/饱和度不变，只动亮度）推离背景
+    // 到差 ≥45：深方向（背景亮于字）无上限；亮方向受色相天花板限制，
+    // 单通道 clamp 到 255 后如实到顶为止（橙绿相再亮就黄白化）
+    if (m_speed_bg_lum >= 0.0) {
+        double cl = (299.0 * GetRValue(c) + 587.0 * GetGValue(c)
+                     + 114.0 * GetBValue(c)) / 1000.0;
+        double diff = m_speed_bg_lum - cl;
+        if (fabs(diff) < 45.0) {
+            // 推离背景（不是推离当前字色）：背景亮→压到比背景暗 45，
+            // 背景暗→提到比背景亮 45（与变体选择同方向加强）
+            double target = (diff >= 0.0) ? m_speed_bg_lum - 45.0
+                                          : m_speed_bg_lum + 45.0;
+            double k = target / cl;
+            c = RGB((int)min(255.0, GetRValue(c) * k + 0.5),
+                    (int)min(255.0, GetGValue(c) * k + 0.5),
+                    (int)min(255.0, GetBValue(c) * k + 0.5));
+        }
+    }
+    return c;
 }
 
 COLORREF CTooltipPopup::GetSectionBgColor() {
@@ -603,7 +626,7 @@ void CTooltipPopup::DrawBackground(HDC hdc, int w, int h, bool content_only) {
         // ULW 模式：coverage pass（白/黑底）上只画边框线——背景由
         // ComposeLayeredSurface 提供（自绘档=烘焙模糊背景，透明档=
         // 面板色×opacity alpha）；边框作为内容参与双底色解算（精确
-        // 半透明边缘）。边框跟面板主题（装饰元素，反色翻转不触碰）
+        // 半透明边缘）。边框跟面板观感主题（2026-10-18 起随判定翻转）
         HPEN hPen = CreatePen(PS_SOLID, 1, UseDarkTheme() ? RGB(55, 55, 55) : RGB(220, 220, 220));
         HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
         HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
@@ -1133,6 +1156,7 @@ void CTooltipPopup::RefreshBackdrop(const RECT& popup_rect) {
     m_text_dark = m_dark_mode;
     m_speed_flip_up = false;
     m_speed_flip_down = false;
+    m_speed_bg_lum = -1.0;
     if (!m_acrylic_active) return;
 
     int w = popup_rect.right - popup_rect.left;
@@ -1187,6 +1211,8 @@ void CTooltipPopup::RefreshBackdrop(const RECT& popup_rect) {
 
     // 反色判定（op>=80 已在截屏前提前返回）
     if (screen_lum < 0.0) return;
+    // 复位态下 GetBgColor 走系统主题——第一遍判定（翻不翻）以系统主题
+    // 面板为基准
     COLORREF panel = GetBgColor();
     double panel_lum = (299.0 * GetRValue(panel) + 587.0 * GetGValue(panel)
                         + 114.0 * GetBValue(panel)) / 1000.0;
@@ -1195,16 +1221,23 @@ void CTooltipPopup::RefreshBackdrop(const RECT& popup_rect) {
     double text_lum = m_dark_mode ? 240.0 : 30.0;
     bool flip = (fabs(bg_lum - text_lum) < 70.0);
     if (flip) {
-        // 撞色：翻转文字深浅
+        // 撞色：翻转文字深浅，面板观感主题随之统一翻转（UseDarkTheme
+        // = UseTextTheme，2026-10-18 主修）——判定/合成改用翻转后的
+        // panel：白桌面从深主题灰玻璃变亮玻璃，彩字深变体在亮底上
+        // 对比立起来
         m_text_dark = !m_dark_mode;
         m_text_adaptive = true;
+        panel = GetBgColor();
+        panel_lum = (299.0 * GetRValue(panel) + 587.0 * GetGValue(panel)
+                     + 114.0 * GetBValue(panel)) / 1000.0;
     }
 
     // 速度列 accent 变体独立判定：右列取对比更大的变体（中点判定，各
-    // 色独立）。真彩化后彩字没有土灰均值的「假对比」，亮变体（橙 173/
-    // 绿 155）叠亮背景（如 op 低+白桌面，bg 逼近 200）时字比背景还暗，
-    // 笔画存在感塌掉——咩咩 2026-10-17「太细看不清」的第二根因。存与
-    // 左判定 UseTextTheme() 的差值，GetAccentColor 里做翻转
+    // 色独立；翻转后 sbg 与实际合成同源）。真彩化后彩字没有土灰均值的
+    // 「假对比」，亮变体（橙 173/绿 155）叠亮背景（如 op 低+白桌面，bg
+    // 逼近 200）时字比背景还暗，笔画存在感塌掉——咩咩 2026-10-17「太
+    // 细看不清」的第二根因。存与左判定 UseTextTheme() 的差值，
+    // GetAccentColor 里做翻转；sbg 存 m_speed_bg_lum 供对比保障
     if (!lums_r.empty()) {
         size_t mid_r = lums_r.size() / 2;
         std::nth_element(lums_r.begin(), lums_r.begin() + mid_r, lums_r.end());
@@ -1215,6 +1248,7 @@ void CTooltipPopup::RefreshBackdrop(const RECT& popup_rect) {
         bool text_light = UseTextTheme();
         m_speed_flip_up = want_up_light != text_light;
         m_speed_flip_down = want_down_light != text_light;
+        m_speed_bg_lum = sbg;
     }
 }
 

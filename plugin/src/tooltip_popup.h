@@ -136,16 +136,26 @@ private:
 
     // Helpers
     bool IsDarkMode();
-    // 面板主题 = 真实主题（背景/section 条等面板元素用）
-    bool UseDarkTheme() const { return m_dark_mode; }
+    // 面板观感主题（背景/section 条/分隔线/按钮等面板元素用）：不透明档
+    // 与高浓度档（op≥80 不做判定）跟系统主题；半透明档与文字判定统一
+    // （2026-10-18 主修）——判定翻深字时面板整套翻亮。此前面板独跟系统
+    // 主题，白桌面+低浓度+深主题时背景停在 ~198 的不亮不暗灰（blur 只
+    // 压暗 6%），而彩字变体对亮度带只有 15/28，深浅两头都够不着高对比，
+    // 速度列发灰；面板跟随判定后白桌面呈现亮玻璃+深字+深变体彩字，暗
+    // 桌面维持现状
+    bool UseDarkTheme() const { return UseTextTheme(); }
     // 文字主题：默认跟随真实主题；ULW 半透明背景下背景观感≈桌面时，
-    // UpdateAdaptiveTextTheme 会按对比度自动翻转文字深浅（撞色保护）
+    // RefreshBackdrop 会按对比度自动翻转文字深浅（撞色保护）
     bool UseTextTheme() const { return m_text_adaptive ? m_text_dark : m_dark_mode; }
     COLORREF GetBgColor();
     COLORREF GetTextColor();
     // 强调色（橙=上传 绿=下载），速度数字与区块标题共用：深浅跟文字主题
     // 走并随右列独立翻转保对比。标题条实心自绘底时代曾有 on_panel 分支
-    // （跟面板主题不翻转），2026-10-18 实心底退役后统一（咩咩拍板）
+    // （跟面板主题不翻转），2026-10-18 实心底退役后统一（咩咩拍板）。
+    // 顺修（2026-10-18）：变体对亮度带宽只有 15（橙）/28（绿），背景落在
+    // 变体带附近时（中灰过渡带）所选变体与背景差 <45 彩字发灰——按
+    // m_speed_bg_lum 等比缩放 RGB（保色相）推离背景方向到差 ≥45；亮方
+    // 向受色相天花板限制（单通道 clamp 后如实到顶为止）
     COLORREF GetAccentColor(bool is_upload);
     COLORREF GetSectionBgColor();
 
@@ -179,14 +189,19 @@ private:
     bool m_noise_acrylic = false;   // 亚克力档：面板叠加 Fluent 细噪声（与模糊档可辨）
     HWND m_blur_hwnd = nullptr;     // blur 效果层（SWCA 系统模糊，点击穿透）
     // 文字自适应反色：ULW 半透明背景下文字深浅可脱离主题自动适配
-    bool m_text_dark = false;       // false=浅色文字（深背景），true=深色文字
+    bool m_text_dark = false;       // true=浅色文字（深背景观感），false=深色文字
     bool m_text_adaptive = false;   // 本显示会话是否翻转过主题文字色
     // 速度列 accent 亮/深变体独立判定：反色判定只采左侧进程名列（咩咩
     // 2026-10-16 指定），左右背景亮度分裂时（左暗右亮）亮变体叠亮背景
     // 对比塌——彩字真彩化后暴露（土灰时代的均值恰好提供了假对比）。
-    // 对右侧速度列区域单独取对比更大的变体（上/下载橙绿分别判）
+    // 对右侧速度列区域单独取对比更大的变体（上/下载橙绿分别判；中点
+    // 判定对固定两点数学上即是取差更大者）
     bool m_speed_flip_up = false;
     bool m_speed_flip_down = false;
+    // 速度列区域背景亮度（RefreshBackdrop 的 sbg 公式值，随判定刷新）；
+    // -1=未判定（高浓度 op≥80 / 不透明档 / 首帧判定前），GetAccentColor
+    // 的对比保障只在有效时生效
+    double m_speed_bg_lum = -1.0;
 
     // ULW 呈现资源：32bpp DIB 表面 + coverage 双底 pass + 采样表面
     HDC m_ulw_dc = nullptr;
