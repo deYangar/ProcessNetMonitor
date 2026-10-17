@@ -275,6 +275,7 @@ CTooltipPopup::~CTooltipPopup() {
     }
     if (m_font_normal) DeleteObject(m_font_normal);
     if (m_font_small) DeleteObject(m_font_small);
+    if (m_font_speed) DeleteObject(m_font_speed);
     if (m_pen_separator) DeleteObject(m_pen_separator);
     // 类注销：当前 TM 无插件热重载不会触发，但若未来支持热卸载且新 DLL
     // 分到同一 hInst 地址，残留的已注册类会让 CreateWindow 沿用指向已
@@ -517,8 +518,11 @@ COLORREF CTooltipPopup::GetAccentColor(bool is_upload, bool on_panel) {
     // 速度列背后的亮暗，亮变体叠亮背景对比塌（见头文件注释）
     if (!on_panel && (is_upload ? m_speed_flip_up : m_speed_flip_down))
         light = !light;
-    if (is_upload) return light ? RGB(255, 165, 0) : RGB(230, 126, 34);  // orange
-    return light ? RGB(80, 200, 120) : RGB(46, 160, 67);                // green
+    // 橙亮变体（2026-10-17 咩咩对比图四选一收敛 #4）：纯橙 B=0 真机浊、
+    // B=64 泛白（暖色低饱和灰白化人眼敏感），终选降亮去饱和系——亮度
+    // 161 对齐绿 155（并排均衡），边缘饱和度 59% 接近绿的 51%（OK 基准）
+    if (is_upload) return light ? RGB(230, 150, 40) : RGB(230, 126, 34);  // orange
+    return light ? RGB(85, 208, 125) : RGB(70, 175, 95);               // green（亮 162 对齐橙 161；深 134 亮背景对比图直选——压饱和防荧光晃眼，咩咩 2026-10-17）
 }
 
 COLORREF CTooltipPopup::GetSectionBgColor() {
@@ -714,6 +718,7 @@ void CTooltipPopup::DrawProcRow(HDC hdc, int y, const ProcDisplayInfo& proc, boo
 
     SetTextColor(hdc, GetAccentColor(is_upload));
     RECT spd_rc = { client.right - PADDING - SPEED_AREA_W, y, client.right - PADDING, y + ROW_HEIGHT };
+    SelectObject(hdc, m_font_speed);   // 速度数字半粗（支柱一）：函数尾恢复 hOldFont
     DrawTextW(hdc, spd_buf, -1, &spd_rc, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
 
     // 4. Subtle separator line
@@ -1168,8 +1173,8 @@ void CTooltipPopup::RefreshBackdrop(const RECT& popup_rect) {
         std::nth_element(lums_r.begin(), lums_r.begin() + mid_r, lums_r.end());
         double sbg = (op / 100.0) * panel_lum
                    + (1.0 - op / 100.0) * (double)lums_r[mid_r];
-        bool want_up_light = sbg < (173.0 + 147.0) / 2;    // 橙两变体中点
-        bool want_down_light = sbg < (155.0 + 115.0) / 2;  // 绿两变体中点
+        bool want_up_light = sbg < (161.0 + 147.0) / 2;    // 橙两变体中点（161=lum(230,150,40)）
+        bool want_down_light = sbg < (162.0 + 134.0) / 2;  // 绿两变体中点（134=lum(70,175,95)）
         bool text_light = UseTextTheme();
         m_speed_flip_up = want_up_light != text_light;
         m_speed_flip_down = want_down_light != text_light;
@@ -1829,6 +1834,7 @@ void CTooltipPopup::UpdateDpiScale(const RECT& anchor_rect) {
 void CTooltipPopup::RecreateScaledResources() {
     if (m_font_normal) DeleteObject(m_font_normal);
     if (m_font_small) DeleteObject(m_font_small);
+    if (m_font_speed) DeleteObject(m_font_speed);
     if (m_pen_separator) DeleteObject(m_pen_separator);
     // 微软雅黑 + ClearType（咩咩点名，2026-10-16）：coverage 双底 pass 在
     // 已知不透明底上渲染，ClearType 可用；解出的内容色带 sub-pixel 加权，
@@ -1843,8 +1849,15 @@ void CTooltipPopup::RecreateScaledResources() {
                                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                  CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
     m_font_small = CreateFontW((int)(-13 * m_dpi_scale), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
+                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
+    // 速度列数字专用半粗（支柱一，2026-10-17 咩咩拍板）：雅黑数字字形简
+    // 单，半粗不糊；彩字感知亮度低于白字 28%，半粗补回笔画物理存在感。
+    // 半粗笔画更宽→ClearType 全覆盖区更多、亚像素死点更少，与解算层
+    // 相辅。SPEED_AREA_W=85 容纳半粗余量（"99.9 MB/s"≈74px）
+    m_font_speed = CreateFontW((int)(-14 * m_dpi_scale), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
     m_pen_separator = CreatePen(PS_SOLID, 1, UseDarkTheme() ? RGB(45, 45, 45) : RGB(235, 235, 235));
     m_pen_dark = UseDarkTheme();
 }

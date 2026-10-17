@@ -226,6 +226,9 @@ private:
     // Cached GDI objects (created once, reused in OnPaint)
     HFONT m_font_normal = nullptr;   // Microsoft YaHei -14 (process name + header)
     HFONT m_font_small = nullptr;    // Microsoft YaHei -13 (section title + detail button)
+    HFONT m_font_speed = nullptr;    // Microsoft YaHei -14 FW_SEMIBOLD（速度列数字专用：
+                                      // 彩字感知亮度低于白字 28%，同 1px 笔画存在感弱，
+                                      // 半粗补物理字重；ecfc8c2 回退常规体只针对正文）
     HPEN m_pen_separator = nullptr;  // row separator
     bool m_pen_dark = true;          // theme the cached separator pen was built for
 
