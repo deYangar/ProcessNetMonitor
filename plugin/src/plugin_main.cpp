@@ -2111,21 +2111,41 @@ ITMPlugin::OptionReturn CProcessNetPlugin::ShowOptionsDialog(void* hParent) {
     
     if (!hwnd) return OR_OPTION_NOT_PROVIDED;
     
-    // Center on parent
+    // Center on parent, clamped to the parent's monitor work area so the
+    // dialog stays fully on-screen when the parent sits in a screen corner
     if (hParent) {
         RECT rcParent, rcDlg;
         GetWindowRect((HWND)hParent, &rcParent);
         GetWindowRect(hwnd, &rcDlg);
-        int x = rcParent.left + ((rcParent.right - rcParent.left) - (rcDlg.right - rcDlg.left)) / 2;
-        int y = rcParent.top + ((rcParent.bottom - rcParent.top) - (rcDlg.bottom - rcDlg.top)) / 2;
+        int w = rcDlg.right - rcDlg.left;
+        int h = rcDlg.bottom - rcDlg.top;
+        int x = rcParent.left + ((rcParent.right - rcParent.left) - w) / 2;
+        int y = rcParent.top + ((rcParent.bottom - rcParent.top) - h) / 2;
+        HMONITOR hMon = MonitorFromWindow((HWND)hParent, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi = { sizeof(mi) };
+        if (GetMonitorInfoW(hMon, &mi)) {
+            const RECT& wa = mi.rcWork;
+            // clamp right/bottom first so the caption stays grabbable when
+            // the work area is smaller than the dialog
+            if (x > wa.right - w) x = wa.right - w;
+            if (y > wa.bottom - h) y = wa.bottom - h;
+            if (x < wa.left) x = wa.left;
+            if (y < wa.top) y = wa.top;
+        }
         SetWindowPos(hwnd, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
     } else {
-        // Center on screen
-        int sw = GetSystemMetrics(SM_CXSCREEN);
-        int sh = GetSystemMetrics(SM_CYSCREEN);
+        // Center on primary screen work area
+        RECT wa;
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
         RECT rc;
         GetWindowRect(hwnd, &rc);
-        SetWindowPos(hwnd, nullptr, (sw - (rc.right - rc.left)) / 2, (sh - (rc.bottom - rc.top)) / 2, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+        int w = rc.right - rc.left;
+        int h = rc.bottom - rc.top;
+        int x = wa.left + ((wa.right - wa.left) - w) / 2;
+        int y = wa.top + ((wa.bottom - wa.top) - h) / 2;
+        if (x + w > wa.right) x = wa.right - w;
+        if (y + h > wa.bottom) y = wa.bottom - h;
+        SetWindowPos(hwnd, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
     }
     
     ShowWindow(hwnd, SW_SHOW);
