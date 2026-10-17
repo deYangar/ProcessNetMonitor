@@ -19,17 +19,34 @@ if %ERRORLEVEL% NEQ 0 (
 )
 set COMMON_LINK=%COMMON_LINK% src\resource.res
 
+:: 编译后动作：默认只编译不部署（2026-10-18 咩咩拍板方案 B——自动
+:: 部署曾与手工部署流程竞争导致 TM 单实例弹框×2；要部署显式传 deploy）
+set AFTER=eof
+
 :: Parse architecture argument
 if "%1"=="x86" goto :build_x86
 if "%1"=="x64" goto :build_x64
 if "%1"=="all" goto :build_all
+if "%1"=="deploy" goto :deploy_set
+if "%1"=="deploy_all" goto :deploy_all_flow
 if "%1"=="" goto :build_x64
 
-echo Usage: build.bat [x86^|x64^|all]
-echo   x86  - Build 32-bit DLL only
-echo   x64  - Build 64-bit DLL only (default)
-echo   all  - Build both 32-bit and 64-bit DLLs
+echo Usage: build.bat [x86^|x64^|all^|deploy^|deploy_all]
+echo   x86 / x64 / all - build only, no deploy (default: x64)
+echo   deploy          - build x64 + deploy to test slot (kill TM, copy, relaunch)
+echo   deploy_all      - build both + deploy both to test slot
 exit /b 1
+
+:deploy_set
+set AFTER=deploy
+goto :build_x64
+
+:deploy_all_flow
+call :build_x86
+if errorlevel 1 exit /b 1
+call :build_x64
+if errorlevel 1 exit /b 1
+goto :deploy_all
 
 :build_x86
 echo === Building 32-bit (x86) DLL ===
@@ -43,7 +60,7 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 echo === x86 Build OK ===
-goto :eof
+goto :%AFTER%
 
 :build_x64
 echo === Building 64-bit (x64) DLL ===
@@ -57,17 +74,23 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 echo === x64 Build OK ===
-goto :deploy
+goto :%AFTER%
 
 :build_all
 call :build_x86
+if errorlevel 1 exit /b 1
 call :build_x64
-goto :deploy_all
+if errorlevel 1 exit /b 1
+goto :%AFTER%
 
 :deploy
-:: Deploy x64 DLL (use CIM to kill admin-privileged TM, works without elevation)
-powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"name='TrafficMonitor.exe'\" | Invoke-CimMethod -MethodName Terminate | Out-Null"
-timeout /t 2 /nobreak >nul
+:: Deploy x64 DLL (CIM kills admin-privileged TM without elevation; poll until
+:: gone before copying/launching - fixed sleep races single-instance mutex)
+powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"name='TrafficMonitor.exe'\" | Invoke-CimMethod -MethodName Terminate | Out-Null; foreach ($i in 1..30) { Start-Sleep -Seconds 1; if (-not (Get-CimInstance Win32_Process -Filter \"name='TrafficMonitor.exe'\")) { exit 0 } }; exit 1"
+if %ERRORLEVEL% NEQ 0 (
+    echo ERROR: TrafficMonitor did not exit within 30s, deploy aborted
+    exit /b 1
+)
 copy /y ProcessNetMonitor.dll "C:\Users\Yang\.zcode\workspace\default\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor\plugins\ProcessNetMonitor.dll"
 if %ERRORLEVEL% NEQ 0 (
     echo WARNING: x64 DLL copy failed! Close TrafficMonitor first.
@@ -88,9 +111,12 @@ echo DEPLOYED OK (x64)
 goto :eof
 
 :deploy_all
-:: Deploy both DLLs
-powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"name='TrafficMonitor.exe'\" | Invoke-CimMethod -MethodName Terminate | Out-Null"
-timeout /t 2 /nobreak >nul
+:: Deploy both DLLs (kill+poll first - see :deploy note)
+powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"name='TrafficMonitor.exe'\" | Invoke-CimMethod -MethodName Terminate | Out-Null; foreach ($i in 1..30) { Start-Sleep -Seconds 1; if (-not (Get-CimInstance Win32_Process -Filter \"name='TrafficMonitor.exe'\")) { exit 0 } }; exit 1"
+if %ERRORLEVEL% NEQ 0 (
+    echo ERROR: TrafficMonitor did not exit within 30s, deploy aborted
+    exit /b 1
+)
 copy /y ProcessNetMonitor.dll "C:\Users\Yang\.zcode\workspace\default\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor\plugins\ProcessNetMonitor.dll"
 copy /y ProcessNetMonitor_x86.dll "C:\Users\Yang\.zcode\workspace\default\projects\ProcessNetMonitor\TrafficMonitor\TrafficMonitor\plugins\ProcessNetMonitor_x86.dll"
 if %ERRORLEVEL% NEQ 0 (
@@ -109,3 +135,4 @@ schtasks /run /tn "LaunchTM" >nul 2>&1
 timeout /t 3 /nobreak >nul
 schtasks /delete /tn "LaunchTM" /f >nul 2>&1
 echo DEPLOYED OK (x86 + x64)
+goto :eof
