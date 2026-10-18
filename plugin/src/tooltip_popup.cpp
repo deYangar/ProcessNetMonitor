@@ -98,6 +98,198 @@ LRESULT CALLBACK CTooltipPopup::WatchdogProc(HWND hwnd, UINT msg, WPARAM wp, LPA
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
+// ---- 锚窗事件驱动跟随（方案 A，2026-10-18）----
+// detach 时若本插件不在子类化链头（有后来者叠在上方），直接还原 orig 会
+// 掐断后来者的链——此时留 AnchorProc 原地纯透传（它仍正确链到 orig），
+// 随窗口销毁自然清掉。单锚窗前提下用一组静态残留量即可。重挂同窗时残留
+// 链可能位于新链下方，同一事件会进 AnchorProc 两次：第二次进来时 delta
+// 基准已被首次更新（dx=dy=0），除罕见的全量重定位双跑一次外无副作用
+static WNDPROC s_orphan_anchor_orig = nullptr;
+static HWND s_orphan_anchor_hwnd = nullptr;
+
+LRESULT CALLBACK CTooltipPopup::AnchorProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    CTooltipPopup* self = s_instance;
+    WNDPROC orig = nullptr;
+    bool tracked = (self && self->m_tracked_hwnd == hwnd && self->m_tracked_orig_proc);
+    if (tracked) {
+        orig = self->m_tracked_orig_proc;
+    } else if (s_orphan_anchor_hwnd == hwnd && s_orphan_anchor_orig) {
+        orig = s_orphan_anchor_orig;   // 已 detach 的残留链：纯透传
+    }
+    if (!orig) return DefWindowProcW(hwnd, msg, wp, lp);
+
+    if (tracked) {
+        switch (msg) {
+        case WM_ENTERSIZEMOVE:
+            self->m_anchor_in_sizemove = true;
+            break;
+        case WM_EXITSIZEMOVE:
+            // 松手：全量重定位（布局公式+避开扫描）+ 强制反色终判——
+            // 免掉 UpdateData 静止判定的 300ms 稳定期，颜色在停下瞬间落定
+            self->m_anchor_in_sizemove = false;
+            self->AnchorFullPass(self->m_last_seen_anchor, true);
+            break;
+        case WM_WINDOWPOSCHANGED: {
+            WINDOWPOS* p = (WINDOWPOS*)lp;
+            if (p && !(p->flags & SWP_NOMOVE)) {
+                RECT na = { p->x, p->y, p->x + p->cx, p->y + p->cy };
+                self->OnAnchorPosChanged(na, !(p->flags & SWP_NOSIZE));
+            }
+            break;
+        }
+        case WM_NCDESTROY:
+            // 锚窗销毁：链随窗口一起消失，清状态即可（无需还原）
+            self->m_tracked_hwnd = nullptr;
+            self->m_tracked_orig_proc = nullptr;
+            self->m_have_last_seen_anchor = false;
+            if (s_orphan_anchor_hwnd == hwnd) {
+                s_orphan_anchor_hwnd = nullptr;
+                s_orphan_anchor_orig = nullptr;
+            }
+            break;
+        }
+    }
+    return CallWindowProcW(orig, hwnd, msg, wp, lp);
+}
+
+void CTooltipPopup::SetAnchorFollow(HWND anchor) {
+    if (anchor == m_tracked_hwnd) return;   // 幂等：HoverTick 每 tick 调
+    DetachAnchorTracker();
+    if (!anchor || !IsWindow(anchor)) return;
+    // 仅同线程窗口（popup 与 TM 主窗同住主线程；跨线程改 WNDPROC 不安全，
+    // 安装须在属主线程做——同 popup 看门狗的约束）。注意 GWFP 的返回值
+    // 才是线程 ID，out 参数是进程 ID（首版把两者读反，PID≠TID 恒真导致
+    // 锚窗跟踪永远装不上——verify_anchor_follow harness 抓出来的）
+    DWORD pid_anchor = 0;
+    DWORD tid_anchor = GetWindowThreadProcessId(anchor, &pid_anchor);
+    if (tid_anchor != GetCurrentThreadId()) return;
+    m_tracked_orig_proc = (WNDPROC)SetWindowLongPtrW(anchor, GWLP_WNDPROC,
+                                                     (LONG_PTR)AnchorProc);
+    if (!m_tracked_orig_proc) return;
+    m_tracked_hwnd = anchor;
+    m_anchor_in_sizemove = false;
+    m_have_last_seen_anchor = false;   // 首个位置事件只建基准、不跟随
+    if (s_orphan_anchor_hwnd == anchor) {
+        // 同窗重挂：旧残留链失去透传职责（新链自己链对 orig），作废
+        s_orphan_anchor_hwnd = nullptr;
+        s_orphan_anchor_orig = nullptr;
+    }
+}
+
+void CTooltipPopup::DetachAnchorTracker() {
+    if (!m_tracked_hwnd) return;
+    HWND hwnd = m_tracked_hwnd;
+    WNDPROC orig = m_tracked_orig_proc;
+    m_tracked_hwnd = nullptr;
+    m_tracked_orig_proc = nullptr;
+    m_have_last_seen_anchor = false;
+    m_anchor_in_sizemove = false;
+    if (!IsWindow(hwnd) || !orig) return;
+    if ((WNDPROC)GetWindowLongPtrW(hwnd, GWLP_WNDPROC) == AnchorProc) {
+        // 我们在链头：安全还原
+        SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)orig);
+    } else {
+        // 有后来者叠在上方：留透传链（见 AnchorProc 上方注释）
+        s_orphan_anchor_hwnd = hwnd;
+        s_orphan_anchor_orig = orig;
+    }
+}
+
+// 锚窗位置事件（拖动模态循环 / 程序化移动共用）：纯位移走轻量 delta
+// 跟随——不算布局、不做避开扫描，只挪 popup+blur 两窗 + 工作区 clamp；
+// 尺寸或显示器变化时布局公式的输入变了，节流 100ms 转全量。反色判定挂
+// 同一条事件流 150ms 节流（旧路径挂在被饿的 timer 上，250ms 名存实亡）
+void CTooltipPopup::OnAnchorPosChanged(const RECT& new_anchor, bool sized) {
+    if (!m_visible || !m_tracked_hwnd) return;
+    HMONITOR mon_now = MonitorFromRect(&new_anchor, MONITOR_DEFAULTTONEAREST);
+    if (!m_have_last_seen_anchor) {
+        m_last_seen_anchor = new_anchor;
+        m_last_seen_mon = mon_now;
+        m_have_last_seen_anchor = true;
+        return;
+    }
+    int dx = new_anchor.left - m_last_seen_anchor.left;
+    int dy = new_anchor.top - m_last_seen_anchor.top;
+    bool mon_changed = (mon_now != m_last_seen_mon);
+    if (sized || mon_changed) {
+        if (GetTickCount64() - m_last_full_pass_tick >= 100)
+            AnchorFullPass(new_anchor, false);
+    } else if (dx || dy) {
+        RECT cur;
+        if (GetWindowRect(m_hwnd, &cur)) {
+            int w = cur.right - cur.left, h = cur.bottom - cur.top;
+            int x = cur.left + dx, y = cur.top + dy;
+            // 与 PositionWindow 终段同款工作区 clamp：贴屏幕边缘时钉在
+            // 边上、反向拖回立即恢复（基准按 anchor 推进，无累积漂移）
+            int margin = max(4, (int)(4 * m_dpi_scale));
+            RECT work, monr;
+            PNM_GetWorkAreaForRect(new_anchor, work, monr);
+            if (x + w > work.right) x = work.right - w - margin;
+            if (x < work.left) x = work.left + margin;
+            if (y + h > work.bottom) y = work.bottom - h - margin;
+            if (y < work.top) y = work.top + margin;
+            if (m_blur_hwnd)
+                SetWindowPos(m_blur_hwnd, HWND_TOP, x, y, 0, 0,
+                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            SetWindowPos(m_hwnd, HWND_TOP, x, y, 0, 0,
+                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            AnchorJudgeThrottled({ x, y, x + w, y + h }, 150);
+        }
+        // 悬停冻结规则不适用于锚跟随：光标拖的就是锚窗本身，popup 必须
+        // 粘着锚窗走（与旧轮询路径语义一致——UpdateAndShow 跟随不查冻结）
+    }
+    m_last_seen_anchor = new_anchor;
+    m_last_seen_mon = mon_now;
+    m_last_anchor = new_anchor;
+    if (m_on_anchor_moved) m_on_anchor_moved(new_anchor);
+}
+
+// 全量重定位（尺寸变/跨屏/松手）：DPI 重算 + 完整 PositionWindow（布局
+// 公式+避开扫描）。force_judge=true 清判定节流钟强制重判——EXITSIZEMOVE
+// 松手路径用，颜色在停下瞬间落定
+void CTooltipPopup::AnchorFullPass(const RECT& anchor_rect, bool force_judge) {
+    if (!m_visible || !m_hwnd) return;
+    RECT r = anchor_rect;
+    if (r.right <= r.left || r.bottom <= r.top) {
+        RECT wr;
+        if (m_tracked_hwnd && GetWindowRect(m_tracked_hwnd, &wr)) r = wr;
+        else return;
+    }
+    m_last_full_pass_tick = GetTickCount64();
+    UpdateDpiScale(r);
+    if (force_judge) m_last_refresh_tick = 0;
+    // 新会话语义：避开状态复位（与 UpdateAndShow 的 fresh-session 处理
+    // 一致）
+    m_avoided = false;
+    m_no_overlap_tick = 0;
+    PositionWindow(r);
+    InvalidateRect(m_hwnd, NULL, FALSE);
+    m_last_anchor = r;
+    if (m_on_anchor_moved) m_on_anchor_moved(r);
+}
+
+// 反色判定节流（事件流驱动）：判定变化才重绘（比较集合与 UpdateData
+// 静止判定同款）。affinity 不可用（老系统）时不跑——移动中清空表面截屏
+// 会闪；首判失败当场翻 m_affinity_ok=false 并已清空表面，需同步补一帧
+// ULW 恢复显示（本路径没有 PositionWindow 末尾的 UpdateWindow 兜底）
+void CTooltipPopup::AnchorJudgeThrottled(const RECT& rc, ULONGLONG min_interval_ms) {
+    if (!m_acrylic_active || !m_affinity_ok) return;
+    if (GetTickCount64() - m_last_refresh_tick < min_interval_ms) return;
+    bool d0 = m_text_dark, a0 = m_text_adaptive;
+    bool u0 = m_speed_flip_up, v0 = m_speed_flip_down;
+    bool affinity_before = m_affinity_ok;
+    RefreshBackdrop(rc);
+    m_last_snap_rect = rc;
+    m_last_refresh_tick = GetTickCount64();
+    if (m_text_dark != d0 || m_text_adaptive != a0 ||
+        m_speed_flip_up != u0 || m_speed_flip_down != v0)
+        InvalidateRect(m_hwnd, NULL, FALSE);
+    if (affinity_before && !m_affinity_ok) {
+        InvalidateRect(m_hwnd, NULL, FALSE);
+        UpdateWindow(m_hwnd);
+    }
+}
+
 // Capture DLL instance handle for window class registration
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
@@ -243,6 +435,10 @@ CTooltipPopup::CTooltipPopup() {
 }
 
 CTooltipPopup::~CTooltipPopup() {
+    // 锚窗子类化必须最先还原：TM 主窗通常活得比本 DLL 久，留着 AnchorProc
+    // 会在 DLL 卸载后炸宿主。还原只动 WNDPROC 不触发回调，shutdown 期间
+    // 也安全（g_shutting_down 不拦截本步）
+    DetachAnchorTracker();
     if (m_watchdog_hwnd) {
         if (g_shutting_down) {
             m_watchdog_hwnd = nullptr;
@@ -1927,6 +2123,9 @@ void CTooltipPopup::RecreateScaledResources() {
 
 void CTooltipPopup::Hide() {
     if (m_visible) {
+        // 事件跟随先卸载（锚窗子类化只在可见期存在；HoverTick 的 reconcile
+        // 每 tick 也会收敛，这里即时卸掉）
+        DetachAnchorTracker();
         ShowWindow(m_hwnd, SW_HIDE);
         if (m_blur_hwnd) ShowWindow(m_blur_hwnd, SW_HIDE);
         m_visible = false;

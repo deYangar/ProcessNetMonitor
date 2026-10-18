@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <functional>
 #include "capture.h"
 
 // Set during DLL_PROCESS_DETACH. Window destructors skip DestroyWindow when
@@ -69,6 +70,25 @@ public:
     // tooltip window and avoid overlapping it.
     void SetAnchorHwnd(HWND hwnd) { m_anchor_hwnd = hwnd; }
 
+    // ---- 锚窗事件驱动跟随（拖动零延迟，2026-10-18 方案 A 咩咩拍板）----
+    // 旧跟随靠 100ms WM_TIMER 轮询：WM_TIMER 是最低优先级合成消息，拖动
+    // 模态循环里鼠标流不断，tick 被挤得时跑时不跑——悬浮窗掉队数百 ms 的
+    // 根因。改为子类化 TM 主窗拦 WM_WINDOWPOSCHANGED：位置事件以窗口过程
+    // 直接调用同步直达（不走队列、不受输入流挤压），模态循环每挪一像素
+    // 都当场跟随。纯位移走轻量 delta 路径（不算布局、不做避开扫描），
+    // 反色判定挂同一事件流 150ms 节流；松手（EXITSIZEMOVE）全量重定位 +
+    // 强制终判，免掉静止判定 300ms 稳定期。
+    // anchor=null 卸载（Hide 内部即时卸载；固定/换目标由 HoverTick 每 tick
+    // reconcile 收敛）。子类化被第三方注入器剥掉时静默退回轮询兜底
+    // （HoverTick 仍在，行为不劣于旧版），不自动重挂：无法分辨「被剥」与
+    // 「他人合法叠子类化」，误重挂会造调用环；下个显示会话重挂即自愈
+    void SetAnchorFollow(HWND anchor);
+    // 事件路径同步回写 plugin 侧锚矩形（m_popup_anchor）：HoverTick 的轮询
+    // 比对因此常态相等，不再触发全量 UpdateAndShow（轮询保留作兜底）
+    void SetAnchorMovedCallback(std::function<void(const RECT&)> cb) {
+        m_on_anchor_moved = std::move(cb);
+    }
+
     std::wstring m_status;   // status/warning line (empty = none)
 
     // Public for standalone WndProc access
@@ -88,6 +108,24 @@ private:
     // the hover timer from the owning thread when it finds them replaced.
     static LRESULT CALLBACK WatchdogProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
     HWND m_watchdog_hwnd = nullptr;
+
+    // 锚窗子类化跟踪（见 SetAnchorFollow 注释）
+    static LRESULT CALLBACK AnchorProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
+    void DetachAnchorTracker();
+    // 锚窗位置事件：纯位移轻量 delta 跟随；尺寸/跨屏转节流全量
+    void OnAnchorPosChanged(const RECT& new_anchor, bool sized);
+    // 全量重定位（DPI+公式+避开扫描）；force_judge 清节流钟强制反色重判
+    void AnchorFullPass(const RECT& anchor_rect, bool force_judge);
+    // 反色判定节流（事件流驱动；判定变化才重绘）
+    void AnchorJudgeThrottled(const RECT& rc, ULONGLONG min_interval_ms);
+    HWND m_tracked_hwnd = nullptr;        // 被子类化跟踪的锚窗（TM 主窗）
+    WNDPROC m_tracked_orig_proc = nullptr;
+    bool m_anchor_in_sizemove = false;    // 锚窗拖动/缩放会话进行中
+    bool m_have_last_seen_anchor = false; // delta 基准是否已建立
+    RECT m_last_seen_anchor = {};         // 上一个锚矩形（delta 基准）
+    HMONITOR m_last_seen_mon = nullptr;   // 上一个锚所在显示器（跨屏检测）
+    ULONGLONG m_last_full_pass_tick = 0;  // 尺寸/跨屏全量重定位节流
+    std::function<void(const RECT&)> m_on_anchor_moved;
 
     // Layout & rendering
     void CalcLayout(HDC hdc, int& out_w, int& out_h, int& out_up_count, int& out_down_count);

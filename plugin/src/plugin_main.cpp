@@ -992,6 +992,13 @@ void CProcessNetPlugin::InitOnce(const wchar_t* cfg_base) {
     // Use DLL's HINSTANCE (not EXE's) so resource loading (icons, etc.) works
     HINSTANCE hInst = s_dll_hinst ? s_dll_hinst : (HINSTANCE)GetModuleHandleW(NULL);
     m_popup_created = m_popup.Initialize(hInst);
+    if (m_popup_created) {
+        // 方案 A（2026-10-18）：锚窗事件跟随的同步回写——事件路径挪完窗
+        // 立即更新 m_popup_anchor，HoverTick 的轮询比对因此常态相等、不再
+        // 触发全量 UpdateAndShow（轮询保留作注入器剥子类化时的兜底）
+        m_popup.SetAnchorMovedCallback(
+            [this](const RECT& r) { m_popup_anchor = r; });
+    }
 
     // Plugin config dir: <plugins>\ProcessNetMonitor (GetPluginConfigDir returns
     // the plugins/ folder on 1.86). capture.log / etw_capture.log follow the
@@ -1399,6 +1406,19 @@ void CProcessNetPlugin::HoverTick() {
     } else {
         // Cursor on the popup itself: keep it open
         m_hover_leave_tick = 0;
+    }
+
+    // --- anchor event-follow reconcile（方案 A，2026-10-18）---
+    // 可见且跟随态（悬浮主窗锚、非固定）才子类化锚窗；Hide() 内部即时卸
+    // 载，固定/换目标在此每 tick 收敛。事件路径经回调同步回写
+    // m_popup_anchor，下方轮询比对常态相等、不再走全量 UpdateAndShow；
+    // 子类化被注入器剥掉时轮询兜底接管（行为=旧版 100ms 跟随）
+    {
+        HWND follow_wnd = nullptr;
+        if (m_popup.IsVisible() && !m_popup_pinned && m_hover_target &&
+            !m_hover_is_taskbar && IsWindow(m_hover_target))
+            follow_wnd = m_hover_target;
+        m_popup.SetAnchorFollow(follow_wnd);
     }
 
     // --- data refresh while visible (lightweight: no reposition unless anchor moved) ---
