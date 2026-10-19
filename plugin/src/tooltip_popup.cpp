@@ -1324,16 +1324,28 @@ void CTooltipPopup::ClearLayeredSurfaceForCapture() {
 // 窗口即时生效（无需等合成帧）、可逆，SRCCOPY/CAPTUREBLT 两 flag 均剔除。
 // 设置失败（Win10 2004 前的老系统）记 m_affinity_ok=false 永久禁用静止
 // 刷新——那种系统只能清空法，每周期闪一次不可接受
+// blur 效果层必须一并剔除（2026-10-19 修复「先亮后暗」）：只剔内容层时
+// BitBlt 截到的是 blur 层的窗口表面（纯黑，SWCA 效果不进 redirection
+// surface）而非 DWM 合成后的模糊观感——静止判定中位亮度≈0 必然翻转
+// 主题，与首显（窗口未上屏、截到 raw 桌面）判定打架，观感即「弹出亮
+// 玻璃、300ms 后跳暗面板」。两层同剔后四条判定路径（首显/移动/静止/
+// 松手）输入同源 raw，第一帧即落定不再跳变
 bool CTooltipPopup::CaptureSnapNoFlash(const RECT& popup_rect, int w, int h) {
     if (!m_hwnd || !m_snap_dc || !m_snap_bits) return false;
     if (!SetWindowDisplayAffinity(m_hwnd, WDA_EXCLUDEFROMCAPTURE)) {
         m_affinity_ok = false;
         return false;
     }
+    if (m_blur_hwnd && !SetWindowDisplayAffinity(m_blur_hwnd, WDA_EXCLUDEFROMCAPTURE)) {
+        SetWindowDisplayAffinity(m_hwnd, 0);
+        m_affinity_ok = false;   // blur 层剔不掉：截屏已被污染，与内容层失败同款处置
+        return false;
+    }
     HDC scr = GetDC(NULL);
     BitBlt(m_snap_dc, 0, 0, w, h, scr, popup_rect.left, popup_rect.top,
            SRCCOPY | CAPTUREBLT);
     ReleaseDC(NULL, scr);
+    if (m_blur_hwnd) SetWindowDisplayAffinity(m_blur_hwnd, 0);
     SetWindowDisplayAffinity(m_hwnd, 0);
     return true;
 }
@@ -1348,6 +1360,7 @@ bool CTooltipPopup::CaptureSnapNoFlash(const RECT& popup_rect, int w, int h) {
 // 亮度公式承自旧 UpdateAdaptiveTextTheme：观感亮度与主题文字色对比
 // 不足则翻转深浅
 void CTooltipPopup::RefreshBackdrop(const RECT& popup_rect) {
+    bool prev_adaptive = m_text_adaptive;   // 迟滞基准：上轮是否处于翻转态
     m_text_adaptive = false;
     m_text_dark = m_dark_mode;
     m_speed_flip_up = false;
@@ -1415,7 +1428,10 @@ void CTooltipPopup::RefreshBackdrop(const RECT& popup_rect) {
     double bg_lum = (op / 100.0) * panel_lum + (1.0 - op / 100.0) * screen_lum;
     // 文字色亮度（深色主题=浅字 240 / 浅色主题=深字 30）
     double text_lum = m_dark_mode ? 240.0 : 30.0;
-    bool flip = (fabs(bg_lum - text_lum) < 70.0);
+    // 迟滞带（2026-10-19）：翻转门槛 70、翻回门槛 85——阈值附近（差
+    // 70~85 的边缘带）上轮已翻转则保持翻转。视频类背景亮度在阈值附近
+    // 缓慢波动时，单一门槛会每轮来回翻字色；15 的迟滞带把这种抖动吃掉
+    bool flip = (fabs(bg_lum - text_lum) < (prev_adaptive ? 85.0 : 70.0));
     if (flip) {
         // 撞色：翻转文字深浅，面板观感主题随之统一翻转（UseDarkTheme
         // = UseTextTheme，2026-10-18 主修）——判定/合成改用翻转后的
@@ -1966,12 +1982,17 @@ void CTooltipPopup::UpdateData(const std::vector<ProcDisplayInfo>& procs,
             if (!EqualRect(&cur, &m_last_snap_rect)) {
                 m_last_snap_rect = cur;
                 m_last_refresh_tick = GetTickCount64();
-            } else if (GetTickCount64() - m_last_refresh_tick >= 300) {
+                m_steady_probe_fast = true;   // 新位置：停稳后 300ms 快判一轮落定
+            } else if (GetTickCount64() - m_last_refresh_tick
+                       >= (m_steady_probe_fast ? 300 : 1000)) {
+                // 双档节奏：落定前 300ms（与移动判定衔接，停下即定色）、
+                // 落定后 1s 巡检（只管脚下背景真变了）
                 bool text_dark_before = m_text_dark;
                 bool adapt_before = m_text_adaptive;
                 bool speed_up_before = m_speed_flip_up, speed_down_before = m_speed_flip_down;
                 RefreshBackdrop(cur);
                 m_last_refresh_tick = GetTickCount64();
+                m_steady_probe_fast = false;
                 if (m_text_dark != text_dark_before || m_text_adaptive != adapt_before ||
                     m_speed_flip_up != speed_up_before || m_speed_flip_down != speed_down_before) {
                     InvalidateRect(m_hwnd, NULL, FALSE);

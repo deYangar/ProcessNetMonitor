@@ -256,6 +256,11 @@ private:
     // 时不做静止判定（首显判定仍在——那时窗口未上屏，截屏天然干净）
     ULONGLONG m_last_refresh_tick = 0;
     bool m_affinity_ok = true;
+    // 静止判定双档节奏（2026-10-19）：矩形刚变过（移动停止/重定位）置
+    // true，停稳 300ms 快判一轮落定；之后转 false 走 1s 巡检——判定输入
+    // 已与首显同源（CaptureSnapNoFlash 双层剔除），巡检职责只剩脚下背
+    // 真变了（开视频/切深色窗）的检测，500ms tick 全轮跑是浪费
+    bool m_steady_probe_fast = false;
 
     // Data
     std::vector<ProcDisplayInfo> m_procs;
