@@ -12,11 +12,11 @@
 extern HINSTANCE s_dll_hinst;   // tooltip_popup.cpp DllMain
 
 // 版面（96 DPI 基准；选项对话框自身也是固定像素风格，预览跟它统一）。
-// 结构与真实悬浮窗一致（总速条 + 实时上传区 + 实时下载区 + 查看详细
-// 按钮，2026-10-21 咩咩要求「和正常一样」——首版只画下载区被否）：
-// 12 + 34(header) + 24+2x32(上传) + 4(gap) + 24+3x32(下载) + 28(btn) + 12 = 298
+// 结构与真实悬浮窗一致且行数对齐 MAX_SHOW=5（2026-10-21 咩咩两轮反馈：
+// 先「和正常一样」补上传区，再「给够 5 个进程」）：
+// 12 + 34(header) + 24+5x32(上传) + 4(gap) + 24+5x32(下载) + 28(btn) + 12 = 458
 static const int PREV_W = 280;
-static const int PREV_H = 298;
+static const int PREV_H = 458;
 static const int PADDING = 12;
 static const int HEADER_H = 34;   // 总速条
 static const int SECTION_H = 24;  // 分区标题
@@ -264,7 +264,7 @@ void COpacityPreview::DrawContent(HDC dc) {
     // 总速条
     SetTextColor(dc, text);
     RECT rc_header = { PADDING, PADDING, PREV_W - PADDING, PADDING + HEADER_H };
-    DrawTextW(dc, L"\u2191 2.8 MB/s   \u2193 131.0 MB/s", -1, &rc_header,
+    DrawTextW(dc, L"\u2191 3.1 MB/s   \u2193 146.3 MB/s", -1, &rc_header,
               DT_LEFT | DT_SINGLELINE | DT_VCENTER);
     int y = PADDING + HEADER_H;
 
@@ -274,8 +274,13 @@ void COpacityPreview::DrawContent(HDC dc) {
     DrawTextW(dc, TR(L"\u25B2 \u5B9E\u65F6\u4E0A\u4F20"), -1, &rc_sec_up,
               DT_LEFT | DT_SINGLELINE | DT_VCENTER);
     y += SECTION_H;
-    y = DrawSampleRow(dc, y, L"OneDrive", L"2.1 MB/s", acc_up, text, sep, icon_c, m_font_normal);
-    y = DrawSampleRow(dc, y, L"Chrome",   L"0.4 MB/s", acc_up, text, sep, icon_c, m_font_normal);
+    static const wchar_t* up_names[5] = {
+        L"OneDrive", L"Chrome", L"Steam", L"WeChat", L"Edge" };
+    static const wchar_t* up_speeds[5] = {
+        L"2.1 MB/s", L"0.4 MB/s", L"0.3 MB/s", L"0.2 MB/s", L"0.1 MB/s" };
+    for (int i = 0; i < 5; i++)
+        y = DrawSampleRow(dc, y, up_names[i], up_speeds[i],
+                          acc_up, text, sep, icon_c, m_font_normal);
     y += GAP_H;
 
     // ▼ 实时下载
@@ -284,9 +289,13 @@ void COpacityPreview::DrawContent(HDC dc) {
     DrawTextW(dc, TR(L"\u25BC \u5B9E\u65F6\u4E0B\u8F7D"), -1, &rc_sec_dn,
               DT_LEFT | DT_SINGLELINE | DT_VCENTER);
     y += SECTION_H;
-    y = DrawSampleRow(dc, y, L"Chrome", L"87.2 MB/s", acc_down, text, sep, icon_c, m_font_normal);
-    y = DrawSampleRow(dc, y, L"Steam",  L"41.3 MB/s", acc_down, text, sep, icon_c, m_font_normal);
-    y = DrawSampleRow(dc, y, L"Edge",   L"12.6 MB/s", acc_down, text, sep, icon_c, m_font_normal);
+    static const wchar_t* dn_names[5] = {
+        L"Chrome", L"Steam", L"Edge", L"OneDrive", L"Firefox" };
+    static const wchar_t* dn_speeds[5] = {
+        L"87.2 MB/s", L"41.3 MB/s", L"12.6 MB/s", L"3.4 MB/s", L"1.8 MB/s" };
+    for (int i = 0; i < 5; i++)
+        y = DrawSampleRow(dc, y, dn_names[i], dn_speeds[i],
+                          acc_down, text, sep, icon_c, m_font_normal);
     y += 4;   // BTN_AREA_H - BTN_H
 
     // 「查看详细」按钮（实心自绘，配色与悬浮窗同款）
