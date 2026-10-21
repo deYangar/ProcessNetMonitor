@@ -33,7 +33,7 @@ cl /nologo /O2 /EHsc /MT /std:c++17 /utf-8 /Zi /DUNICODE /D_UNICODE /DWIN32_LEAN
    /FeProcessNetMonitor_debug.dll ^
    src\capture.cpp src\plugin_main.cpp src\tooltip_popup.cpp src\opacity_preview.cpp src\detail_window.cpp ^
    src\etw_capture.cpp src\ip_geo.cpp src\signature.cpp src\i18n.cpp ^
-   /link /DLL iphlpapi.lib ws2_32.lib gdi32.lib user32.lib shell32.lib dwmapi.lib advapi32.lib tdh.lib comctl32.lib ^
+   /link /DLL /OPT:REF iphlpapi.lib ws2_32.lib gdi32.lib user32.lib shell32.lib dwmapi.lib advapi32.lib tdh.lib comctl32.lib ^
    src\resource.res /OUT:ProcessNetMonitor_debug.dll
 
 if %ERRORLEVEL% NEQ 0 (
