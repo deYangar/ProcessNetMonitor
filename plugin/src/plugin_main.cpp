@@ -1717,14 +1717,18 @@ static void OptionsAdjustLayout(HWND hwnd) {
     if (hOld) SelectObject(hdc, hOld);
     ReleaseDC(hwnd, hdc);
 
-    // Step 2: Fit dialog width to controls (expand or shrink), capped to screen
+    // Step 2: Fit dialog width to controls (expand or shrink), capped to the
+    // work area of the monitor the dialog is on (not the primary screen —
+    // multi-monitor dialog must stay within its own monitor)
     RECT rcClient;
     GetClientRect(hwnd, &rcClient);
+    HMONITOR hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi = { sizeof(mi) };
+    bool has_mon = (GetMonitorInfoW(hMon, &mi) != FALSE);
+    int mon_w = has_mon ? (mi.rcWork.right - mi.rcWork.left)
+                        : GetSystemMetrics(SM_CXSCREEN);
     int desired_cx = max(500, max_right + MARGIN);
-    {
-        int screen_w = GetSystemMetrics(SM_CXSCREEN);
-        if (desired_cx > screen_w - 40) desired_cx = screen_w - 40;
-    }
+    if (desired_cx > mon_w - 40) desired_cx = mon_w - 40;
     if (desired_cx != rcClient.right) {
         RECT rcWnd = { 0, 0, desired_cx, rcClient.bottom };
         DWORD dlgStyle = (DWORD)GetWindowLongPtrW(hwnd, GWL_STYLE);
@@ -1733,19 +1737,22 @@ static void OptionsAdjustLayout(HWND hwnd) {
         int new_w = rcWnd.right - rcWnd.left;
         int new_h = rcWnd.bottom - rcWnd.top;
 
-        HWND hParent = GetParent(hwnd);
-        if (hParent) {
-            RECT rcP;
-            GetWindowRect(hParent, &rcP);
-            int x = rcP.left + ((rcP.right - rcP.left) - new_w) / 2;
-            int y = rcP.top + ((rcP.bottom - rcP.top) - new_h) / 2;
-            SetWindowPos(hwnd, nullptr, x, y, new_w, new_h, SWP_NOZORDER);
-        } else {
-            int sw = GetSystemMetrics(SM_CXSCREEN);
-            int sh = GetSystemMetrics(SM_CYSCREEN);
-            SetWindowPos(hwnd, nullptr, (sw - new_w) / 2, (sh - new_h) / 2,
-                         new_w, new_h, SWP_NOZORDER);
+        // resize 保持窗口当前中心，不重新以父窗居中——父窗是任务栏窄条，
+        // 以它为中心会把对话框拽出屏幕底边（语言切换必触发 resize，双向
+        // 都出屏）。再 clamp 到所在显示器工作区，与 ShowOptionsDialog 打开
+        // 时的定位同规则
+        RECT rcCur;
+        GetWindowRect(hwnd, &rcCur);
+        int x = rcCur.left + ((rcCur.right - rcCur.left) - new_w) / 2;
+        int y = rcCur.top + ((rcCur.bottom - rcCur.top) - new_h) / 2;
+        if (has_mon) {
+            const RECT& wa = mi.rcWork;
+            if (x > wa.right - new_w) x = wa.right - new_w;
+            if (y > wa.bottom - new_h) y = wa.bottom - new_h;
+            if (x < wa.left) x = wa.left;
+            if (y < wa.top) y = wa.top;
         }
+        SetWindowPos(hwnd, nullptr, x, y, new_w, new_h, SWP_NOZORDER);
         GetClientRect(hwnd, &rcClient);
     }
 
