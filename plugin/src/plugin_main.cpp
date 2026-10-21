@@ -1576,6 +1576,23 @@ static void OptionsAdjustLayout(HWND hwnd) {
     const int BTN_PAD = 32;   // push button: 两侧内边距
     const int MIN_CTRL_W = 60; // 收缩下限，防止极端译文把控件缩没
 
+    // 目标宽度（max_right）只收「本轮布局的输入」。右锚控件（Step 3/4
+    // 贴窗口右缘，位置 = 窗口宽-15）与行控件（Step 1.5/1.6 挪到 label
+    // 右侧）的位置是布局的**输出**：若按进入函数时的旧位置计入，
+    // desired = 上轮宽-MARGIN 系数项，每次语言切换窗口净涨一截、来回
+    // 切单调变宽（2026-10-21 实测每往返 +30px = 右锚环 +5 + 按钮译文
+    // 宽度差叠在旧 x 上 +20）。右锚/行控件由 Step 1.5/1.6/3/4 按新宽
+    // 度重摆，不参与宽度决策。
+    auto is_right_anchored = [](int id) {
+        return id == 1003 || id == 1004 || id == 1008 || id == 1009
+            || id == IDOK || id == IDCANCEL;
+    };
+    auto is_row_ctrl = [](int id) {
+        // 1025（透明度值）x=滑条右缘+8，同属布局输出（漏掉它会把上个
+        // 语言的滑条位置泄入本轮，zh 态被 en 的旧位置锁死回缩不去）
+        return id == 1014 || id == 1018 || id == 1022 || id == 1025;
+    };
+
     HFONT hDlgFont = (HFONT)SendMessageW(hwnd, WM_GETFONT, 0, 0);
     HDC hdc = GetDC(hwnd);
     HFONT hOld = hDlgFont ? (HFONT)SelectObject(hdc, hDlgFont) : nullptr;
@@ -1621,14 +1638,21 @@ static void OptionsAdjustLayout(HWND hwnd) {
                              SWP_NOMOVE | SWP_NOZORDER);
             }
             int right = rc.left + needed;
-            if (right > max_right) max_right = right;
+            int cid = GetDlgCtrlID(hChild);
+            if (!is_right_anchored(cid) && !is_row_ctrl(cid) && right > max_right)
+                max_right = right;
         } else if (lstrcmpW(cls, L"Edit") == 0 || lstrcmpW(cls, L"ComboBox") == 0) {
-            // EDIT/COMBOBOX 宽度不随文本调整，但右边缘计入对话框最小宽度，
-            // 防止对话框收缩后宽编辑框（如代理地址）溢出
-            RECT rc;
-            GetWindowRect(hChild, &rc);
-            MapWindowPoints(HWND_DESKTOP, hwnd, (LPPOINT)&rc, 2);
-            if (rc.right > max_right) max_right = rc.right;
+            // EDIT/COMBOBOX 宽度不随文本调整；左锚的（如代理地址 1007）按
+            // 当前右缘计入对话框最小宽度，防止对话框收缩后宽编辑框溢出。
+            // 右锚/行控件跳过——它们的位置由 Step 1.5/1.6/3 重摆，旧位置
+            // 计入会污染目标宽度（见函数头注释）
+            int id = GetDlgCtrlID(hChild);
+            if (!is_right_anchored(id) && !is_row_ctrl(id)) {
+                RECT rc;
+                GetWindowRect(hChild, &rc);
+                MapWindowPoints(HWND_DESKTOP, hwnd, (LPPOINT)&rc, 2);
+                if (rc.right > max_right) max_right = rc.right;
+            }
         }
         hChild = GetWindow(hChild, GW_HWNDNEXT);
     }
@@ -1658,8 +1682,8 @@ static void OptionsAdjustLayout(HWND hwnd) {
             SetWindowPos(hLangCombo, nullptr, 0, 0, combo_w, rc.bottom - rc.top,
                          SWP_NOMOVE | SWP_NOZORDER);
         }
-        int right = rc.left + combo_w;
-        if (right > max_right) max_right = right;
+        // 右缘不计入 max_right：1014 属行控件，Step 1.6 挪到 label 右侧后
+        // 按最终位置统一计入（这里若按旧 x 计入同样污染目标宽度）
     }
 
     // Step 1.6: label+control rows — the control must sit right of its
