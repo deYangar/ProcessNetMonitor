@@ -77,6 +77,40 @@ LRESULT CALLBACK COpacityPreview::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM
         Instance().m_hwnd = nullptr;
         return 0;
     }
+    if (msg == WM_NCHITTEST) {
+        // 整窗可拖（2026-10-21 咩咩要求）：客户区按标题栏语义返回
+        // HTCAPTION，点下即进系统移动循环。ULW 分层窗的全透明像素
+        // （圆角外）OS 自动点击穿透，无需自判几何
+        LRESULT ht = DefWindowProcW(hwnd, msg, wp, lp);
+        if (ht == HTCLIENT) return HTCAPTION;
+        return ht;
+    }
+    if (msg == WM_SETCURSOR) {
+        // 移动光标提示可拖
+        SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+        return TRUE;
+    }
+    if (msg == WM_ENTERSIZEMOVE) {
+        // 拖动中不收起（移动模态循环里销毁窗口会出乱子）
+        KillTimer(hwnd, TIMER_AUTOHIDE);
+        return 0;
+    }
+    if (msg == WM_EXITSIZEMOVE) {
+        SetTimer(hwnd, TIMER_AUTOHIDE, 2000, NULL);   // 松手重新计 2s
+        return 0;
+    }
+    if (msg == WM_WINDOWPOSCHANGED) {
+        // blur 效果层同步跟随（拖动中此消息持续来，轻量位移；Z 序不动
+        // ——blur 已在内容层之下，SWP_NOZORDER 保住）
+        HWND blur = Instance().m_blur_hwnd;
+        if (blur && IsWindow(blur)) {
+            RECT r;
+            GetWindowRect(hwnd, &r);
+            SetWindowPos(blur, NULL, r.left, r.top, 0, 0,
+                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
@@ -477,34 +511,53 @@ void COpacityPreview::Show(HWND hDlg, int effect, int opacity) {
     EnsureSurfaces();
     if (!m_ulw_bits || !m_cov_a_bits || !m_cov_c_bits) return;
 
-    // 定位：对话框右侧、与滑条行同水平线；右侧放不下退左侧，工作区 clamp
-    RECT rd = {}, rt = {};
-    GetWindowRect(hDlg, &rd);
-    HWND hTrack = GetDlgItem(hDlg, 1024);
-    int line_cy = rd.top + (rd.bottom - rd.top) / 2;
-    if (hTrack && GetWindowRect(hTrack, &rt))
-        line_cy = (rt.top + rt.bottom) / 2;
-    int x = rd.right + 12;
-    int y = line_cy - PREV_H / 2;
-    HMONITOR mon = MonitorFromWindow(hDlg, MONITOR_DEFAULTTONEAREST);
-    MONITORINFO mi = { sizeof(mi) };
-    if (GetMonitorInfoW(mon, &mi)) {
-        const RECT& wa = mi.rcWork;
-        if (x + PREV_W > wa.right) x = rd.left - 12 - PREV_W;
-        if (y + PREV_H > wa.bottom) y = wa.bottom - PREV_H;
-        if (y < wa.top) y = wa.top;
-        if (x < wa.left) x = wa.left;
-    }
+    // 定位：对话框右侧、与滑条行同水平线；右侧放不下退左侧，工作区 clamp。
+    // 仅在本次显示会话首帧定位（窗口刚建/自灭重建后不可见）——会话内
+    // 连续滑动不重定位，用户拖动后的位置保持到本会话结束
+    if (!IsWindowVisible(m_hwnd)) {
+        RECT rd = {}, rt = {};
+        GetWindowRect(hDlg, &rd);
+        HWND hTrack = GetDlgItem(hDlg, 1024);
+        int line_cy = rd.top + (rd.bottom - rd.top) / 2;
+        if (hTrack && GetWindowRect(hTrack, &rt))
+            line_cy = (rt.top + rt.bottom) / 2;
+        int x = rd.right + 12;
+        int y = line_cy - PREV_H / 2;
+        HMONITOR mon = MonitorFromWindow(hDlg, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi = { sizeof(mi) };
+        if (GetMonitorInfoW(mon, &mi)) {
+            const RECT& wa = mi.rcWork;
+            if (x + PREV_W > wa.right) x = rd.left - 12 - PREV_W;
+            if (y + PREV_H > wa.bottom) y = wa.bottom - PREV_H;
+            if (y < wa.top) y = wa.top;
+            if (x < wa.left) x = wa.left;
+        }
 
-    // blur 层先就位（亚克力/模糊档），内容层随后压上（同悬浮窗 Z 序手法）
-    if ((effect == 0 || effect == 2) && m_blur_hwnd) {
-        SetWindowPos(m_blur_hwnd, HWND_TOPMOST, x, y, PREV_W, PREV_H,
+        // blur 层先就位（亚克力/模糊档），内容层随后压上（同悬浮窗 Z 序手法）
+        if ((effect == 0 || effect == 2) && m_blur_hwnd) {
+            SetWindowPos(m_blur_hwnd, HWND_TOPMOST, x, y, PREV_W, PREV_H,
+                         SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        } else if (m_blur_hwnd) {
+            ShowWindow(m_blur_hwnd, SW_HIDE);   // 透明档：无模糊层
+        }
+        SetWindowPos(m_hwnd, HWND_TOPMOST, x, y, PREV_W, PREV_H,
                      SWP_NOACTIVATE | SWP_SHOWWINDOW);
     } else if (m_blur_hwnd) {
-        ShowWindow(m_blur_hwnd, SW_HIDE);   // 透明档：无模糊层
+        // 会话内效果档翻转（透明↔磨砂，用户拖着预览切下拉）：blur 层可见
+        // 性跟着变。insert-after 用 m_hwnd（HWND_TOPMOST 会把 blur 提到
+        // 内容层之上反序）
+        bool want_blur = (effect == 0 || effect == 2);
+        if (want_blur != (IsWindowVisible(m_blur_hwnd) != FALSE)) {
+            if (want_blur) {
+                RECT r;
+                GetWindowRect(m_hwnd, &r);
+                SetWindowPos(m_blur_hwnd, m_hwnd, r.left, r.top, PREV_W, PREV_H,
+                             SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            } else {
+                ShowWindow(m_blur_hwnd, SW_HIDE);
+            }
+        }
     }
-    SetWindowPos(m_hwnd, HWND_TOPMOST, x, y, PREV_W, PREV_H,
-                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
     Compose();
     SetTimer(m_hwnd, TIMER_AUTOHIDE, 2000, NULL);   // 重置即每次滑动续 2s
