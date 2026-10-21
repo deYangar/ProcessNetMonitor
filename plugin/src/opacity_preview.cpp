@@ -11,13 +11,17 @@
 
 extern HINSTANCE s_dll_hinst;   // tooltip_popup.cpp DllMain
 
-// 固定版面（96 DPI 基准；选项对话框自身也是固定像素风格，预览跟它统一）
-static const int PREV_W = 240;
-static const int PREV_H = 174;
+// 版面（96 DPI 基准；选项对话框自身也是固定像素风格，预览跟它统一）。
+// 结构与真实悬浮窗一致（总速条 + 实时上传区 + 实时下载区 + 查看详细
+// 按钮，2026-10-21 咩咩要求「和正常一样」——首版只画下载区被否）：
+// 12 + 34(header) + 24+2x32(上传) + 4(gap) + 24+3x32(下载) + 28(btn) + 12 = 298
+static const int PREV_W = 280;
+static const int PREV_H = 298;
 static const int PADDING = 12;
 static const int HEADER_H = 34;   // 总速条
 static const int SECTION_H = 24;  // 分区标题
 static const int ROW_H = 32;      // 进程行
+static const int GAP_H = 4;       // 上传/下载区间隔
 static const int ICON_SIZE = 22;
 static const int SPEED_AREA_W = 85;
 static const int CORNER_RADIUS = 8;
@@ -211,10 +215,46 @@ bool COpacityPreview::IsDarkTheme() {
     return val == 0;
 }
 
-// 示例画面（画在调用方铺好的底色上；颜色与悬浮窗同源，无运行时反色判定）
+// 示例进程行：图标占位块 + 名称 + 右对齐速度（accent）+ 分隔线，返回下一行 y
+static int DrawSampleRow(HDC dc, int y, const wchar_t* name, const wchar_t* speed,
+                         COLORREF acc, COLORREF text, COLORREF sep, COLORREF icon_c,
+                         HFONT font) {
+    int x_name = PADDING + 2 + ICON_SIZE + 6;
+    HBRUSH hIcoBrush = CreateSolidBrush(icon_c);
+    HPEN hIcoPen = CreatePen(PS_SOLID, 0, icon_c);
+    HBRUSH ob = (HBRUSH)SelectObject(dc, hIcoBrush);
+    HPEN op = (HPEN)SelectObject(dc, hIcoPen);
+    RoundRect(dc, PADDING + 2, y + (ROW_H - ICON_SIZE) / 2,
+              PADDING + 2 + ICON_SIZE, y + (ROW_H + ICON_SIZE) / 2, 4, 4);
+    SelectObject(dc, ob);
+    SelectObject(dc, op);
+    DeleteObject(hIcoBrush);
+    DeleteObject(hIcoPen);
+
+    SetTextColor(dc, text);
+    RECT rc_name = { x_name, y, PREV_W - PADDING - SPEED_AREA_W + 10, y + ROW_H };
+    DrawTextW(dc, name, -1, &rc_name, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+    SetTextColor(dc, acc);
+    RECT rc_spd = { PREV_W - PADDING - SPEED_AREA_W, y, PREV_W - PADDING, y + ROW_H };
+    DrawTextW(dc, speed, -1, &rc_spd, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+
+    HPEN hSep = CreatePen(PS_SOLID, 1, sep);
+    HPEN op2 = (HPEN)SelectObject(dc, hSep);
+    MoveToEx(dc, x_name, y + ROW_H - 1, NULL);
+    LineTo(dc, PREV_W - PADDING, y + ROW_H - 1);
+    SelectObject(dc, op2);
+    DeleteObject(hSep);
+    return y + ROW_H;
+}
+
+// 示例画面（画在调用方铺好的底色上；颜色与悬浮窗同源，无运行时反色判定）。
+// 结构复刻真实悬浮窗（2026-10-21 咩咩要求「和正常一样」，首版只画下载
+// 区被否）：总速条 → ▲实时上传（橙，2 行）→ ▼实时下载（绿，3 行）→ 按钮
 void COpacityPreview::DrawContent(HDC dc) {
     COLORREF text     = m_dark ? RGB(240, 240, 240) : RGB(30, 30, 30);
-    COLORREF acc_down = m_dark ? RGB(85, 208, 125)  : RGB(70, 175, 95);   // 下载=绿
+    COLORREF acc_up   = m_dark ? RGB(230, 150, 40)  : RGB(230, 126, 34);   // 上传=橙
+    COLORREF acc_down = m_dark ? RGB(85, 208, 125)  : RGB(70, 175, 95);    // 下载=绿
     COLORREF sep      = m_dark ? RGB(45, 45, 45)    : RGB(235, 235, 235);
     COLORREF icon_c   = m_dark ? RGB(70, 70, 74)    : RGB(215, 215, 218);
 
@@ -224,50 +264,29 @@ void COpacityPreview::DrawContent(HDC dc) {
     // 总速条
     SetTextColor(dc, text);
     RECT rc_header = { PADDING, PADDING, PREV_W - PADDING, PADDING + HEADER_H };
-    DrawTextW(dc, L"\u2191 3.2 MB/s   \u2193 128.5 MB/s", -1, &rc_header,
+    DrawTextW(dc, L"\u2191 2.8 MB/s   \u2193 131.0 MB/s", -1, &rc_header,
               DT_LEFT | DT_SINGLELINE | DT_VCENTER);
     int y = PADDING + HEADER_H;
 
-    // 下载区标题（与悬浮窗分区标题同款：accent 色 + 常规字重）
-    SetTextColor(dc, acc_down);
-    RECT rc_sec = { PADDING + 2, y, PREV_W - PADDING, y + SECTION_H };
-    DrawTextW(dc, TR(L"\u25BC \u5B9E\u65F6\u4E0B\u8F7D"), -1, &rc_sec,
+    // ▲ 实时上传（与悬浮窗分区标题同款：accent 色 + 常规字重）
+    SetTextColor(dc, acc_up);
+    RECT rc_sec_up = { PADDING + 2, y, PREV_W - PADDING, y + SECTION_H };
+    DrawTextW(dc, TR(L"\u25B2 \u5B9E\u65F6\u4E0A\u4F20"), -1, &rc_sec_up,
               DT_LEFT | DT_SINGLELINE | DT_VCENTER);
     y += SECTION_H;
+    y = DrawSampleRow(dc, y, L"OneDrive", L"2.1 MB/s", acc_up, text, sep, icon_c, m_font_normal);
+    y = DrawSampleRow(dc, y, L"Chrome",   L"0.4 MB/s", acc_up, text, sep, icon_c, m_font_normal);
+    y += GAP_H;
 
-    // 两行示例进程（图标画占位方块，布局与真实进程行一致）
-    static const wchar_t* names[2] = { L"Chrome", L"Steam" };
-    static const wchar_t* speeds[2] = { L"87.2 MB/s", L"41.3 MB/s" };
-    for (int i = 0; i < 2; i++) {
-        int x_name = PADDING + 2 + ICON_SIZE + 6;
-        HBRUSH hIcoBrush = CreateSolidBrush(icon_c);
-        HPEN hIcoPen = CreatePen(PS_SOLID, 0, icon_c);
-        HBRUSH ob = (HBRUSH)SelectObject(dc, hIcoBrush);
-        HPEN op = (HPEN)SelectObject(dc, hIcoPen);
-        RoundRect(dc, PADDING + 2, y + (ROW_H - ICON_SIZE) / 2,
-                  PADDING + 2 + ICON_SIZE, y + (ROW_H + ICON_SIZE) / 2, 4, 4);
-        SelectObject(dc, ob);
-        SelectObject(dc, op);
-        DeleteObject(hIcoBrush);
-        DeleteObject(hIcoPen);
-
-        SetTextColor(dc, text);
-        RECT rc_name = { x_name, y, PREV_W - PADDING - SPEED_AREA_W + 10, y + ROW_H };
-        DrawTextW(dc, names[i], -1, &rc_name, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-
-        SetTextColor(dc, acc_down);
-        RECT rc_spd = { PREV_W - PADDING - SPEED_AREA_W, y, PREV_W - PADDING, y + ROW_H };
-        DrawTextW(dc, speeds[i], -1, &rc_spd, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
-
-        HPEN hSep = CreatePen(PS_SOLID, 1, sep);
-        HPEN op2 = (HPEN)SelectObject(dc, hSep);
-        MoveToEx(dc, x_name, y + ROW_H - 1, NULL);
-        LineTo(dc, PREV_W - PADDING, y + ROW_H - 1);
-        SelectObject(dc, op2);
-        DeleteObject(hSep);
-
-        y += ROW_H;
-    }
+    // ▼ 实时下载
+    SetTextColor(dc, acc_down);
+    RECT rc_sec_dn = { PADDING + 2, y, PREV_W - PADDING, y + SECTION_H };
+    DrawTextW(dc, TR(L"\u25BC \u5B9E\u65F6\u4E0B\u8F7D"), -1, &rc_sec_dn,
+              DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    y += SECTION_H;
+    y = DrawSampleRow(dc, y, L"Chrome", L"87.2 MB/s", acc_down, text, sep, icon_c, m_font_normal);
+    y = DrawSampleRow(dc, y, L"Steam",  L"41.3 MB/s", acc_down, text, sep, icon_c, m_font_normal);
+    y = DrawSampleRow(dc, y, L"Edge",   L"12.6 MB/s", acc_down, text, sep, icon_c, m_font_normal);
     y += 4;   // BTN_AREA_H - BTN_H
 
     // 「查看详细」按钮（实心自绘，配色与悬浮窗同款）
