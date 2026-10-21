@@ -2,12 +2,14 @@
 #include "utils.h"
 #include "ip_geo.h"
 #include "i18n.h"
+#include "opacity_preview.h"
 #include <algorithm>
 #include <shellapi.h>
 #include <dbghelp.h>
 #include <commctrl.h>
 
 #pragma comment(lib, "dbghelp.lib")
+#pragma comment(lib, "comctl32.lib")   // trackbar（msctls_trackbar32）+ InitCommonControlsEx
 
 // From tooltip_popup.cpp DllMain - DLL's HINSTANCE
 extern HINSTANCE s_dll_hinst;
@@ -1692,6 +1694,26 @@ static void OptionsAdjustLayout(HWND hwnd) {
         if (right > max_right) max_right = right;
     }
 
+    // 透明度值显示（1025）贴滑条（1024）右侧——它不是 label 行，是滑条的
+    // 尾巴，单独挪（语言切换后滑条 x 被 Step 1.6 重排，它必须跟过去）
+    {
+        HWND hTrack = GetDlgItem(hwnd, 1024);
+        HWND hVal = GetDlgItem(hwnd, 1025);
+        if (hTrack && hVal) {
+            RECT rt, rv;
+            GetWindowRect(hTrack, &rt);
+            GetWindowRect(hVal, &rv);
+            MapWindowPoints(HWND_DESKTOP, hwnd, (LPPOINT)&rt, 2);
+            MapWindowPoints(HWND_DESKTOP, hwnd, (LPPOINT)&rv, 2);
+            int nx = rt.right + 8;
+            if (nx != rv.left) {
+                SetWindowPos(hVal, nullptr, nx, rv.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+            }
+            int right = nx + (rv.right - rv.left);
+            if (right > max_right) max_right = right;
+        }
+    }
+
     if (hOld) SelectObject(hdc, hOld);
     ReleaseDC(hwnd, hdc);
 
@@ -1805,6 +1827,7 @@ static void OptionsUpdateOpacityEnabled(HWND hwnd, int eff) {
     BOOL enable = (eff != 3);
     EnableWindow(GetDlgItem(hwnd, 1024), enable);
     EnableWindow(GetDlgItem(hwnd, 1023), enable);
+    EnableWindow(GetDlgItem(hwnd, 1025), enable);
 }
 
 static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -1942,15 +1965,25 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             OptionsClampEffectForOS(
                 CProcessNetPlugin::Instance().m_detail.GetPopupEffect()));
 
-        // 悬浮窗透明度 label + edit（10-100；tint 背景浓度，文字始终不
-        // 透明保持清晰。10 最透，100 最实，不透明模式下禁用）
+        // 悬浮窗透明度 label + 滑条（10-100；tint 背景浓度，文字始终不
+        // 透明保持清晰。10 最透，100 最实，不透明模式下禁用。2026-10-21
+        // 由手动填数 edit 改滑条：拖动/键盘 ←→ 实时出预览窗，方向键步进
+        // ±1 是 trackbar 原生行为（TBM_SETLINESIZE 默认 1）；右侧值显示
+        // （1025）同步刷新）
         CreateWindowW(L"STATIC", TR(L"悬浮窗透明度（10-100，10 最透 100 最实，不透明模式除外）"),
             WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 10, 354, 260, 20, hwnd, (HMENU)1023, nullptr, nullptr);
+        HWND hOpacityTrack = CreateWindowW(TRACKBAR_CLASSW, L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ,
+            100, 350, 160, 30, hwnd, (HMENU)1024, GetModuleHandleW(NULL), nullptr);
+        SendMessageW(hOpacityTrack, TBM_SETRANGE, TRUE, MAKELPARAM(10, 100));
+        for (int tic = 20; tic <= 90; tic += 10)
+            SendMessageW(hOpacityTrack, TBM_SETTIC, 0, tic);   // 每 10 一刻度（AUTOTICKS 会 91 个太密）
+        int opacity_cur = CProcessNetPlugin::Instance().m_detail.GetPopupOpacity();
+        SendMessageW(hOpacityTrack, TBM_SETPOS, TRUE, opacity_cur);
         wchar_t opacity_buf[16];
-        swprintf_s(opacity_buf, L"%d", CProcessNetPlugin::Instance().m_detail.GetPopupOpacity());
-        CreateWindowW(L"EDIT", opacity_buf,
-            WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
-            100, 352, 60, 24, hwnd, (HMENU)1024, nullptr, nullptr);
+        swprintf_s(opacity_buf, L"%d", opacity_cur);
+        CreateWindowW(L"STATIC", opacity_buf,
+            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 268, 352, 34, 20, hwnd, (HMENU)1025, nullptr, nullptr);
         // 亚克力模式下该行禁用（浓度固定为系统默认）
         OptionsUpdateOpacityEnabled(hwnd,
             CProcessNetPlugin::Instance().m_detail.GetPopupEffect());
@@ -2013,10 +2046,8 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             int eff_sel = (int)SendMessageW(GetDlgItem(hwnd, 1022), CB_GETCURSEL, 0, 0);
             if (eff_sel < 0 || eff_sel > 3) eff_sel = 0;
             eff_sel = OptionsClampEffectForOS(eff_sel);
-            wchar_t op_buf[16] = {};
-            GetDlgItemTextW(hwnd, 1024, op_buf, 16);
-            int opacity = _wtoi(op_buf);
-            if (opacity < 10) opacity = 10;
+            int opacity = (int)SendMessageW(GetDlgItem(hwnd, 1024), TBM_GETPOS, 0, 0);
+            if (opacity < 10) opacity = 10;    // range 已保 10-100，clamp 仅兜底
             if (opacity > 100) opacity = 100;
             plugin.m_detail.SetPopupEffect(eff_sel);
             plugin.m_detail.SetPopupOpacity(opacity);
@@ -2083,6 +2114,8 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
                 plugin.m_detail.SaveSettings();
                 plugin.m_popup.ApplyBackdrop(eff_sel, plugin.m_detail.GetPopupOpacity());
                 OptionsUpdateOpacityEnabled(hwnd, eff_sel);
+                if (eff_sel == 3)
+                    COpacityPreview::Instance().Hide();   // 不透明档无浓度，预览窗收起
             }
             return 0;
         }
@@ -2094,8 +2127,31 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             return 0;
         }
         break;
+    case WM_HSCROLL: {
+        // 透明度滑条（1024）：拖动（TB_THUMBTRACK）与键盘 ←→（TB_LINEUP/
+        // DOWN）都走这里——数值显示即时刷新，旁边弹迷你悬浮窗实时预览
+        // （2s 静默自动收起；每次滑动重置计时）
+        HWND hTrack = GetDlgItem(hwnd, 1024);
+        if ((HWND)lp == hTrack && hTrack) {
+            int pos = (int)SendMessageW(hTrack, TBM_GETPOS, 0, 0);
+            wchar_t vbuf[8];
+            swprintf_s(vbuf, L"%d", pos);
+            SetWindowTextW(GetDlgItem(hwnd, 1025), vbuf);
+            int eff_sel = (int)SendMessageW(GetDlgItem(hwnd, 1022), CB_GETCURSEL, 0, 0);
+            if (eff_sel < 0 || eff_sel > 3) eff_sel = 0;
+            eff_sel = OptionsClampEffectForOS(eff_sel);
+            if (eff_sel != 3)
+                COpacityPreview::Instance().Show(hwnd, eff_sel, pos);
+        }
+        break;
+    }
     case WM_CLOSE:
         DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        // OK/Cancel 都走 DestroyWindow，预览窗在这里兜底收掉（不销毁会
+        // 泄漏成孤儿 TOPMOST 窗，2s 定时器所属窗口已无对话框线程泵消息）
+        COpacityPreview::Instance().Hide();
         return 0;
     case WM_PNM_LANG_CHANGED:
         // 运行期语言变化：刷新选项对话框文本（由定时器线程 PostMessage 而来）
@@ -2108,6 +2164,10 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
 ITMPlugin::OptionReturn CProcessNetPlugin::ShowOptionsDialog(void* hParent) {
     static bool registered = false;
     if (!registered) {
+        // trackbar（msctls_trackbar32）属于 comctl32 通用控件，首次使用
+        // 前必须显式注册控件类（幂等，宿主是否初始化过不归插件管）
+        INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_WIN95_CLASSES };
+        InitCommonControlsEx(&icc);
         WNDCLASSW wc = {};
         wc.lpfnWndProc = OptionsWndProc;
         wc.hInstance = GetModuleHandleW(NULL);
