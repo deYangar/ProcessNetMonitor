@@ -1,5 +1,6 @@
 #pragma once
 #include <windows.h>
+#include <vector>
 
 // 透明度滑条实时预览窗（2026-10-21）：选项对话框拖动 trackbar 时在对话框
 // 旁弹出的迷你悬浮窗，让「浓度」滑动的观感与真实悬浮窗一致。
@@ -63,6 +64,13 @@ private:
     HDC m_cov_c_dc = nullptr;       // coverage 黑底 pass
     HBITMAP m_cov_c_bmp = nullptr;
     void* m_cov_c_bits = nullptr;
+    // cov 双底 pass 缓存（拖动 60Hz 只变浓度，内容/主题不变不重画；表面
+    // 重建或主题翻转置脏）+ 合成行缓冲（尺寸恒定，避免每帧堆分配）
+    bool m_cov_dirty = true;
+    std::vector<int> m_frow;
+    std::vector<int> m_crow;
+    std::vector<float> m_grow;
+    std::vector<unsigned char> m_drow;
     HFONT m_font_normal = nullptr;  // 雅黑 -14（与悬浮窗同款）
     HFONT m_font_small = nullptr;   // 雅黑 -13
 };

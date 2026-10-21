@@ -175,7 +175,9 @@ void COpacityPreview::DestroyWindowpair() {
         KillTimer(m_hwnd, TIMER_AUTOHIDE);
         HWND h = m_hwnd;
         m_hwnd = nullptr;
-        SafeDestroyWindow(h);
+        // detach 阶段跳过销毁（issue #7 同款保护）：DestroyWindow 在
+        // loader lock 下同步跑窗口过程回调会崩宿主，进程退出自然回收
+        if (!g_shutting_down) SafeDestroyWindow(h);
     }
     if (m_blur_hwnd) {
         HWND b = m_blur_hwnd;
@@ -186,6 +188,18 @@ void COpacityPreview::DestroyWindowpair() {
 
 void COpacityPreview::EnsureSurfaces() {
     if (m_ulw_dc && m_cov_a_dc && m_cov_c_dc) return;
+
+    // 部分失败后重入：先回收全部旧表面再重建（悬浮窗 EnsureLayeredSurface
+    // 同款全有或全无——直接覆盖句柄会泄漏旧 DIB）
+    HDC dcs[3] = { m_ulw_dc, m_cov_a_dc, m_cov_c_dc };
+    HBITMAP bmps[3] = { m_ulw_bmp, m_cov_a_bmp, m_cov_c_bmp };
+    for (int i = 0; i < 3; i++) {
+        if (dcs[i]) DeleteDC(dcs[i]);
+        if (bmps[i]) DeleteObject(bmps[i]);
+    }
+    m_ulw_dc = m_cov_a_dc = m_cov_c_dc = nullptr;
+    m_ulw_bmp = m_cov_a_bmp = m_cov_c_bmp = nullptr;
+    m_ulw_bits = m_cov_a_bits = m_cov_c_bits = nullptr;
 
     struct { HDC* dc; HBITMAP* bmp; void** bits; } surfs[3] = {
         { &m_cov_a_dc, &m_cov_a_bmp, &m_cov_a_bits },
@@ -229,6 +243,7 @@ void COpacityPreview::ReleaseSurfaces() {
     m_ulw_dc = m_cov_a_dc = m_cov_c_dc = nullptr;
     m_ulw_bmp = m_cov_a_bmp = m_cov_c_bmp = nullptr;
     m_ulw_bits = m_cov_a_bits = m_cov_c_bits = nullptr;
+    m_cov_dirty = true;   // 表面已回收，重建后必须重画双底
     if (m_font_normal) { DeleteObject(m_font_normal); m_font_normal = nullptr; }
     if (m_font_small) { DeleteObject(m_font_small); m_font_small = nullptr; }
 }
@@ -361,16 +376,20 @@ void COpacityPreview::DrawContent(HDC dc) {
 void COpacityPreview::Compose() {
     if (!m_ulw_bits || !m_cov_a_bits || !m_cov_c_bits) return;
 
-    // 1. 双底内容
-    RECT full = { 0, 0, PREV_W, PREV_H };
-    HBRUSH wb = CreateSolidBrush(RGB(255, 255, 255));
-    FillRect(m_cov_a_dc, &full, wb);
-    DeleteObject(wb);
-    HBRUSH bb = CreateSolidBrush(RGB(0, 0, 0));
-    FillRect(m_cov_c_dc, &full, bb);
-    DeleteObject(bb);
-    DrawContent(m_cov_a_dc);
-    DrawContent(m_cov_c_dc);
+    // 1. 双底内容：拖动期间只变浓度（bg_a），内容与主题不变——cov 双底
+    // pass（两次全量 ClearType 文本绘制）只在脏时重画
+    if (m_cov_dirty) {
+        RECT full = { 0, 0, PREV_W, PREV_H };
+        HBRUSH wb = CreateSolidBrush(RGB(255, 255, 255));
+        FillRect(m_cov_a_dc, &full, wb);
+        DeleteObject(wb);
+        HBRUSH bb = CreateSolidBrush(RGB(0, 0, 0));
+        FillRect(m_cov_c_dc, &full, bb);
+        DeleteObject(bb);
+        DrawContent(m_cov_a_dc);
+        DrawContent(m_cov_c_dc);
+        m_cov_dirty = false;
+    }
 
     // 2. 合成
     unsigned char* pa = (unsigned char*)m_cov_a_bits;
@@ -382,10 +401,15 @@ void COpacityPreview::Compose() {
     int r = CORNER_RADIUS;
     int w = PREV_W, h = PREV_H;
 
-    std::vector<int> frow((size_t)w * 3);
-    std::vector<int> crow((size_t)w);
-    std::vector<float> grow((size_t)w);
-    std::vector<unsigned char> drow((size_t)w);
+    // 行缓冲成员化（尺寸恒定，拖动 60Hz 下避免每帧 4 次堆分配）
+    m_frow.resize((size_t)w * 3);
+    m_crow.resize((size_t)w);
+    m_grow.resize((size_t)w);
+    m_drow.resize((size_t)w);
+    std::vector<int>& frow = m_frow;
+    std::vector<int>& crow = m_crow;
+    std::vector<float>& grow = m_grow;
+    std::vector<unsigned char>& drow = m_drow;
 
     for (int y = 0; y < h; y++) {
         float cy = y + 0.5f;
@@ -502,9 +526,16 @@ void COpacityPreview::Show(HWND hDlg, int effect, int opacity) {
     if (!hDlg || effect < 0 || effect > 2) return;
     if (opacity < 10) opacity = 10;
     if (opacity > 100) opacity = 100;
+    // 主题仅在窗口新建时判一次（读注册表；拖动 60Hz 下不逐帧读），
+    // 主题翻转时 cov 双底置脏重画
+    bool fresh_window = (m_hwnd == nullptr);
+    if (fresh_window) {
+        bool dark = IsDarkTheme();
+        if (dark != m_dark) m_cov_dirty = true;
+        m_dark = dark;
+    }
     m_effect = effect;
     m_opacity = opacity;
-    m_dark = IsDarkTheme();
     m_noise = (effect == 0);
 
     if (!EnsureWindow()) return;
