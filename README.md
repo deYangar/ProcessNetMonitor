@@ -4,7 +4,7 @@
 
 ## 效果预览
 
-![任务栏显示](docs/screenshot-main.png)
+![悬浮网速窗口（亚克力背景）](docs/screenshot-main.png)
 
 ![悬浮信息窗口](docs/screenshot-popup.png)
 
