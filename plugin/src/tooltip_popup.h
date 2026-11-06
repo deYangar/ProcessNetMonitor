@@ -109,8 +109,11 @@ private:
     static LRESULT CALLBACK WatchdogProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
     HWND m_watchdog_hwnd = nullptr;
 
-    // 锚窗子类化跟踪（见 SetAnchorFollow 注释）
-    static LRESULT CALLBACK AnchorProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
+    // 锚窗子类化跟踪（见 SetAnchorFollow 注释）。2026-11-06 根治改
+    // comctl32 SetWindowSubclass：master_proc 中性地址挂 GWLP_WNDPROC 链头，
+    // 本方 proc 地址不被跨插件链持有——叠挂/摘除不可能构造自指/互指环
+    static LRESULT CALLBACK AnchorProc(HWND hwnd, UINT msg, WPARAM wp,
+                                       LPARAM lp, UINT_PTR id, DWORD_PTR ref);
     void DetachAnchorTracker();
     // 锚窗位置事件：纯位移轻量 delta 跟随；尺寸/跨屏转节流全量
     void OnAnchorPosChanged(const RECT& new_anchor, bool sized);
@@ -119,7 +122,6 @@ private:
     // 反色判定节流（事件流驱动；判定变化才重绘）
     void AnchorJudgeThrottled(const RECT& rc, ULONGLONG min_interval_ms);
     HWND m_tracked_hwnd = nullptr;        // 被子类化跟踪的锚窗（TM 主窗）
-    WNDPROC m_tracked_orig_proc = nullptr;
     bool m_anchor_in_sizemove = false;    // 锚窗拖动/缩放会话进行中
     bool m_have_last_seen_anchor = false; // delta 基准是否已建立
     RECT m_last_seen_anchor = {};         // 上一个锚矩形（delta 基准）

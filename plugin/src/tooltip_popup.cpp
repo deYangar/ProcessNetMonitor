@@ -1,10 +1,11 @@
 ﻿#include "tooltip_popup.h"
-#include "plugin_main.h"  
-#include "utils.h"        
+#include "plugin_main.h"
+#include "utils.h"
 #include "signature.h"
 #include <shellapi.h>
 #include <shobjidl.h>
 #include <dwmapi.h>
+#include <commctrl.h>   // SetWindowSubclass / DefSubclassProc（锚子类化框架）
 #include <algorithm>
 #include <cmath>
 
@@ -41,7 +42,11 @@ void SafeDestroyWindow(HWND hwnd) {
 // class "tooltips_class32".  Enumerate the visible ones that belong to the
 // same process as the anchor TM window.  If the anchor handle is missing we
 // still collect all visible tooltips so the popup can avoid them.
-static void FindTMTooltips(HWND anchor_hwnd, std::vector<RECT>& out) {
+// 2026-11-06: also collects the sibling plugin PTM's floating group windows
+// (class prefix "PTMTopList_", per-window %p suffix) — both plugins hover-pop
+// over the same TM window with the same placement formula, so without mutual
+// avoidance they land on the exact same rect.
+static void FindForeignPopups(HWND anchor_hwnd, std::vector<RECT>& out) {
     out.clear();
     DWORD tm_pid = 0;
     if (anchor_hwnd && IsWindow(anchor_hwnd))
@@ -60,6 +65,26 @@ static void FindTMTooltips(HWND anchor_hwnd, std::vector<RECT>& out) {
         if (rc.left >= rc.right || rc.top >= rc.bottom) continue;
         out.push_back(rc);
     }
+    struct PtmCtx {
+        std::vector<RECT>* out;
+        DWORD pid;
+    } pctx = { &out, tm_pid };
+    EnumWindows([](HWND h, LPARAM lp) -> BOOL {
+        auto* c = (PtmCtx*)lp;
+        wchar_t cls[64];
+        if (!GetClassNameW(h, cls, 64) ||
+            wcsncmp(cls, L"PTMTopList_", 11) != 0)
+            return TRUE;
+        DWORD pid = 0;
+        GetWindowThreadProcessId(h, &pid);
+        if (c->pid != 0 && pid != c->pid) return TRUE;
+        if (!IsWindowVisible(h)) return TRUE;
+        RECT rc;
+        GetWindowRect(h, &rc);
+        if (rc.left >= rc.right || rc.top >= rc.bottom) return TRUE;
+        c->out->push_back(rc);
+        return TRUE;
+    }, (LPARAM)&pctx);
 }
 
 static RECT InflateRectScreen(const RECT& rc, int dx, int dy) {
@@ -98,27 +123,23 @@ LRESULT CALLBACK CTooltipPopup::WatchdogProc(HWND hwnd, UINT msg, WPARAM wp, LPA
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
-// ---- 锚窗事件驱动跟随（方案 A，2026-10-18）----
-// detach 时若本插件不在子类化链头（有后来者叠在上方），直接还原 orig 会
-// 掐断后来者的链——此时留 AnchorProc 原地纯透传（它仍正确链到 orig），
-// 随窗口销毁自然清掉。单锚窗前提下用一组静态残留量即可。重挂同窗时残留
-// 链可能位于新链下方，同一事件会进 AnchorProc 两次：第二次进来时 delta
-// 基准已被首次更新（dx=dy=0），除罕见的全量重定位双跑一次外无副作用
-static WNDPROC s_orphan_anchor_orig = nullptr;
-static HWND s_orphan_anchor_hwnd = nullptr;
+// ---- 锚窗事件驱动跟随（方案 A，2026-10-18；2026-11-06 根治改框架）----
+// 手搓 SetWindowLongPtrW 链在跨插件叠挂下有两种必崩环形态（2026-11-06
+// 14:04 自指环 / 14:31 互指环，均 c00000fd 栈溢出，dump 实证）：detach 方
+// 留 orphan 残链时本方 proc 地址被对方当 orig 持有，此后任一方 re-attach
+// 即成环。治本 = comctl32 SetWindowSubclass：GWLP_WNDPROC 链头挂中性
+// master_proc，子类节点登记在 master 内部链表，本方 proc 地址不被任何
+// 一方持有——摘除（RemoveWindowSubclass）从表里删节点，表空自动还原原
+// proc，环在物理上不可构造。
+namespace {
+constexpr UINT_PTR kAnchorSubclassId = 0x504E4D41;   // 'PNMA'
+}
 
-LRESULT CALLBACK CTooltipPopup::AnchorProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+LRESULT CALLBACK CTooltipPopup::AnchorProc(HWND hwnd, UINT msg, WPARAM wp,
+                                           LPARAM lp, UINT_PTR /*id*/,
+                                           DWORD_PTR /*ref*/) {
     CTooltipPopup* self = s_instance;
-    WNDPROC orig = nullptr;
-    bool tracked = (self && self->m_tracked_hwnd == hwnd && self->m_tracked_orig_proc);
-    if (tracked) {
-        orig = self->m_tracked_orig_proc;
-    } else if (s_orphan_anchor_hwnd == hwnd && s_orphan_anchor_orig) {
-        orig = s_orphan_anchor_orig;   // 已 detach 的残留链：纯透传
-    }
-    if (!orig) return DefWindowProcW(hwnd, msg, wp, lp);
-
-    if (tracked) {
+    if (self && self->m_tracked_hwnd == hwnd) {
         switch (msg) {
         case WM_ENTERSIZEMOVE:
             self->m_anchor_in_sizemove = true;
@@ -138,61 +159,41 @@ LRESULT CALLBACK CTooltipPopup::AnchorProc(HWND hwnd, UINT msg, WPARAM wp, LPARA
             break;
         }
         case WM_NCDESTROY:
-            // 锚窗销毁：链随窗口一起消失，清状态即可（无需还原）
+            // 锚窗销毁：comctl32 随窗口清理子类表，这里只清状态
             self->m_tracked_hwnd = nullptr;
-            self->m_tracked_orig_proc = nullptr;
             self->m_have_last_seen_anchor = false;
-            if (s_orphan_anchor_hwnd == hwnd) {
-                s_orphan_anchor_hwnd = nullptr;
-                s_orphan_anchor_orig = nullptr;
-            }
             break;
         }
     }
-    return CallWindowProcW(orig, hwnd, msg, wp, lp);
+    return DefSubclassProc(hwnd, msg, wp, lp);
 }
 
 void CTooltipPopup::SetAnchorFollow(HWND anchor) {
     if (anchor == m_tracked_hwnd) return;   // 幂等：HoverTick 每 tick 调
     DetachAnchorTracker();
     if (!anchor || !IsWindow(anchor)) return;
-    // 仅同线程窗口（popup 与 TM 主窗同住主线程；跨线程改 WNDPROC 不安全，
+    // 仅同线程窗口（popup 与 TM 主窗同住主线程；跨线程子类化不安全，
     // 安装须在属主线程做——同 popup 看门狗的约束）。注意 GWFP 的返回值
     // 才是线程 ID，out 参数是进程 ID（首版把两者读反，PID≠TID 恒真导致
     // 锚窗跟踪永远装不上——verify_anchor_follow harness 抓出来的）
     DWORD pid_anchor = 0;
     DWORD tid_anchor = GetWindowThreadProcessId(anchor, &pid_anchor);
     if (tid_anchor != GetCurrentThreadId()) return;
-    m_tracked_orig_proc = (WNDPROC)SetWindowLongPtrW(anchor, GWLP_WNDPROC,
-                                                     (LONG_PTR)AnchorProc);
-    if (!m_tracked_orig_proc) return;
+    if (!SetWindowSubclass(anchor, AnchorProc, kAnchorSubclassId, 0)) return;
     m_tracked_hwnd = anchor;
     m_anchor_in_sizemove = false;
     m_have_last_seen_anchor = false;   // 首个位置事件只建基准、不跟随
-    if (s_orphan_anchor_hwnd == anchor) {
-        // 同窗重挂：旧残留链失去透传职责（新链自己链对 orig），作废
-        s_orphan_anchor_hwnd = nullptr;
-        s_orphan_anchor_orig = nullptr;
-    }
 }
 
 void CTooltipPopup::DetachAnchorTracker() {
     if (!m_tracked_hwnd) return;
     HWND hwnd = m_tracked_hwnd;
-    WNDPROC orig = m_tracked_orig_proc;
     m_tracked_hwnd = nullptr;
-    m_tracked_orig_proc = nullptr;
     m_have_last_seen_anchor = false;
     m_anchor_in_sizemove = false;
-    if (!IsWindow(hwnd) || !orig) return;
-    if ((WNDPROC)GetWindowLongPtrW(hwnd, GWLP_WNDPROC) == AnchorProc) {
-        // 我们在链头：安全还原
-        SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)orig);
-    } else {
-        // 有后来者叠在上方：留透传链（见 AnchorProc 上方注释）
-        s_orphan_anchor_hwnd = hwnd;
-        s_orphan_anchor_orig = orig;
-    }
+    // 从 master 链表摘本节点（被叠场景同样干净）；表空 comctl32 自动还原
+    if (IsWindow(hwnd))
+        RemoveWindowSubclass(hwnd, AnchorProc, kAnchorSubclassId);
 }
 
 // 锚窗位置事件（拖动模态循环 / 程序化移动共用）：纯位移走轻量 delta
@@ -1697,7 +1698,7 @@ void CTooltipPopup::PositionWindow(const RECT& anchor_rect) {
     // window. If it overlaps our popup, nudge our popup away from it.
     {
         std::vector<RECT> tips;
-        FindTMTooltips(m_anchor_hwnd, tips);
+        FindForeignPopups(m_anchor_hwnd, tips);
         int tip_margin = max(4, (int)(8 * m_dpi_scale));
         bool moved = true;
         for (int pass = 0; moved && pass < 4; ++pass) {
@@ -2062,7 +2063,7 @@ bool CTooltipPopup::RepositionIfTooltipsChanged() {
     if (!m_visible) return false;
 
     std::vector<RECT> tips;
-    FindTMTooltips(m_anchor_hwnd, tips);
+    FindForeignPopups(m_anchor_hwnd, tips);
 
     RECT self;
     GetWindowRect(m_hwnd, &self);
