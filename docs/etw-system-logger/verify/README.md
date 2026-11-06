@@ -15,13 +15,10 @@
 | V7 | Win7 | 代码审查（无环境，如实标注） | `PNM_GetOSBuild < 9200` 跳过 L1 直接 L2；L2 行为=现状减去抢占/attach；极端场景（NTKL 被占）落 L3 legacy 有数据。瀑布保底逻辑与 §5.4 代码块一致 |
 | V8 | 长跑 1 天+ | **待日常观察** | 施工会话内事件流稳定（含 PID 复用 burner 高压段 60 进程/秒 × 15 分钟，无 `ProcessTrace returned` 反复重连刷屏）；内存/句柄稳定性待咩咩日常使用观察 |
 
-## 实测发现（与方案的偏差，未擅自改动，待拍板）
+## 实测发现（与方案的偏差）
 
-1. **残留 stop 返回码 234 而非 0**（`ERROR_MORE_DATA`）：方案 §5.3/V5 预期 `stop rc=0`。实测 stop 本身生效（两轮 5s 重试后 StartTrace 直接成功），但按方案代码 `st != ERROR_SUCCESS → return`，当轮 L1 放弃：
-   - NTKL 被占时 → 本轮 failed → 5s 后 L1 成功（收敛，无感）
-   - NTKL 空闲时 → 当轮 L2 兜底成功，TM 用 NTKL 直到下次会话断开重连才回 L1（10:19:42 轮实测，见 `etw_log_digest.txt`）
-   - 若要当轮即接管：可把 stop 的 props 缓冲加大（LoggerName 空间）或对 234 容忍继续 StartTrace——属方案修改，待咩咩拍板
-2. **L2 会话在 TM 被强杀时同样残留**（v1.18 老问题同款，不新增恶化）：L2 兜底轮被 CIM 杀死后 NTKL 残留占用保留槽。新版不会主动清他人 NTKL（设计如此），残留会话需手动 `logman stop "NT Kernel Logger" -ets` 或等系统回收。发生率：仅「L1 残留 stop 234 + NTKL 空闲 + TM 被强杀」三条件叠加。
+1. **残留 stop 返回码 234 而非 0**（`ERROR_MORE_DATA`）：**已修（2026-11-06 咩咩拍板 A+D，commit 79aaa0b）**。根因=stop 的 props 缓冲没留会话名空间，系统写回名字放不下返回 234（stop 本身生效）。修法 A：stop 缓冲补名字空间（返回码如实变 0）；修法 D：StartTrace 做残留是否清除的唯一事实源（只对 5/拒绝访问提前降级）。修复后实测（10:48:45）：`stop rc=0` + **同一秒** `StartTrace('PnmNetTrace') OK` + 2 秒后数据恢复——强杀重启首轮即接管 L1，不再借道 NTKL。连带消除发现 2。
+2. ~~L2 会话在 TM 被强杀时同样残留~~：发生前提是「先经历过 L2 兜底轮」，发现 1 修复后 L2 兜底轮几乎不再出现（仅 Win7 走 L2），此场景随之消失。
 
 ## PID 复用修复验证（E3/E4）
 
