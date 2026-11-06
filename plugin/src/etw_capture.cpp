@@ -24,6 +24,17 @@
 
 #pragma comment(lib, "tdh.lib")
 
+// ---- L1 session identity: private system logger (Win8+) ----
+// Official requirements (learn.microsoft.com/.../configuring-and-starting-
+// a-systemtraceprovider-session): custom LoggerName + EVENT_TRACE_SYSTEM_
+// LOGGER_MODE + a fresh Wnode.Guid (must NOT be SystemTraceControlGuid).
+// Win8+ multiplexes up to 8 system logger sessions (first two slots are
+// reserved for NT Kernel Logger and CKCL), so this session never conflicts
+// with other kernel-monitoring tools.
+static const wchar_t kSessionName[] = L"PnmNetTrace";
+static const GUID kSessionGuid =
+    { 0xA25E2B05, 0x0B5C, 0x484A, { 0x96, 0xBD, 0x8E, 0xE1, 0xD5, 0x24, 0x44, 0x04 } };
+
 EtwCapture* EtwCapture::s_self = nullptr;
 std::atomic<bool> EtwCapture::s_debug_logs{ false };
 
@@ -309,137 +320,125 @@ void EtwCapture::SetConnState(const wchar_t* s) {
     wcsncpy_s(m_conn_state, s, _TRUNCATE);
 }
 
-void EtwCapture::SetOwner(std::wstring o) {
-    std::lock_guard<std::mutex> lk(m_state_mutex);
-    m_owner = std::move(o);
-}
-
 void EtwCapture::GetConnState(wchar_t* out, size_t cap) const {
     if (!out || cap == 0) return;
     std::lock_guard<std::mutex> lk(m_state_mutex);
     wcsncpy_s(out, cap, m_conn_state, _TRUNCATE);
 }
 
-std::wstring EtwCapture::GetOwner() const {
-    std::lock_guard<std::mutex> lk(m_state_mutex);
-    return m_owner;
+EtwCapture::SessionResult EtwCapture::TryStartSession(bool system_logger) {
+    SessionResult r{ INVALID_PROCESSTRACE_HANDLE, false, 0 };
+    const wchar_t* name = system_logger ? kSessionName : KERNEL_LOGGER_NAMEW;
+
+    EVENT_TRACE_LOGFILEW lf;
+    memset(&lf, 0, sizeof(lf));
+    lf.LoggerName = const_cast<LPWSTR>(name);
+    lf.ProcessTraceMode = EVENT_TRACE_REAL_TIME_MODE | PROCESS_TRACE_MODE_EVENT_RECORD;
+    lf.EventRecordCallback = &EtwCapture::Callback;
+
+    DWORD nameBytes = (DWORD)((wcslen(name) + 1) * sizeof(wchar_t));
+    DWORD bufSize = sizeof(EVENT_TRACE_PROPERTIES) + nameBytes;
+    std::vector<BYTE> buf(bufSize, 0);
+    auto fill = [&](EVENT_TRACE_PROPERTIES* p) {
+        memset(buf.data(), 0, bufSize);
+        p->Wnode.BufferSize = bufSize;
+        p->Wnode.ClientContext = 1;     // QPC timestamps
+        p->BufferSize = 256;            // KB
+        p->MinimumBuffers = 4;
+        p->MaximumBuffers = 120;
+        p->FlushTimer = 1;
+        p->LogFileMode = EVENT_TRACE_REAL_TIME_MODE
+                       | (system_logger ? EVENT_TRACE_SYSTEM_LOGGER_MODE : 0);
+        p->EnableFlags = EVENT_TRACE_FLAG_NETWORK_TCPIP | EVENT_TRACE_FLAG_PROCESS;
+        if (system_logger) p->Wnode.Guid = kSessionGuid;
+    };
+    auto* props = reinterpret_cast<EVENT_TRACE_PROPERTIES*>(buf.data());
+    fill(props);
+
+    TRACEHANDLE session = 0;
+    ULONG sr = StartTraceW(&session, name, props);
+    if (sr == ERROR_ALREADY_EXISTS) {
+        if (!system_logger) {
+            // NT Kernel Logger is owned by ANOTHER tool. Never stop it
+            // (old build killed e.g. ProcMon sessions), never attach to it
+            // (inherited foreign small buffers -> lost events). Give the
+            // layer up; log who holds it for field diagnosis.
+            std::wstring owner = FindSessionOwners();
+            LogLine(L"NT Kernel Logger busy (183), owner(s): %s - not touching it",
+                    owner.empty() ? L"(unknown)" : owner.c_str());
+            return r;
+        }
+        // Custom name => our own leftover from a crashed run. Safe to stop.
+        EVENT_TRACE_PROPERTIES sp; memset(&sp, 0, sizeof(sp));
+        sp.Wnode.BufferSize = sizeof(EVENT_TRACE_PROPERTIES);
+        ULONG st = ControlTraceW((TRACEHANDLE)0, name, &sp, EVENT_TRACE_CONTROL_STOP);
+        LogLine(L"session '%s' leftover - stop rc=%lu", name, st);
+        if (st != ERROR_SUCCESS) return r;
+        fill(props);   // ControlTrace consumed the buffer - rebuild
+        sr = StartTraceW(&session, name, props);
+    }
+    if (sr != ERROR_SUCCESS) {
+        LogLine(L"StartTrace('%s') failed status=%lu (5=access denied)", name, sr);
+        return r;
+    }
+
+    TRACEHANDLE consumer = OpenTraceW(&lf);
+    if (consumer == INVALID_PROCESSTRACE_HANDLE) {
+        EVENT_TRACE_PROPERTIES sp; memset(&sp, 0, sizeof(sp));
+        sp.Wnode.BufferSize = sizeof(EVENT_TRACE_PROPERTIES);
+        ControlTraceW(session, nullptr, &sp, EVENT_TRACE_CONTROL_STOP);
+        LogLine(L"OpenTrace('%s') failed err=%lu - session stopped", name, GetLastError());
+        return r;
+    }
+    r.consumer = consumer;
+    r.own = true;
+    r.session = session;
+    SetConnState(L"self-started");
+    LogLine(L"StartTrace('%s', %s) OK (own session, maxbuf=%u)", name,
+            system_logger ? L"system logger" : L"NT Kernel Logger",
+            props->MaximumBuffers);
+    return r;
 }
 
 void EtwCapture::ConsumerLoop() {
     m_running = true;
 
     while (!m_stop) {
-        TRACEHANDLE consumer = INVALID_PROCESSTRACE_HANDLE;
-        bool started_own = false;
-
-        EVENT_TRACE_LOGFILEW lf;
-        memset(&lf, 0, sizeof(lf));
-        lf.LoggerName = const_cast<LPWSTR>(KERNEL_LOGGER_NAMEW);
-        lf.ProcessTraceMode = EVENT_TRACE_REAL_TIME_MODE | PROCESS_TRACE_MODE_EVENT_RECORD;
-        lf.EventRecordCallback = &EtwCapture::Callback;
-
-        // 1) Prefer our OWN session: we control buffer sizing so heavy
-        // traffic doesn't overflow and drop events (attaching to another
-        // app's NT Kernel Logger inherits ITS small buffers).
-        DWORD nameBytes = (DWORD)((wcslen(KERNEL_LOGGER_NAMEW) + 1) * sizeof(wchar_t));
-        DWORD bufSize = sizeof(EVENT_TRACE_PROPERTIES) + nameBytes;
-        std::vector<BYTE> buf(bufSize, 0);
-        auto* props = reinterpret_cast<EVENT_TRACE_PROPERTIES*>(buf.data());
-        props->Wnode.BufferSize = bufSize;
-        props->Wnode.ClientContext = 1;
-        props->BufferSize = 256;
-        props->MinimumBuffers = 4;
-        props->MaximumBuffers = 120;
-        props->FlushTimer = 1;
-        props->LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
-        props->EnableFlags = EVENT_TRACE_FLAG_NETWORK_TCPIP | EVENT_TRACE_FLAG_PROCESS;
-
-        TRACEHANDLE session = 0;
-        ULONG sr = StartTraceW(&session, KERNEL_LOGGER_NAMEW, props);
-        if (sr == ERROR_SUCCESS) {
-            started_own = true;
-            m_own_session_handle = session;
-            SetConnState(L"self-started");
-            LogLine(L"StartTrace OK (own session, maxbuf=%u)", props->MaximumBuffers);
-            consumer = OpenTraceW(&lf);
-            if (consumer == INVALID_PROCESSTRACE_HANDLE) {
-                EVENT_TRACE_PROPERTIES sp; memset(&sp, 0, sizeof(sp));
-                sp.Wnode.BufferSize = sizeof(EVENT_TRACE_PROPERTIES);
-                ControlTraceW(session, nullptr, &sp, EVENT_TRACE_CONTROL_STOP);
-                started_own = false;
-                SetError(L"ETW OpenTrace failed err=%lu", GetLastError());
-                LogLine(L"OpenTrace after StartTrace FAILED err=%lu", GetLastError());
-            }
-        } else if (sr == ERROR_ALREADY_EXISTS) {
-            // Someone else owns "NT Kernel Logger" - usually a stale session
-            // left by a killed app (e.g. ANC). Try to stop it and take over;
-            // if that fails, attach to theirs.
-            EVENT_TRACE_PROPERTIES sp; memset(&sp, 0, sizeof(sp));
-            sp.Wnode.BufferSize = sizeof(EVENT_TRACE_PROPERTIES);
-            ULONG st = ControlTraceW(0, KERNEL_LOGGER_NAMEW, &sp, EVENT_TRACE_CONTROL_STOP);
-            LogLine(L"session exists - stop attempt rc=%lu", st);
-            if (st == ERROR_SUCCESS) {
-                ULONG sr2 = StartTraceW(&session, KERNEL_LOGGER_NAMEW, props);
-                if (sr2 == ERROR_SUCCESS) {
-                    started_own = true;
-                    m_own_session_handle = session;
-                    SetConnState(L"self-started");
-                    LogLine(L"took over stale session - StartTrace OK (own, maxbuf=%u)", props->MaximumBuffers);
-                    consumer = OpenTraceW(&lf);
-                    if (consumer == INVALID_PROCESSTRACE_HANDLE) {
-                        EVENT_TRACE_PROPERTIES sp2; memset(&sp2, 0, sizeof(sp2));
-                        sp2.Wnode.BufferSize = sizeof(EVENT_TRACE_PROPERTIES);
-                        ControlTraceW(session, nullptr, &sp2, EVENT_TRACE_CONTROL_STOP);
-                        started_own = false;
-                        SetError(L"ETW OpenTrace failed err=%lu", GetLastError());
-                        LogLine(L"OpenTrace after takeover FAILED err=%lu", GetLastError());
-                    }
-                } else {
-                    LogLine(L"StartTrace after stop failed err=%lu", sr2);
-                }
-            }
-            if (!started_own && consumer == INVALID_PROCESSTRACE_HANDLE) {
-                // fall back: attach to whatever is there
-                SetConnState(L"attached");
-                LogLine(L"attaching to existing session instead (buffers NOT ours)");
-                SetOwner(FindSessionOwners());
-                LogLine(L"ETW session owner(s): %s", m_owner.empty() ? L"(unknown)" : m_owner.c_str());
-                consumer = OpenTraceW(&lf);
-                if (consumer == INVALID_PROCESSTRACE_HANDLE) {
-                    LogLine(L"attach failed err=%lu", GetLastError());
-                    SetError(L"ETW attach failed err=%lu", GetLastError());
-                }
-            }
-        } else {
-            SetError(L"ETW StartTrace failed err=%lu (need admin?)", sr);
-            LogLine(L"StartTrace failed err=%lu", sr);
+        // ---- Layer waterfall: L1 private system logger (Win8+) -> L2 NT
+        // Kernel Logger (only if free) -> give up this round; legacy capture
+        // covers data via HasData() upstream, whole waterfall retries in 5s.
+        SessionResult r{ INVALID_PROCESSTRACE_HANDLE, false, 0 };
+        DWORD build = 0;
+        if (PNM_GetOSBuild(build) && build >= 9200) {   // Win8+
+            r = TryStartSession(true);
         }
-
-        if (consumer == INVALID_PROCESSTRACE_HANDLE) {
+        if (r.consumer == INVALID_PROCESSTRACE_HANDLE) {
+            r = TryStartSession(false);
+        }
+        if (r.consumer == INVALID_PROCESSTRACE_HANDLE) {
             SetConnState(L"failed");
             if (m_stop) break;
             Sleep(5000);
             continue;
         }
 
-        m_own_session = started_own;
-        m_cur_consumer = consumer;
-        ULONG rc = ProcessTrace(&consumer, 1, nullptr, nullptr);
+        m_own_session = r.own;
+        m_own_session_handle = r.session;   // Stop() unblocks via this
+        m_cur_consumer = r.consumer;
+        ULONG rc = ProcessTrace(&r.consumer, 1, nullptr, nullptr);
         m_cur_consumer = INVALID_PROCESSTRACE_HANDLE;
         m_own_session = false;
-        CloseTrace(consumer);
+        CloseTrace(r.consumer);
         LogLine(L"ProcessTrace returned rc=%lu - session ended, reconnecting in 2s", rc);
 
-        if (started_own) {
+        if (r.own && r.session) {
             EVENT_TRACE_PROPERTIES sp; memset(&sp, 0, sizeof(sp));
             sp.Wnode.BufferSize = sizeof(EVENT_TRACE_PROPERTIES);
-            ControlTraceW(m_own_session_handle, nullptr, &sp, EVENT_TRACE_CONTROL_STOP);
+            ControlTraceW(r.session, nullptr, &sp, EVENT_TRACE_CONTROL_STOP);
             m_own_session_handle = 0;
         }
 
         if (m_stop) break;
-        // Session ended (owner exited) - try to re-attach shortly
-        (void)rc;
         Sleep(2000);
     }
 

@@ -1,9 +1,11 @@
 #pragma once
 // ============================================================
 // Production ETW per-process network byte counter.
-// Consumes the classic "NT Kernel Logger" session (attaches if
-// already running - e.g. started by AppNetworkCounter - otherwise
-// starts its own with EVENT_TRACE_FLAG_NETWORK_TCPIP).
+// L1 (Win8+): private system logger session "PnmNetTrace"
+//   (EVENT_TRACE_SYSTEM_LOGGER_MODE) - coexists with other tools'
+// NT Kernel Logger usage. L2 (Win7, or L1 failure): the classic
+// NT Kernel Logger, only when FREE (never stop/attach a foreign
+// session). L3: legacy EStats/raw-socket capture upstream.
 // Parses events via TDH schema (name-based offsets), counts
 // TCP+UDP send/recv bytes per process. Works under TUN proxies.
 // Same output contract as PacketCapture::GetStats (ProcTraffic).
@@ -40,7 +42,6 @@ public:
     // TM/timer threads read them (unsynchronized wchar_t array access across
     // threads was a torn-read / heap-corruption risk).
     void GetConnState(wchar_t* out, size_t cap) const;
-    std::wstring GetOwner() const;
 
     // Same contract as PacketCapture::GetStats: per-process speeds.
     // conn_count is left 0 (merge with PacketCapture data upstream).
@@ -93,6 +94,15 @@ private:
     };
 
     void ConsumerLoop();
+    // One layer-start attempt. consumer valid + own=true: we started and
+    // own the session (Stop() must ControlTrace-stop it). All invalid:
+    // caller falls to the next layer.
+    struct SessionResult {
+        TRACEHANDLE consumer;   // OpenTraceW handle (INVALID... on failure)
+        bool own;               // we created the session
+        TRACEHANDLE session;    // StartTraceW handle when own
+    };
+    SessionResult TryStartSession(bool system_logger);
     static void WINAPI Callback(PEVENT_RECORD rec);
     static EtwCapture* s_self;
     void OnEvent(PEVENT_RECORD rec);
@@ -112,7 +122,7 @@ private:
     uint64_t m_ev_kept = 0;        // actually counted
     ULONGLONG m_last_log_tick = 0;
     ULONGLONG m_last_shape_tick = 0;
-    // guards m_conn_state / m_owner / m_error (consumer thread writes,
+    // guards m_conn_state / m_error (consumer thread writes,
     // TM + timer threads read via EtwPopupStatus/BuildTooltip)
     mutable std::mutex m_state_mutex;
     wchar_t m_conn_state[64] = L"init";   // attaching/attached/self/failed
@@ -172,7 +182,6 @@ private:
 
     // Best-effort: find which process(es) hold ETW session/consumer handles
     std::wstring FindSessionOwners();
-    std::wstring m_owner;   // filled when attaching to someone else's session
 
     std::mutex m_name_mutex;
     std::map<DWORD, std::wstring> m_name_cache;
@@ -186,5 +195,4 @@ private:
     wchar_t m_error[256] = L"";
     void SetError(const wchar_t* fmt, ...);
     void SetConnState(const wchar_t* s);   // locked write (consumer thread)
-    void SetOwner(std::wstring o);         // locked write (consumer thread)
 };
