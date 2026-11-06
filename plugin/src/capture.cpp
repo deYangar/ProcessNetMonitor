@@ -296,6 +296,50 @@ std::wstring PacketCapture::GetProcessPath(DWORD pid) {
     return path;
 }
 
+// ---- PID 复用防护辅助（降级路线，与 EtwCapture 同语义）----
+static ULONGLONG FtToUll(const FILETIME& ft) {
+    return (ULONGLONG)ft.dwLowDateTime | ((ULONGLONG)ft.dwHighDateTime << 32);
+}
+
+static bool LegacyQueryOwnerStamp(DWORD pid, ULONGLONG& ct, std::wstring& path) {
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!h) return false;
+    FILETIME crea, exit_t, kern, user;
+    bool ok = GetProcessTimes(h, &crea, &exit_t, &kern, &user) != FALSE;
+    if (ok) {
+        ct = FtToUll(crea);
+        wchar_t buf[MAX_PATH]; DWORD n = MAX_PATH;
+        if (QueryFullProcessImageNameW(h, 0, buf, &n)) path = buf;
+    }
+    CloseHandle(h);
+    return ok;
+}
+
+void PacketCapture::ResetStatsLocked(DWORD pid, ULONGLONG new_ct, const wchar_t* src,
+                                     const std::wstring& new_name, const std::wstring& new_path) {
+    auto it = m_stats.find(pid);
+    if (it == m_stats.end()) return;
+    // 日志不带旧名（WriteLog 走窄字符，中文名转码无谓踩坑），pid+src 足够排查
+    std::string src_a;   // src 调用点均为 ASCII 字面量（L"periodic"），窄化无损
+    for (const wchar_t* q = src; *q; ++q) src_a += (char)*q;
+    WriteLog("PID-REUSE reset pid=" + std::to_string(pid) + " src=" + src_a);
+    ProcTraffic fresh;   // 计数全零；name/path 直接用核对拿到的新主人权威值
+    fresh.pid = pid;
+    fresh.name = new_name;
+    fresh.exe_path = new_path;
+    m_stats[pid] = fresh;
+    // 关联累计表一并清（m_tcp_cum 每轮 QueryTcpStats 全量重建，无需清）：
+    // prev 表不清的话新条目 bytes=0 对旧基线算出大负 delta（虽被 d_in>0 滤掉，
+    // 清掉语义更干净）；udp_cum 是累计计数，旧主人字节不能留给新主人
+    m_udp_cum.erase(pid);
+    m_tcp_prev.erase(pid);
+    m_udp_prev.erase(pid);
+    // 缓存覆盖（legacy 侧两张缓存由 m_mutex 保护，此处本就持锁）
+    if (!new_name.empty()) m_name_cache[pid] = new_name;
+    if (!new_path.empty()) m_path_cache[pid] = new_path;
+    m_owner_stamps[pid].ct = new_ct;
+}
+
 // ============================================================
 // Start / Stop
 // ============================================================
@@ -833,7 +877,8 @@ std::vector<ProcTraffic> PacketCapture::GetStats(double dt) {
     QueryTcpStats();
     
     std::vector<ProcTraffic> result;
-    std::lock_guard<std::mutex> lk(m_mutex);
+    std::unique_lock<std::mutex> lk(m_mutex);
+    std::vector<DWORD> stamp_reqs;   // 待核对 CreationTime 的 pid 清单（三段式段1产物）
 
     // Count connections per process (TCP rows + UDP endpoints, v4+v6).
     // One row each - matches netstat -ano and the expandable detail list;
@@ -906,16 +951,62 @@ std::vector<ProcTraffic> PacketCapture::GetStats(double dt) {
         auto cit = conn_counts.find(pid);
         st.conn_count = (cit != conn_counts.end()) ? cit->second : 0;
         result.push_back(st);
+
+        // PID 复用检测（降级路线，无 ETW 事件只有周期核对）：legacy 条目量级
+        // 小（byte capture 关时仅连接表驱动），不做活跃窗过滤，10s 节流+每轮
+        // 32 条上限足够；owner_ct==0 视为首见，优先核对
+        ULONGLONG now_ms = GetTickCount64();
+        if (stamp_reqs.size() < kCtCheckBatch) {
+            auto sit = m_owner_stamps.find(pid);
+            ULONGLONG last_chk = (sit != m_owner_stamps.end()) ? sit->second.check_tick : 0;
+            ULONGLONG owner_ct = (sit != m_owner_stamps.end()) ? sit->second.ct : 0;
+            if (owner_ct == 0 || now_ms - last_chk >= kCtCheckIntervalMs) {
+                stamp_reqs.push_back(pid);
+                m_owner_stamps[pid].check_tick = now_ms;
+            }
+        }
     }
 
     // Notify listener (for history recording) before sorting
     if (m_on_stats) m_on_stats(result);
-    
+
     // Debug log disabled for release
     // DumpDebugLog(result, dt);
 
+    lk.unlock();   // 段1结束：放锁后做核对查询（持锁不做重活）
+
+    // ---- 段2：放锁查询主人创建时间（OpenProcess/GetProcessTimes 纯内核
+    // 快速调用，遵守持锁不做重活铁律）----
+    struct StampRsp { DWORD pid; bool ok; ULONGLONG ct; std::wstring path; };
+    std::vector<StampRsp> stamp_rsps;
+    for (DWORD pid : stamp_reqs) {
+        StampRsp r{ pid, false, 0, L"" };
+        r.ok = LegacyQueryOwnerStamp(pid, r.ct, r.path);
+        stamp_rsps.push_back(r);
+    }
+
+    // ---- 段3：再持锁判定换主 ----
+    if (!stamp_rsps.empty()) {
+        lk.lock();
+        for (auto& r : stamp_rsps) {
+            if (!r.ok || m_stats.find(r.pid) == m_stats.end()) continue;
+            std::wstring new_name;
+            if (!r.path.empty()) {
+                size_t p = r.path.find_last_of(L"\\/");
+                if (p != std::wstring::npos) new_name = r.path.substr(p + 1);
+            }
+            auto sit = m_owner_stamps.find(r.pid);
+            if (sit == m_owner_stamps.end() || sit->second.ct == 0) {
+                m_owner_stamps[r.pid].ct = r.ct;   // 首见记录
+            } else if (sit->second.ct != r.ct) {
+                ResetStatsLocked(r.pid, r.ct, L"periodic", new_name, r.path);
+            }
+        }
+        lk.unlock();
+    }
+
     std::sort(result.begin(), result.end(), [](auto& a, auto& b) { return (a.speed_up + a.speed_down) > (b.speed_up + b.speed_down); });
-    // Do NOT reset byte counters - just let them accumulate
+    // DO NOT reset byte counters - just let them accumulate
     // prev_sent/prev_recv track the last snapshot for delta calculation
     return result;
 }

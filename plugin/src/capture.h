@@ -130,6 +130,17 @@ private:
     std::map<UdpKey, DWORD> m_udp_port_pid;
     std::map<DWORD, std::wstring> m_name_cache;
     std::map<DWORD, std::wstring> m_path_cache;
+    // PID 复用防护（2026-11-06）：进程身份 = PID + 创建时间。侧表记录各 pid
+    // 当前主人的创建时间与上次核对时间，GetStats 周期比对，不一致即重置
+    // m_stats 条目（不污染 ProcTraffic wire 结构）。由 m_mutex 保护。
+    struct OwnerStamp {
+        ULONGLONG ct = 0;          // 主人创建时间（FILETIME→ULONGLONG，0=未知）
+        ULONGLONG check_tick = 0;  // 上次核对时间（节流）
+    };
+    std::map<DWORD, OwnerStamp> m_owner_stamps;
+    static const ULONGLONG kCtActiveWindowMs = 60000;
+    static const ULONGLONG kCtCheckIntervalMs = 10000;
+    static const size_t kCtCheckBatch = 32;
     wchar_t m_error[128] = L"";
     wchar_t m_error_detail[512] = L"";  // detailed explanation for tooltip
     std::function<void(const std::vector<ProcTraffic>&)> m_on_stats;
@@ -165,6 +176,9 @@ private:
     std::string m_last_logged_selection;
     std::wstring m_last_logged_error;
     void WriteLog(const std::string& text);
+    // PID 换主时重置 m_stats 条目与关联累计表（caller 持 m_mutex）
+    void ResetStatsLocked(DWORD pid, ULONGLONG new_ct, const wchar_t* src,
+                          const std::wstring& new_name, const std::wstring& new_path);
     void LogStartupFailure();
     void SetError(const wchar_t* short_msg, const wchar_t* detail_fmt, ...);
     

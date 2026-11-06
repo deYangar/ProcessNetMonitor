@@ -91,6 +91,11 @@ private:
         int idle_rounds = 0;
         bool seen = false;      // first GetStats snapshot only sets the baseline
         std::wstring name;      // resolved process name - kept after process exits
+        // PID 复用防护（2026-11-06）：进程身份 = PID + 创建时间。
+        // owner_ct = 当前主人的进程创建时间（FILETIME 转 ULONGLONG，0=未知，
+        // 首次核对时记录）。GetStats 周期比对：不一致 = PID 已换主，条目重置。
+        ULONGLONG owner_ct = 0;
+        ULONGLONG ct_check_tick = 0;  // 上次 CreationTime 核对时间（节流用）
     };
 
     void ConsumerLoop();
@@ -146,6 +151,11 @@ private:
     // is exceeded (never the pid of the event triggering the eviction).
     static const size_t kCumMax = 4096;
     static const size_t kCumLow = 3500;
+    // PID 复用核对参数（两路线一致）：活跃窗 60s（死条目不占核对名额）、
+    // 核对节流 10s、每轮核对上限 32 条（放锁段执行，防大批量卡顿）。
+    static const ULONGLONG kCtActiveWindowMs = 60000;
+    static const ULONGLONG kCtCheckIntervalMs = 10000;
+    static const size_t kCtCheckBatch = 32;
 
     // Adapter unicast IPs, split physical vs virtual (TUN/TAP/VPN...) by name.
     // Blacklist semantics: only events whose LOCAL address belongs to a virtual
@@ -177,6 +187,9 @@ private:
     };
     std::set<WeirdShape> m_samp_weird;
 
+    // PID 换主时重置累计条目（caller 持 m_mutex）。new_path 非空时顺带刷新
+    // 名字/路径缓存（权威值来自核对句柄）。src 仅用于日志（procstart/periodic）。
+    void ResetCumLocked(DWORD pid, ULONGLONG new_ct, const wchar_t* src, const std::wstring& new_path);
     void LogLine(const wchar_t* fmt, ...);
     void LogPeriodicLocked();
 

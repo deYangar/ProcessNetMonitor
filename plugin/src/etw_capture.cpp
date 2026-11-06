@@ -626,6 +626,17 @@ void EtwCapture::OnEvent(PEVENT_RECORD rec) {
                     }
                 }
             }
+            // PID 复用检测点 A（2026-11-06）：realtime ProcessStart（opcode 1）=
+            // 内核此刻在该 PID 上创建新进程。PID 不可能复用给活着的进程，故
+            // 事件命中现存累计条目即为换主铁证（无需名字比对，规避 issue#15
+            // 内核截断名的前缀误判；同 exe 重启复用 PID 同样命中）。replay
+            // (opcode 3) 不参与：session 启动/接管时 m_cum 为空或属 Start 流程。
+            // 顺序在缓存刷新之后：当拍并发 GetStats 至少读到新主人名字。
+            // 锁序：先刷缓存(m_name_mutex,已放)再重置(m_mutex)，不嵌套。
+            if (rec->EventHeader.EventDescriptor.Opcode == 1) {
+                std::lock_guard<std::mutex> lk(m_mutex);
+                ResetCumLocked(pid, 0, L"procstart", L"");
+            }
         }
     }
 
@@ -755,60 +766,143 @@ void EtwCapture::OnEvent(PEVENT_RECORD rec) {
     }
 }
 
+// ---- PID 复用防护辅助 ----
+// FILETIME → 64 位比较值（进程创建时间是其固有属性，不受运行期时钟调整影响）
+static ULONGLONG FtToUll(const FILETIME& ft) {
+    return (ULONGLONG)ft.dwLowDateTime | ((ULONGLONG)ft.dwHighDateTime << 32);
+}
+
+// 打开 pid 取创建时间 + 权威全路径。失败返回 false（进程退出/受保护）。
+// 纯内核快速调用，必须只在放锁段调用（持锁不做重活）。
+static bool EtwQueryOwnerStamp(DWORD pid, ULONGLONG& ct, std::wstring& path) {
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!h) return false;
+    FILETIME crea, exit_t, kern, user;
+    bool ok = GetProcessTimes(h, &crea, &exit_t, &kern, &user) != FALSE;
+    if (ok) {
+        ct = FtToUll(crea);
+        wchar_t buf[512]; DWORD n = 512;
+        if (QueryFullProcessImageNameW(h, 0, buf, &n)) path = buf;
+    }
+    CloseHandle(h);
+    return ok;
+}
+
+void EtwCapture::ResetCumLocked(DWORD pid, ULONGLONG new_ct, const wchar_t* src,
+                                const std::wstring& new_path) {
+    auto it = m_cum.find(pid);
+    if (it == m_cum.end()) return;
+    Cum& c = it->second;
+    LogLine(L"PID-REUSE reset pid=%lu old=%ls src=%ls", pid, c.name.c_str(), src);
+    c = Cum{};            // 计数/基线/seen/name 全清；seen=false 下拍只立基线，无伪速度
+    c.owner_ct = new_ct;  // 0 = 未知（procstart 钩子拿不到 ct），留待周期核对首见记录
+    m_name_retry_ts.erase(pid);
+    if (!new_path.empty()) {
+        std::lock_guard<std::mutex> nlk(m_name_mutex);  // 锁序 m_mutex→m_name_mutex，与 GetStats/ProcName 同向
+        m_path_cache[pid] = new_path;
+        size_t p = new_path.find_last_of(L"\\/");
+        if (p != std::wstring::npos) m_name_cache[pid] = new_path.substr(p + 1);
+    }
+}
+
 std::vector<ProcTraffic> EtwCapture::GetStats(double interval_sec) {
     std::vector<ProcTraffic> out;
     if (interval_sec < 0.05) interval_sec = 0.05;
 
-    std::lock_guard<std::mutex> lk(m_mutex);
-    ULONGLONG now = GetTickCount64();
-    for (auto& [pid, c] : m_cum) {
-        c.idle_rounds++;
+    // 三段式（持锁不做重活）：段1 持锁产出+收集待核对清单 → 段2 放锁
+    // OpenProcess/GetProcessTimes → 段3 再持锁判定换主并重置。
+    // 段2 期间条目可能被消费线程新增/驱逐（kCumMax），段3 一律 find 不假设存在。
+    std::vector<DWORD> stamp_reqs;
+    {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        ULONGLONG now = GetTickCount64();
+        for (auto& [pid, c] : m_cum) {
+            c.idle_rounds++;
 
-        ProcTraffic pt;
-        pt.pid = pid;
-        pt.bytes_sent = c.sent;
-        pt.bytes_recv = c.recv;
-        uint64_t ds = c.sent - c.prev_sent;
-        uint64_t dr = c.recv - c.prev_recv;
-        c.prev_sent = c.sent;
-        c.prev_recv = c.recv;
-        // First snapshot: only set the baseline - never report the cumulative
-        // bytes as a delta (that produced a huge bogus speed on plugin start).
-        if (!c.seen) {
-            c.seen = true;
-            pt.speed_up = 0;
-            pt.speed_down = 0;
-        } else {
-            pt.speed_up = (double)ds / interval_sec;
-            pt.speed_down = (double)dr / interval_sec;
-        }
-        pt.conn_count = 0;
-        // Re-resolve when empty OR when the previous lookup failed ("<pid>"):
-        // the failed placeholder must never become durable, otherwise an
-        // exiting/protected process shows "<pid>" forever. Once a real name
-        // is resolved it stays (survives process exit).
-        // Backoff: a dead process can never resolve - don't burn a Toolhelp
-        // snapshot every tick for it; retry at most every 30s.
-        if (c.name.empty() || c.name[0] == L'<') {
-            auto rit = m_name_retry_ts.find(pid);
-            if (rit == m_name_retry_ts.end() || now - rit->second > 30000) {
-                std::wstring try_name = ProcName(pid);
-                if (try_name.empty() || try_name[0] == L'<') {
-                    m_name_retry_ts[pid] = now;   // failed: back off 30s
-                    if (c.name.empty()) c.name = try_name;  // show "<pid>" for now
-                } else {
-                    c.name = try_name;            // resolved - durable
+            ProcTraffic pt;
+            pt.pid = pid;
+            pt.bytes_sent = c.sent;
+            pt.bytes_recv = c.recv;
+            uint64_t ds = c.sent - c.prev_sent;
+            uint64_t dr = c.recv - c.prev_recv;
+            c.prev_sent = c.sent;
+            c.prev_recv = c.recv;
+            // First snapshot: only set the baseline - never report the cumulative
+            // bytes as a delta (that produced a huge bogus speed on plugin start).
+            if (!c.seen) {
+                c.seen = true;
+                pt.speed_up = 0;
+                pt.speed_down = 0;
+            } else {
+                pt.speed_up = (double)ds / interval_sec;
+                pt.speed_down = (double)dr / interval_sec;
+            }
+            pt.conn_count = 0;
+            // Re-resolve when empty OR when the previous lookup failed ("<pid>"):
+            // the failed placeholder must never become durable, otherwise an
+            // exiting/protected process shows "<pid>" forever. Once a real name
+            // is resolved it stays (survives process exit).
+            // Backoff: a dead process can never resolve - don't burn a Toolhelp
+            // snapshot every tick for it; retry at most every 30s.
+            if (c.name.empty() || c.name[0] == L'<') {
+                auto rit = m_name_retry_ts.find(pid);
+                if (rit == m_name_retry_ts.end() || now - rit->second > 30000) {
+                    std::wstring try_name = ProcName(pid);
+                    if (try_name.empty() || try_name[0] == L'<') {
+                        m_name_retry_ts[pid] = now;   // failed: back off 30s
+                        if (c.name.empty()) c.name = try_name;  // show "<pid>" for now
+                    } else {
+                        c.name = try_name;            // resolved - durable
+                    }
                 }
             }
+            pt.name = c.name;
+            pt.exe_path = ProcPath(pid);
+            // Keep every process that has ever had traffic - never evict
+            // (user request 2026-08-04: drop the idle-removal entirely)
+            out.push_back(std::move(pt));
+
+            // PID 复用检测点 B（周期核对清单收集）：
+            // - 活跃窗内（60s 内有过流量）才核对，死条目不占名额
+            // - owner_ct==0（首见，需记录）或距上次核对 ≥10s
+            // - 每轮上限 32 条；先记账 ct_check_tick 防重入（查询失败也等下个周期）
+            if (stamp_reqs.size() < kCtCheckBatch &&
+                now - c.last_seen < kCtActiveWindowMs &&
+                (c.owner_ct == 0 || now - c.ct_check_tick >= kCtCheckIntervalMs)) {
+                stamp_reqs.push_back(pid);
+                c.ct_check_tick = now;
+            }
         }
-        pt.name = c.name;
-        pt.exe_path = ProcPath(pid);
-        // Keep every process that has ever had traffic - never evict
-        // (user request 2026-08-04: drop the idle-removal entirely)
-        out.push_back(std::move(pt));
+        LogPeriodicLocked();
+        (void)now;
     }
-    LogPeriodicLocked();
-    (void)now;
+
+    // 段2：放锁查询（OpenProcess/GetProcessTimes/QueryFullProcessImageName 均为
+    // 纯内核快速调用，但遵守持锁不做重活铁律放锁执行）
+    struct StampRsp { DWORD pid; bool ok; ULONGLONG ct; std::wstring path; };
+    std::vector<StampRsp> stamp_rsps;
+    for (DWORD pid : stamp_reqs) {
+        StampRsp r{ pid, false, 0, L"" };
+        r.ok = EtwQueryOwnerStamp(pid, r.ct, r.path);
+        stamp_rsps.push_back(r);
+    }
+
+    // 段3：再持锁判定（检测点 C 首见记录在此合并：owner_ct==0 即记录）
+    if (!stamp_rsps.empty()) {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        for (auto& r : stamp_rsps) {
+            auto it = m_cum.find(r.pid);
+            if (it == m_cum.end() || !r.ok) continue;  // 已被驱逐/查询失败：下轮再试
+            Cum& c = it->second;
+            if (c.owner_ct == 0) {
+                c.owner_ct = r.ct;      // 首见记录：ct 即真主人（查询时主人活着）
+            } else if (c.owner_ct != r.ct) {
+                // 换主：重置累计并刷新缓存（new_path 即新主人权威路径）
+                ResetCumLocked(r.pid, r.ct, L"periodic", r.path);
+            }
+            // owner_ct == r.ct：同一主人，无事
+        }
+    }
     return out;
 }
 
