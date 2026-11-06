@@ -369,11 +369,20 @@ EtwCapture::SessionResult EtwCapture::TryStartSession(bool system_logger) {
             return r;
         }
         // Custom name => our own leftover from a crashed run. Safe to stop.
-        EVENT_TRACE_PROPERTIES sp; memset(&sp, 0, sizeof(sp));
-        sp.Wnode.BufferSize = sizeof(EVENT_TRACE_PROPERTIES);
-        ULONG st = ControlTraceW((TRACEHANDLE)0, name, &sp, EVENT_TRACE_CONTROL_STOP);
+        // Stop with a name-sized buffer: a bare sizeof(EVENT_TRACE_PROPERTIES)
+        // got ERROR_MORE_DATA (234) on real systems - the system writes the
+        // session name back into the caller's buffer, but the stop itself
+        // already took effect. Let StartTrace be the sole source of truth
+        // for "is the leftover really gone" instead of guessing at the
+        // stop return code (2026-11-06 field finding, A+D fix).
+        DWORD stopNameBytes = (DWORD)((wcslen(name) + 1) * sizeof(wchar_t));
+        DWORD stopBufSize = sizeof(EVENT_TRACE_PROPERTIES) + stopNameBytes;
+        std::vector<BYTE> sbuf(stopBufSize, 0);
+        auto* sp = reinterpret_cast<EVENT_TRACE_PROPERTIES*>(sbuf.data());
+        sp->Wnode.BufferSize = stopBufSize;
+        ULONG st = ControlTraceW((TRACEHANDLE)0, name, sp, EVENT_TRACE_CONTROL_STOP);
         LogLine(L"session '%s' leftover - stop rc=%lu", name, st);
-        if (st != ERROR_SUCCESS) return r;
+        if (st == ERROR_ACCESS_DENIED) return r;   // unelevated: StartTrace would fail too - fall to L2 now
         fill(props);   // ControlTrace consumed the buffer - rebuild
         sr = StartTraceW(&session, name, props);
     }
