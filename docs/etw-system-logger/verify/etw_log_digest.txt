@@ -1,0 +1,79 @@
+# etw_capture.log 关键行摘录（2026-11-06 施工验证期，TM 提权运行）
+
+## C:/green/TrafficMonitor/plugins/ProcessNetMonitor/debug\capture.log
+## C:/green/TrafficMonitor/plugins/ProcessNetMonitor/debug\crash.log
+## C:/green/TrafficMonitor/plugins/ProcessNetMonitor/debug\etw_capture.log
+[10:06:16] session 'PnmNetTrace' leftover - stop rc=234
+[10:06:16] NT Kernel Logger busy (183), owner(s): (unknown) - not touching it
+[10:06:21] StartTrace('PnmNetTrace', system logger) OK (own session, maxbuf=120)
+[10:10:02] session 'PnmNetTrace' leftover - stop rc=234
+[10:10:02] NT Kernel Logger busy (183), owner(s): (unknown) - not touching it
+[10:10:07] StartTrace('PnmNetTrace', system logger) OK (own session, maxbuf=120)
+[10:18:44] PID-REUSE reset pid=29048 old=chrome.exe src=procstart
+[10:19:11] PID-REUSE reset pid=19892 old=vctip.exe src=periodic
+[10:19:12] PID-REUSE reset pid=19892 old=bash.exe src=procstart
+[10:19:12] PID-REUSE reset pid=31248 old=svchost.exe src=procstart
+[10:19:13] PID-REUSE reset pid=22284 old=python.exe src=procstart
+[10:19:13] PID-REUSE reset pid=5420 old=python.exe src=procstart
+[10:19:17] PID-REUSE reset pid=30020 old=python.exe src=procstart
+[10:19:20] PID-REUSE reset pid=34792 old=python.exe src=procstart
+[10:19:20] PID-REUSE reset pid=16520 old=python.exe src=procstart
+[10:19:21] PID-REUSE reset pid=33748 old=python.exe src=procstart
+[10:19:23] PID-REUSE reset pid=23128 old=python.exe src=procstart
+[10:19:23] PID-REUSE reset pid=3048 old=python.exe src=procstart
+[10:19:23] PID-REUSE reset pid=33804 old=python.exe src=procstart
+[10:19:24] PID-REUSE reset pid=22284 old=python.exe src=procstart
+[10:19:24] PID-REUSE reset pid=5420 old=python.exe src=procstart
+[10:19:24] PID-REUSE reset pid=30020 old=python.exe src=procstart
+[10:19:25] PID-REUSE reset pid=34020 old=python.exe src=procstart
+[10:19:25] PID-REUSE reset pid=6152 old=python.exe src=procstart
+[10:19:26] PID-REUSE reset pid=34128 old=python.exe src=procstart
+[10:19:26] PID-REUSE reset pid=15944 old=python.exe src=procstart
+[10:19:27] PID-REUSE reset pid=31988 old=python.exe src=procstart
+[10:19:28] PID-REUSE reset pid=33748 old=python.exe src=procstart
+[10:19:29] PID-REUSE reset pid=23128 old=python.exe src=procstart
+[10:19:29] PID-REUSE reset pid=31248 old=python.exe src=procstart
+[10:19:30] PID-REUSE reset pid=10504 old=python.exe src=procstart
+[10:19:31] PID-REUSE reset pid=620 old=python.exe src=procstart
+[10:19:32] PID-REUSE reset pid=29048 old=python.exe src=procstart
+[10:19:32] PID-REUSE reset pid=2792 old=python.exe src=procstart
+[10:19:32] PID-REUSE reset pid=33496 old=python.exe src=procstart
+[10:19:33] PID-REUSE reset pid=22284 old=python.exe src=procstart
+[10:19:33] PID-REUSE reset pid=23128 old=python.exe src=procstart
+[10:19:34] PID-REUSE reset pid=31740 old=python.exe src=procstart
+[10:19:34] PID-REUSE reset pid=25972 old=python.exe src=procstart
+[10:19:34] PID-REUSE reset pid=34496 old=python.exe src=procstart
+[10:19:34] PID-REUSE reset pid=31688 old=python.exe src=procstart
+[10:19:35] PID-REUSE reset pid=33128 old=python.exe src=procstart
+[10:19:36] PID-REUSE reset pid=34024 old=python.exe src=procstart
+[10:19:36] PID-REUSE reset pid=23020 old=python.exe src=procstart
+[10:19:36] PID-REUSE reset pid=620 old=python.exe src=procstart
+[10:19:36] PID-REUSE reset pid=10504 old=python.exe src=procstart
+[10:19:36] PID-REUSE reset pid=30372 old=python.exe src=procstart
+[10:19:37] PID-REUSE reset pid=34496 old=python.exe src=procstart
+[10:19:37] PID-REUSE reset pid=13276 old=python.exe src=procstart
+[10:19:37] PID-REUSE reset pid=7768 old=python.exe src=procstart
+[10:19:37] PID-REUSE reset pid=15668 old=python.exe src=procstart
+[10:19:37] PID-REUSE reset pid=24588 old=XboxGameBarWidgets.exe src=procstart
+[10:19:38] PID-REUSE reset pid=33748 old=python.exe src=procstart
+[10:19:38] PID-REUSE reset pid=33128 old=python.exe src=procstart
+[10:19:38] PID-REUSE reset pid=33496 old=python.exe src=procstart
+[10:19:39] PID-REUSE reset pid=10504 old=python.exe src=procstart
+[10:19:39] PID-REUSE reset pid=16480 old=python.exe src=procstart
+[10:19:39] PID-REUSE reset pid=34496 old=python.exe src=procstart
+[10:19:39] PID-REUSE reset pid=31688 old=python.exe src=procstart
+[10:19:40] PID-REUSE reset pid=31248 old=python.exe src=procstart
+[10:19:40] PID-REUSE reset pid=33748 old=python.exe src=procstart
+[10:19:41] PID-REUSE reset pid=29048 old=python.exe src=procstart
+[10:19:41] PID-REUSE reset pid=7680 old=python.exe src=procstart
+[10:19:41] PID-REUSE reset pid=33804 old=python.exe src=procstart
+[10:19:42] session 'PnmNetTrace' leftover - stop rc=234
+[10:19:42] StartTrace('NT Kernel Logger', NT Kernel Logger) OK (own session, maxbuf=120)
+[10:21:27] PID-REUSE reset pid=29960 old=backgroundTaskHost.exe src=procstart
+
+## 周期行增长证据（首/中/尾各一条）
+10:06:23 conn=self-started total=38 net=23 kept=11
+10:10:29 conn=self-started total=18298868 net=9165702 kept=1260
+10:14:27 conn=self-started total=221467985 net=110923970 kept=30593
+10:18:22 conn=self-started total=375923348 net=188329318 kept=119131
+10:22:15 conn=self-started total=45212 net=23575 kept=15088

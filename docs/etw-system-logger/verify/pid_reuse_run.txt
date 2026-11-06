@@ -1,0 +1,21 @@
+[verify] listener 192.168.0.171:51128, burn=60/s, log-dir=C:/green/TrafficMonitor/plugins/ProcessNetMonitor/debug
+[verify] 进度: 已起 60 个子进程, PID-REUSE 命中 58 次
+[verify]   [10:19:41] PID-REUSE reset pid=29048 old=python.exe src=procstart
+[verify]   [10:19:41] PID-REUSE reset pid=7680 old=python.exe src=procstart
+[verify]   [10:19:41] PID-REUSE reset pid=33804 old=python.exe src=procstart
+[verify] 判定: PASS（检测到换主重置）
+Traceback (most recent call last):
+Traceback (most recent call last):
+  File "<string>", line 11, in <module>
+Traceback (most recent call last):
+Traceback (most recent call last):
+  File "<string>", line 11, in <module>
+  File "<string>", line 11, in <module>
+ConnectionResetError: [WinError 10054] 远程主机强迫关闭了一个现有的连接。
+Traceback (most recent call last):
+  File "<string>", line 11, in <module>
+  File "<string>", line 11, in <module>
+ConnectionResetError: [WinError 10054] 远程主机强迫关闭了一个现有的连接。
+ConnectionResetError: [WinError 10054] 远程主机强迫关闭了一个现有的连接。
+ConnectionResetError: [WinError 10054] 远程主机强迫关闭了一个现有的连接。
+ConnectionResetError: [WinError 10054] 远程主机强迫关闭了一个现有的连接。

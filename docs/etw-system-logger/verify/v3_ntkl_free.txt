@@ -1,0 +1,43 @@
+﻿=== stop orphan NT Kernel Logger ===
+命令成功结束。
+
+数据收集器集                         类型                          状态
+-------------------------------------------------------------------------------
+NT Kernel Logger                        跟踪                            正在运行    
+Circular Kernel Context Logger          跟踪                            正在运行    
+Eventlog-Security                       跟踪                            正在运行    
+CimFSUnionFS-Filter                     跟踪                            正在运行    
+DiagLog                                 跟踪                            正在运行    
+Diagtrack-Listener                      跟踪                            正在运行    
+EventLog-Application                    跟踪                            正在运行    
+EventLog-Intel-SST-OED-IntcOED_ETW_Telemetry 跟踪                            正在运行    
+EventLog-System                         跟踪                            正在运行    
+FilterMgr-Logger                        跟踪                            正在运行    
+Intel-Gfx-Driver                        跟踪                            正在运行    
+LwtNetLog                               跟踪                            正在运行    
+Microsoft-Windows-Rdp-Graphics-RdpIdd-Trace 跟踪                            正在运行    
+NetCore                                 跟踪                            正在运行    
+NtfsLog                                 跟踪                            正在运行    
+RadioMgr                                跟踪                            正在运行    
+UpdateSessionOrchestration              跟踪                            正在运行    
+ReFSLog                                 跟踪                            正在运行    
+UBPM                                    跟踪                            正在运行    
+WdiContextLog                           跟踪                            正在运行    
+WiFiDriverIHVSession                    跟踪                            正在运行    
+WiFiSession                             跟踪                            正在运行    
+ZulerCoreToolWatchDog{4A234956-2B7D-4221-BADF-12593BD342A8} 跟踪                            正在运行    
+SleepStudyTraceSession                  跟踪                            正在运行    
+CldFltLog                               跟踪                            正在运行    
+MpWppCoreTracing-20261106-094854-00000003-100000000 跟踪                            正在运行    
+NVIDIA-NVTOPPS-NOCAT                    跟踪                            正在运行    
+NVIDIA-NVTOPPS-FILTER                   跟踪                            正在运行    
+MoUxCoreWorker                          跟踪                            正在运行    
+1DSListener                             跟踪                            正在运行    
+GamingServices                          跟踪                            正在运行    
+pm2_igs                                 跟踪                            正在运行    
+Windows-Compat-Inventory-InstallMon     跟踪                            正在运行    
+8696EAC4-1288-4288-A4EE-49EE431B0AD9    跟踪                            正在运行    
+WinDiag-Realtime-Session                跟踪                            正在运行    
+
+命令成功结束。
+DONE
