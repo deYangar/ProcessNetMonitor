@@ -42,10 +42,12 @@ void SafeDestroyWindow(HWND hwnd) {
 // class "tooltips_class32".  Enumerate the visible ones that belong to the
 // same process as the anchor TM window.  If the anchor handle is missing we
 // still collect all visible tooltips so the popup can avoid them.
-// 2026-11-06: also collects the sibling plugin PTM's floating group windows
-// (class prefix "PTMTopList_", per-window %p suffix) — both plugins hover-pop
-// over the same TM window with the same placement formula, so without mutual
-// avoidance they land on the exact same rect.
+// 2026-11-06 problem-4 (asymmetric order): NO LONGER collects the sibling
+// plugin PTM's floating group windows — PNM now ALWAYS takes the placement
+// formula's primary position and broadcasts WM_APP+8 (PTM's WM_PTM_YIELD)
+// so PTM relocates itself (see PositionWindow tail). The old symmetric
+// mutual avoidance meant "whoever pops later yields" — a millisecond race
+// decided who got the primary position.
 static void FindForeignPopups(HWND anchor_hwnd, std::vector<RECT>& out) {
     out.clear();
     DWORD tm_pid = 0;
@@ -65,26 +67,6 @@ static void FindForeignPopups(HWND anchor_hwnd, std::vector<RECT>& out) {
         if (rc.left >= rc.right || rc.top >= rc.bottom) continue;
         out.push_back(rc);
     }
-    struct PtmCtx {
-        std::vector<RECT>* out;
-        DWORD pid;
-    } pctx = { &out, tm_pid };
-    EnumWindows([](HWND h, LPARAM lp) -> BOOL {
-        auto* c = (PtmCtx*)lp;
-        wchar_t cls[64];
-        if (!GetClassNameW(h, cls, 64) ||
-            wcsncmp(cls, L"PTMTopList_", 11) != 0)
-            return TRUE;
-        DWORD pid = 0;
-        GetWindowThreadProcessId(h, &pid);
-        if (c->pid != 0 && pid != c->pid) return TRUE;
-        if (!IsWindowVisible(h)) return TRUE;
-        RECT rc;
-        GetWindowRect(h, &rc);
-        if (rc.left >= rc.right || rc.top >= rc.bottom) return TRUE;
-        c->out->push_back(rc);
-        return TRUE;
-    }, (LPARAM)&pctx);
 }
 
 static RECT InflateRectScreen(const RECT& rc, int dx, int dy) {
@@ -1825,6 +1807,28 @@ void CTooltipPopup::PositionWindow(const RECT& anchor_rect) {
     // 重采样的「清空表面 → 新表面」之间不落消息间隙：同步画一帧提交
     // ULW，DWM 合成不到中间的全透明帧（重定位/拖动跟随路径全走这里）
     if (m_acrylic_active) UpdateWindow(m_hwnd);
+
+    // 不对称秩序广播（2026-11-06 问题④）：PNM 已占住方位公式正位，
+    // Post 通知同进程可见 PTM 组让位重排。WM_APP+8 = PTM 侧 utils.h 的
+    // WM_PTM_YIELD（两 DLL 不共享头文件，裸常量对齐——PTM 的
+    // WM_APP+1..7 段之后）。只 Post 不 Send：跨 DLL 单向弱通知，PTM
+    // 未加载/无窗时自然无人处理；PTM 对每扇窗收到都幂等重排。
+    // PostMessage 异步——切换期最长一帧重叠，UI 线程下一轮消息循环
+    // 即收敛，残余竞态由 PTM 的 500ms 兜底轮询收拾
+    {
+        struct PtmNotifyCtx { DWORD pid; } nctx = { GetCurrentProcessId() };
+        EnumWindows([](HWND h, LPARAM lp) -> BOOL {
+            auto* c = (PtmNotifyCtx*)lp;
+            wchar_t cls[64];
+            if (!GetClassNameW(h, cls, 64)) return TRUE;
+            if (wcsncmp(cls, L"PTMTopList_", 11) != 0) return TRUE;
+            DWORD pid = 0;
+            GetWindowThreadProcessId(h, &pid);
+            if (pid != c->pid || !IsWindowVisible(h)) return TRUE;
+            PostMessage(h, WM_APP + 8, 0, 0);   // PTM WM_PTM_YIELD
+            return TRUE;
+        }, (LPARAM)&nctx);
+    }
 
     // Start mouse tracking
     if (!m_tracking) {
