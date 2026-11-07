@@ -56,7 +56,7 @@ void PacketCapture::SetTMConfigDir(const std::wstring& dir) {
 }
 
 void PacketCapture::SetLogDir(const std::wstring& dir) {
-    std::lock_guard<std::mutex> lk(m_mutex);
+    std::lock_guard<std::mutex> lk(m_log_mutex);
     m_log_dir = dir;
 }
 
@@ -154,7 +154,7 @@ std::vector<std::string> PacketCapture::ReadTMAdapterConfig() {
     for (auto& ip : result) sel_key += ip + ";";
     bool changed = false;
     {
-        std::lock_guard<std::mutex> lk(m_mutex);
+        std::lock_guard<std::mutex> lk(m_log_mutex);
         if (sel_key != m_last_logged_selection) {
             m_last_logged_selection = sel_key;
             changed = true;
@@ -546,10 +546,12 @@ void PacketCapture::SetError(const wchar_t* short_msg, const wchar_t* detail_fmt
 }
 
 void PacketCapture::WriteLog(const std::string& text) {
-    // Locked copy: SetLogDir writes from the host thread.
+    // Locked copy: SetLogDir writes from the host thread. m_log_mutex（不是
+    // m_mutex——本函数会被 m_mutex 持有者调用，递归锁非递归 mutex 是 UB，
+    // 2026-11-07 18:27 TM 崩溃根因，见 capture.h 诊断日志段注释）
     std::wstring log_dir;
     {
-        std::lock_guard<std::mutex> lk(m_mutex);
+        std::lock_guard<std::mutex> lk(m_log_mutex);
         log_dir = m_log_dir;
     }
     if (log_dir.empty()) return;
@@ -596,7 +598,7 @@ void PacketCapture::WriteLog(const std::string& text) {
 void PacketCapture::LogStartupFailure() {
     std::wstring log_dir;
     {
-        std::lock_guard<std::mutex> lk(m_mutex);
+        std::lock_guard<std::mutex> lk(m_log_mutex);
         if (m_log_dir.empty()) return;
         log_dir = m_log_dir;
     }

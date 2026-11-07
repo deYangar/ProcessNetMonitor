@@ -171,10 +171,16 @@ private:
     ULONGLONG m_last_enable_fail_tick = 0;  // guarded by m_mutex
     std::string m_last_fail_key;          // adapter selection that failed (guarded by m_mutex)
     
-    // Diagnostics log
-    std::wstring m_log_dir;
-    std::string m_last_logged_selection;
-    std::wstring m_last_logged_error;
+    // Diagnostics log。专用锁 m_log_mutex 保护（不碰 m_mutex）：
+    // WriteLog 会被 m_mutex 的持有者调用（ResetStatsLocked 在 GetStats 持锁
+    // 路径里），2026-11-07 18:27 TM 崩溃即源于 WriteLog 内部再锁 m_mutex ——
+    // 同线程对非递归 std::mutex 二次上锁是 UB，MSVC STL 抛
+    // system_error(resource_deadlock_would_occur) 直达 std::terminate。
+    // 锁序纪律：持 m_log_mutex 时绝不反向去拿 m_mutex。
+    std::wstring m_log_dir;               // guarded by m_log_mutex
+    std::string m_last_logged_selection;  // guarded by m_log_mutex
+    std::wstring m_last_logged_error;     // guarded by m_log_mutex
+    mutable std::mutex m_log_mutex;
     void WriteLog(const std::string& text);
     // PID 换主时重置 m_stats 条目与关联累计表（caller 持 m_mutex）
     void ResetStatsLocked(DWORD pid, ULONGLONG new_ct, const wchar_t* src,
