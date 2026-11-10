@@ -22,7 +22,7 @@ TrafficMonitor/
 # Debug logs
 procnet_*.txt
 pnm_debug.txt
-build_output.txt
+build_*.txt
 build_log.txt
 
 # TM source (reference only, not part of plugin)
