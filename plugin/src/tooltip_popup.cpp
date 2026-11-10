@@ -6,6 +6,7 @@
 #include <shobjidl.h>
 #include <dwmapi.h>
 #include <commctrl.h>   // SetWindowSubclass / DefSubclassProc（锚子类化框架）
+#include <windowsx.h>   // GET_X_LPARAM / GET_Y_LPARAM（WM_CONTEXTMENU 屏幕坐标）
 #include <algorithm>
 #include <cmath>
 
@@ -657,6 +658,12 @@ LRESULT CTooltipPopup::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
 
+    case WM_CONTEXTMENU:
+        // 右键菜单（2026-11-10 方案）：lp 是屏幕坐标，(-1,-1)=键盘触发
+        //（菜单键/Shift+F10）→ ShowContextMenu 内光标兜底
+        ShowContextMenu(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        return 0;
+
     case WM_ERASEBKGND:
         return 1; // prevent flicker
 
@@ -666,6 +673,35 @@ LRESULT CTooltipPopup::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
     default:
         return DefWindowProcW(m_hwnd, msg, wp, lp);
     }
+}
+
+void CTooltipPopup::ShowContextMenu(int x, int y) {
+    // 右键菜单（2026-11-10 方案）：详情窗 ShowContextMenu 同款骨架。
+    // x/y 屏幕坐标；键盘触发（WM_CONTEXTMENU lp=-1）→ 光标兜底
+    if (x == -1 && y == -1) {
+        POINT pt;
+        GetCursorPos(&pt);
+        x = pt.x;
+        y = pt.y;
+    }
+    m_menu_open = true;
+    // NOACTIVATE 窗口弹菜单的前台前置（方案 R1 预案直接落实）：菜单
+    //「点击外部关闭」依赖前台窗口路由，不设前台可能失灵——PTM
+    // BuildContextMenu 同款写法；若实测有焦点副作用再评估撤除
+    SetForegroundWindow(m_hwnd);
+    HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING, 1, TR(L"插件设置"));
+    int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                             x, y, 0, m_hwnd, NULL);
+    DestroyMenu(menu);
+    // 命令处理放在 m_menu_open 复位之前（与详情窗先复位后处理相反）：
+    // 设置窗模态循环期间守卫保持置位 → HoverTick 不收 popup，悬浮窗
+    // 冻结原状直到设置窗关闭（PTM m_menu_open 冻结语义平移）
+    if (cmd == 1)
+        CProcessNetPlugin::Instance().ShowOptionsDialog(m_hwnd);
+    m_menu_open = false;
+    // 菜单留下的 hover 高亮状态复位（区域可能已变）
+    InvalidateRect(m_hwnd, NULL, FALSE);
 }
 
 void CTooltipPopup::OnMouseLeave() {

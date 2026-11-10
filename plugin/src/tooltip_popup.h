@@ -56,6 +56,14 @@ public:
     bool IsHovering() const { return m_hovering; }
     HWND GetHwnd() const { return m_hwnd; }
 
+    // ---- 右键菜单（2026-11-10 方案）----
+    // 悬浮窗右键 →「插件设置」直达选项窗。菜单/设置模态期间 m_menu_open
+    // 置位，HoverTick 据此冻结收窗判定：鼠标移向菜单/设置窗 = 光标离开
+    // popup，不冻结会被 100ms 状态机收起 owner 闪关菜单（PTM 173786a
+    // 实锤的同构坑平移治本）
+    bool IsMenuOpen() const { return m_menu_open; }
+    void ShowContextMenu(int x, int y);   // 屏幕坐标（WM_CONTEXTMENU 直传）
+
     // Backdrop effect for the popup (popup_effect setting):
     //   0 = acrylic  (自绘模糊管线 + 噪声)
     //   1 = transparent (纯 ULW 真半透明，无模糊)
@@ -217,6 +225,7 @@ private:
     HWND m_anchor_hwnd = nullptr;  // TrafficMonitor window we are anchored to
     bool m_visible = false;
     bool m_hovering = false;  // mouse is over the popup itself
+    bool m_menu_open = false; // 右键菜单/设置模态期守卫（见 IsMenuOpen 注释）
     bool m_dark_mode = true;
 
     // Backdrop state (ApplyBackdrop): mode 0 = plain window, 1 = ULW

@@ -1307,6 +1307,14 @@ void CProcessNetPlugin::HoverTick() {
     // tooltip (which still carries our GetTooltipInfo text) is the only hint.
     if (!m_popup_created || !m_detail.GetPopupEnabled()) return;
 
+    // --- Our popup's menu / options dialog open: freeze the state machine
+    // (2026-11-10) ------------------------------------------------------
+    // While the popup's own context menu (or the modal options dialog it
+    // opened) is up, the cursor legitimately sits outside the popup - the
+    // 100ms state machine would otherwise hide the owner out from under
+    // the menu (same defect PTM hit and fixed with its m_menu_open guard).
+    if (m_popup.IsMenuOpen()) return;
+
     // --- Context menu open: hide immediately, suppress hover logic ---------
     // No 300ms grace here (the menu must never share the screen with the
     // popup) and pinned popups step aside too. Right-clicks that land on a
@@ -2166,6 +2174,15 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
 }
 
 ITMPlugin::OptionReturn CProcessNetPlugin::ShowOptionsDialog(void* hParent) {
+    // 防重入（2026-11-10 方案 R3）：已开实例 → 拉起前台即返回。TM 菜单
+    // 路径与 popup 右键直达路径交叉时，双实例双模态循环并存的父窗禁用态
+    // 与返回语义都会错乱（PTM 同款守卫）
+    HWND existing = FindWindowW(L"ProcessNetMonitorOptionsDlg", nullptr);
+    if (existing) {
+        ShowWindow(existing, SW_SHOWNORMAL);
+        SetForegroundWindow(existing);
+        return OR_OPTION_UNCHANGED;
+    }
     static bool registered = false;
     if (!registered) {
         // trackbar（msctls_trackbar32）属于 comctl32 通用控件，首次使用
