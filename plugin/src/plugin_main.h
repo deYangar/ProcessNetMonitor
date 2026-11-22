@@ -119,6 +119,9 @@ public:
     std::vector<ProcTraffic> m_cached_stats;
     double m_cached_up = 0;
     double m_cached_down = 0;
+    bool m_cached_uses_etw = false;
+    ULONGLONG m_cached_sample_tick = 0, m_cached_sample_wall = 0;
+    void StampHistorySample(bool usesEtw); // caller holds m_data_lock
 
     // High-frequency refresh timer (independent of TM's 1s DataRequired tick)
     HANDLE m_refresh_timer = nullptr;

@@ -574,6 +574,7 @@ void CProcessNetPlugin::DataRequired() {
                     m_items[0].Update(stats, su, sd);
                     m_items[1].Update(stats, su, sd);
                     m_cached_stats = stats;
+                    StampHistorySample(true);
                     m_cached_up = su;
                     m_cached_down = sd;
                     // Tooltip write stays inside the lock: BuildTooltip
@@ -643,6 +644,7 @@ void CProcessNetPlugin::DataRequired() {
     // at 0 connections. If ETW yields no rows (session hiccup / all filtered),
     // keep legacy data so the UI never blanks out.
     bool etw_active = m_etw_cap.HasData();
+    bool usesEtw = false;
     if (etw_active) {
         auto es = m_etw_cap.GetStats(dt);
         if (!es.empty()) {
@@ -652,6 +654,7 @@ void CProcessNetPlugin::DataRequired() {
                 if (it != conn_by_pid.end()) e.conn_count = it->second;
             }
             stats = std::move(es);
+            usesEtw = true;
         }
     }
     double su = 0, sd = 0;
@@ -664,6 +667,7 @@ void CProcessNetPlugin::DataRequired() {
         m_items[0].Update(stats, su, sd);
         m_items[1].Update(stats, su, sd);
         m_cached_stats = stats;
+        StampHistorySample(usesEtw);
         m_cached_up = su;
         m_cached_down = sd;
         LeaveCriticalSection(&m_data_lock);
@@ -762,6 +766,7 @@ void CProcessNetPlugin::RefreshTick() {
 
     auto stats = m_capture.GetStats(dt);
     bool etw_active = m_etw_cap.HasData();
+    bool usesEtw = false;
     if (etw_active) {
         auto es = m_etw_cap.GetStats(dt);
         if (!es.empty()) {
@@ -774,6 +779,7 @@ void CProcessNetPlugin::RefreshTick() {
                 if (it != conn_by_pid.end()) e.conn_count = it->second;
             }
             stats = std::move(es);
+            usesEtw = true;
         }
     }
 
@@ -786,6 +792,7 @@ void CProcessNetPlugin::RefreshTick() {
     {
         EnterCriticalSection(&m_data_lock);
         m_cached_stats = stats;
+        StampHistorySample(usesEtw);
         m_cached_up = su;
         m_cached_down = sd;
         m_items[0].Update(stats, su, sd);
@@ -806,18 +813,34 @@ void CProcessNetPlugin::RefreshTick() {
     m_refresh_busy.store(false);
 }
 
+void CProcessNetPlugin::StampHistorySample(bool usesEtw) {
+    FILETIME fileTime{};
+    GetSystemTimeAsFileTime(&fileTime);
+    const ULONGLONG ticks = (static_cast<ULONGLONG>(fileTime.dwHighDateTime) << 32) |
+        fileTime.dwLowDateTime;
+    constexpr ULONGLONG unixEpoch = 116444736000000000ULL;
+    m_cached_uses_etw = usesEtw;
+    m_cached_sample_tick = GetTickCount64();
+    m_cached_sample_wall = ticks >= unixEpoch ? (ticks - unixEpoch) / 10000 : 0;
+}
+
 // Runs on the detail window's UI thread (WM_PNM_REFRESH handler)
 void CProcessNetPlugin::DetailRefreshFromSnapshot() {
     std::vector<ProcTraffic> snap;
     double su = 0, sd = 0;
+    bool usesEtw = false;
+    ULONGLONG sampleTick = 0, sampleWall = 0;
     {
         EnterCriticalSection(&m_data_lock);
         snap = m_cached_stats;
         su = m_cached_up;
         sd = m_cached_down;
+        usesEtw = m_cached_uses_etw;
+        sampleTick = m_cached_sample_tick;
+        sampleWall = m_cached_sample_wall;
         LeaveCriticalSection(&m_data_lock);
     }
-    m_detail.UpdateData(snap, su, sd);
+    m_detail.UpdateData(snap, su, sd, usesEtw, sampleTick, sampleWall);
 }
 
 // Runs on the popup's UI thread (WM_PNM_REFRESH handler)

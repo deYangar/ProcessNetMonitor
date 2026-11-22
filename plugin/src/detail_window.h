@@ -6,8 +6,10 @@
 #include <deque>
 #include <set>
 #include <functional>
+#include <algorithm>
 #include "capture.h"
 #include "i18n.h"
+#include "hourly_history.h"
 
 // Huorong-style detail window with sortable table, tabs, history, context menu
 class CDetailWindow {
@@ -35,7 +37,8 @@ public:
     bool m_cols_sized = false;  // one-shot flag for AutoSizeColumns
     void Show(HWND parent_wnd);
     void Hide();
-    void UpdateData(const std::vector<ProcTraffic>& stats, double total_up, double total_down);
+    void UpdateData(const std::vector<ProcTraffic>& stats, double total_up, double total_down,
+                    bool usesEtw, ULONGLONG sampleTick, ULONGLONG sampleWall);
     bool IsVisible() const { return m_visible; }
     HWND GetHwnd() const { return m_hwnd; }
 
@@ -44,8 +47,10 @@ public:
     // Persistence (called from plugin_main)
     void SaveHistory();
     void LoadHistory();
+    void LoadHourlyHistory();
     void SetConfigDir(const std::wstring& dir) { m_config_dir = dir; }
-    void RecordHistory(const std::vector<ProcTraffic>& stats);
+    void RecordHistory(const std::vector<ProcTraffic>& stats, bool usesEtw,
+                       ULONGLONG sampleTick, ULONGLONG sampleWall);
     void SaveSettings();
     void LoadSettings();
     int GetTransparentWidth() const { return m_transparent_width; }
@@ -126,6 +131,7 @@ private:
     void DrawTabs(HDC hdc, int w, int y);
     void DrawTimeRangeButtons(HDC hdc, int w, int y);
     void DrawSpeedSummary(HDC hdc, int w, int y);
+    void DrawHourlyChart(HDC hdc, int w, int y, int client_h);
     void DrawTableHeader(HDC hdc, int w, int y);
     void DrawTableRows(HDC hdc, int w, int y, int h);
     // 连接表格列宽自适应窗口 (协议/状态固定, 本地/远程/归属地按权重分配)
@@ -255,9 +261,18 @@ private:
 
     // History: process name -> history
     std::unordered_map<std::wstring, ProcessHistory> m_history;
+    std::unordered_map<std::wstring, std::wstring> m_history_exe_paths;
     // Last known cumulative bytes per process (for delta calculation in RecordHistory)
     struct CumBytes { uint64_t recv; uint64_t sent; };
     std::unordered_map<std::wstring, CumBytes> m_last_cum;
+    pnm::HourlyHistory m_hourly;
+    std::unordered_map<std::wstring, CumBytes> m_hourly_previous;
+    ULONGLONG m_hourly_tick = 0, m_hourly_wall = 0;
+    bool m_hourly_etw = false;
+    bool m_hourly_dirty = false, m_hourly_writable = false;
+    void SaveHourlyHistory();
+    void RebuildHistoryFromHourly();
+    bool MigrateLegacyHistoryToHourly();
     ULONGLONG m_session_start_tick = 0;  // GetTickCount64 when TM started
     ULONGLONG m_history_start_tick = 0;  // wall-clock ms when plugin started
     ULONGLONG m_last_save_tick = 0;
@@ -293,7 +308,7 @@ private:
     void RecreateThemeColors();  // 深浅模式切换时重建颜色 pens/brushes
     bool m_hovering_close = false;
     bool m_hovering_min = false;
-    int m_active_tab = 0;      // 0=实时流量, 1=历史流量
+    int m_active_tab = 0;      // 0=实时流量, 1=历史流量, 2=流量图表
 
     int m_transparent_width = 100;  // transparent area width in pixels
     int m_refresh_ms = 500;         // plugin data refresh interval (ms)
@@ -449,9 +464,40 @@ private:
     RECT m_rcMin = {};
     RECT m_rcTab0 = {};
     RECT m_rcTab1 = {};
+    RECT m_rcTab2 = {};
+    RECT m_rcChartPrev = {};
+    RECT m_rcChartToday = {};
+    RECT m_rcChartNext = {};
     RECT m_rcTRButtons[5] = {};  // time range buttons
     RECT m_rcClearBtn = {};       // clear history button
     RECT m_rcTableHeader = {};
+    ULONGLONG m_chart_day_start = 0;  // selected UTC+8 natural day, Unix ms
+    int m_chart_hover_hour = -1;
+    int m_chart_selected_hour = -1;
+    int m_chart_table_scroll = 0;
+    RECT m_rcChartTable = {};
+    // Detail table state: sort column 0 name, 1 download, 2 upload.
+    struct ChartTableHit { RECT rc; std::u16string name; int hour; int vrow; };
+    std::vector<ChartTableHit> m_chart_hits;
+    int m_chart_hover_row = -1;
+    int m_chart_sort_col = 1;
+    bool m_chart_sort_asc = false;
+    std::set<std::u16string> m_chart_expanded;
+    RECT m_rcChartHeader = {};
+    int m_chart_col_x[4] = {};
+    RECT m_rcChartScrollTrack = {};
+    RECT m_rcChartScrollThumb = {};
+    int m_chart_thumb_h = 0;
+    int m_chart_visible_rows = 0;
+    int m_chart_total_rows = 0;
+    bool m_chart_dragging = false;
+    int m_chart_drag_y = 0;
+    int m_chart_drag_scroll = 0;
+    RECT m_rcChartPlot = {};
+    int m_chart_bar_w = 0;
+    int m_chart_bar_gap = 0;
+    int m_chart_mouse_x = 0;
+    int m_chart_mouse_y = 0;
     RECT m_rcScrollbar = {};
 
 public:

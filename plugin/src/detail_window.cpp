@@ -1,4 +1,4 @@
-﻿#include "detail_window.h"
+#include "detail_window.h"
 #include "plugin_main.h"
 #include "utils.h"
 #include "signature.h"
@@ -10,8 +10,13 @@
 #include <cmath>
 #include <set>
 #include <ctime>
+#include <fstream>
+#include <filesystem>
 
 #pragma comment(lib, "imm32.lib")
+
+// Kept in the binary so support reports can identify the native chart build.
+extern "C" __declspec(dllexport) const char PNM_HOURLY_UI_BUILD[] = "PNM-HOURLY-UI-V2";
 
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "dwmapi.lib")
@@ -654,9 +659,8 @@ void CDetailWindow::Hide() {
 // History recording
 // ============================================================
 
-void CDetailWindow::RecordHistory(const std::vector<ProcTraffic>& stats) {
-    ULONGLONG now = WallClockMs();
-    bool added = false;
+void CDetailWindow::RecordHistory(const std::vector<ProcTraffic>& stats, bool usesEtw,
+                                  ULONGLONG sampleTick, ULONGLONG sampleWall) {
     
     // Aggregate bytes by process name (multiple PIDs may share same name)
     struct AggBytes { uint64_t recv = 0, sent = 0; std::wstring exe_path; };
@@ -668,64 +672,59 @@ void CDetailWindow::RecordHistory(const std::vector<ProcTraffic>& stats) {
         if (a.exe_path.empty() && !st.exe_path.empty()) a.exe_path = st.exe_path;
     }
     
-    for (auto& [name, a] : agg) {
-        auto& hist = m_history[name];
-        if (hist.name.empty()) { hist.name = name; hist.exe_path = a.exe_path; added = true; }
-        if (hist.exe_path.empty() && !a.exe_path.empty()) hist.exe_path = a.exe_path;
-
-        // Store DELTA (bytes transferred since last snapshot), not cumulative.
-        uint64_t delta_recv = 0, delta_sent = 0;
-        auto it = m_last_cum.find(name);
-        if (it != m_last_cum.end()) {
-            if (a.recv >= it->second.recv)
-                delta_recv = a.recv - it->second.recv;
-            else
-                delta_recv = 0;  // connection(s) closed, cumulative dropped - clamp to 0
-            if (a.sent >= it->second.sent)
-                delta_sent = a.sent - it->second.sent;
-            else
-                delta_sent = 0;
-        } else {
-            // First time seeing this process - just set baseline, don't count existing cumulative bytes as new traffic
-            delta_recv = 0;
-            delta_sent = 0;
+    if (m_hourly_writable && sampleWall && sampleTick != m_hourly_tick) {
+        const auto elapsed = sampleTick > m_hourly_tick ? sampleTick - m_hourly_tick : 0;
+        const auto wallElapsed = sampleWall >= m_hourly_wall ? sampleWall - m_hourly_wall : 0;
+        const bool continuous = m_hourly_tick && elapsed && elapsed <= 10000 &&
+            sampleWall >= m_hourly_wall && wallElapsed <= elapsed + 2000 &&
+            elapsed <= wallElapsed + 2000 && usesEtw == m_hourly_etw;
+        bool changed = m_hourly.Prune(sampleWall);
+        std::unordered_map<std::wstring, CumBytes> next;
+        for (const auto& [name, value] : agg) {
+            if (!value.exe_path.empty()) m_history_exe_paths[name] = value.exe_path;
+            next.emplace(name, CumBytes{value.recv, value.sent});
+            const auto prev = m_hourly_previous.find(name);
+            if (!continuous || prev == m_hourly_previous.end() ||
+                value.recv < prev->second.recv || value.sent < prev->second.sent) continue;
+            changed |= m_hourly.Add(sampleWall, std::u16string(name.begin(), name.end()),
+                value.recv - prev->second.recv, value.sent - prev->second.sent);
         }
-        m_last_cum[name] = { a.recv, a.sent };
-
-        HistorySnapshot snap = { now, delta_recv, delta_sent, false };
-        hist.raw.push_back(snap);
-        while ((int)hist.raw.size() > MAX_RAW) hist.raw.pop_front();
-        added = true;
+        if (changed) m_history_dirty = true;
+        m_hourly_dirty |= changed;
+        m_hourly_previous.swap(next);
+        m_hourly_tick = sampleTick;
+        m_hourly_wall = sampleWall;
+        m_hourly_etw = usesEtw;
     }
-    if (added) m_history_dirty = true;
-    static int compress_counter = 0;
-    if (++compress_counter >= 60) { compress_counter = 0; CompressHistory(); }
+
 }
 
 void CDetailWindow::ClearHistory() {
+    if (m_hourly_writable) {
+        m_hourly = {};
+        // The original history.dat remains on disk after clearing.
+        m_hourly.legacyMerged = true;
+        m_hourly_previous.clear();
+        m_hourly_tick = 0;
+        m_hourly_dirty = true;
+    }
     m_history.clear();
-    m_last_cum.clear();
+    m_history_exe_paths.clear();
     m_rows.clear();
     m_hist_total_recv = 0;
     m_hist_total_sent = 0;
     m_history_start_tick = WallClockMs();
     m_history_dirty = true;
 
-    // Delete history file
-    if (!m_config_dir.empty()) {
-        wchar_t path[MAX_PATH];
-        swprintf_s(path, MAX_PATH, L"%s\\history.dat", m_config_dir.c_str());
-        DeleteFileW(path);
-    }
-
-    // Save empty history to reset file
     SaveHistory();
 
     if (m_visible) InvalidateRect(m_hwnd, NULL, FALSE);
 }
 
 void CDetailWindow::CompressHistory() {
-    ULONGLONG now = WallClockMs();
+    const ULONGLONG now = WallClockMs();
+    using History = pnm::HourlyHistory;
+    const ULONGLONG today = History::DayStart(now);
     for (auto& [name, h] : m_history) {
         // raw → min: downsample to 1 entry per minute
         // SUM deltas within each window (not last cumulative)
@@ -807,74 +806,65 @@ void CDetailWindow::BuildHistoryRows() {
     m_hist_total_sent = 0;
 
     ULONGLONG now = WallClockMs();
+    using History = pnm::HourlyHistory;
+    const ULONGLONG today = History::DayStart(now);
     // Natural-day ranges, aligned to local midnight (00:00:00) - issue #9:
     //   今日    = today 00:00 .. now
     //   昨日    = yesterday 00:00 .. today 00:00 (exclusive)
     //   近3天   = day-before-yesterday 00:00 .. now (3 calendar days)
     //   近7天   = 6 days ago 00:00 .. now (7 calendar days)
     //   近30天  = 29 days ago 00:00 .. now (30 calendar days)
-    ULONGLONG start_ms = 0, end_ms = now;
+    ULONGLONG start_ms = 0, end_ms = now + 1;
     double span_sec = 0;  // nominal span for average speed
     switch (m_time_range) {
     case TR_TODAY:
-        start_ms = LocalDayStartUnixMs(0);
-        end_ms = now;
+        start_ms = today;
         span_sec = (double)(now - start_ms) / 1000.0;
         break;
     case TR_YESTERDAY:
-        start_ms = LocalDayStartUnixMs(-1);
-        end_ms = LocalDayStartUnixMs(0);  // today 00:00, exclusive
+        start_ms = today - History::Day;
+        end_ms = today;
         span_sec = 86400.0;               // a full calendar day
         break;
     case TR_3D:
-        start_ms = LocalDayStartUnixMs(-2);
-        end_ms = now;
+        start_ms = today - 2 * History::Day;
         span_sec = (double)(now - start_ms) / 1000.0;
         break;
     case TR_7D:
-        start_ms = LocalDayStartUnixMs(-6);
-        end_ms = now;
+        start_ms = today - 6 * History::Day;
         span_sec = (double)(now - start_ms) / 1000.0;
         break;
     case TR_30D:
-        start_ms = LocalDayStartUnixMs(-29);
-        end_ms = now;
+        start_ms = History::Oldest(now);
         span_sec = (double)(now - start_ms) / 1000.0;
         break;
     }
-    if (start_ms < m_history_start_tick) start_ms = m_history_start_tick;
     if (span_sec < 1.0) span_sec = 1.0;
 
-    for (auto& [name, hist] : m_history) {
-        std::vector<const HistorySnapshot*> snaps;
-        GetMergedSnapshots(hist, snaps, start_ms, end_ms);
-        if (snaps.empty()) continue;
-
-        // Data is stored as deltas (bytes per interval). Sum all deltas in range.
-        uint64_t total_recv = 0, total_sent = 0;
-        for (auto* s : snaps) {
-            total_recv += s->cum_recv;  // cum_recv is actually delta_recv
-            total_sent += s->cum_sent;  // cum_sent is actually delta_sent
-        }
+    const auto totals = m_hourly.Summarize(start_ms, end_ms);
+    for (const auto& [name16, usage] : totals) {
+        const std::wstring name(name16.begin(), name16.end());
+        const auto total_recv = usage.down, total_sent = usage.up;
 
         // Average speed over the whole calendar range (e.g. yesterday is
         // always /86400s), not just the span between first/last samples.
         double elapsed_sec = span_sec;
 
-        m_hist_total_recv += total_recv;
-        m_hist_total_sent += total_sent;
+        m_hist_total_recv = History::SaturatingAdd(m_hist_total_recv, total_recv);
+        m_hist_total_sent = History::SaturatingAdd(m_hist_total_sent, total_sent);
 
         DisplayRow row;
-        row.name = hist.name;
-        row.exe_path = hist.exe_path;
+        row.name = name;
+        const auto path = m_history_exe_paths.find(name);
+        if (path != m_history_exe_paths.end()) row.exe_path = path->second;
         row.hist_recv = total_recv;
         row.hist_sent = total_sent;
         row.hist_avg_down = (double)total_recv / elapsed_sec;
         row.hist_avg_up = (double)total_sent / elapsed_sec;
 
-        std::wstring lower = hist.name;
+        std::wstring lower = name;
         for (auto& c : lower) c = towlower(c);
-        if (!hist.name.empty() && hist.name[0] == L'<') {
+        if (!name.empty() && name[0] == L'<') {
             row.category = TR(L"\u672A\u77E5");
         } else {
             // signature-based classification (background worker + cache)
@@ -933,31 +923,177 @@ static bool ReadDQ(FILE* f, std::deque<CDetailWindow::HistorySnapshot>& dq, int 
 void CDetailWindow::SaveHistory() {
     if (m_config_dir.empty()) { OutputDebugStringW(L"[PNM] SaveHistory: config_dir empty!"); return; }
     CreateDirectoryW(m_config_dir.c_str(), NULL);
-    wchar_t path[MAX_PATH];
-    swprintf_s(path, MAX_PATH, L"%s\\history.dat", m_config_dir.c_str());
-    FILE* f = _wfopen(path, L"wb");
-    if (!f) { OutputDebugStringW(L"[PNM] SaveHistory: fopen failed!"); return; }
+    SaveHourlyHistory();
+}
 
-    uint32_t magic = 0x504E4D48, version = 4, count = (uint32_t)m_history.size();
-    fwrite(&magic, 4, 1, f); fwrite(&version, 4, 1, f); fwrite(&count, 4, 1, f);
-    for (auto& [name, hist] : m_history) {
-        uint32_t nl = (uint32_t)name.size(); fwrite(&nl, 4, 1, f); fwrite(name.c_str(), sizeof(wchar_t), nl, f);
-        uint32_t pl = (uint32_t)hist.exe_path.size(); fwrite(&pl, 4, 1, f); fwrite(hist.exe_path.c_str(), sizeof(wchar_t), pl, f);
-        WriteDQ(f, hist.raw); WriteDQ(f, hist.min); WriteDQ(f, hist.hour); WriteDQ(f, hist.day);
+void CDetailWindow::LoadHourlyHistory() {
+    if (m_config_dir.empty()) return;
+    const auto path = std::filesystem::path(m_config_dir) / L"history-hourly-v1.dat";
+    std::error_code error;
+    const auto size = std::filesystem::file_size(path, error);
+    if (error == std::errc::no_such_file_or_directory) {
+        m_hourly_writable = true;
+        return;
     }
-    fclose(f);
+    if (!error && size <= pnm::HourlyHistory::MaxFile) {
+        std::ifstream input(path, std::ios::binary);
+        if (m_hourly.Read(input)) {
+            m_hourly_writable = true;
+            m_hourly_dirty = m_hourly.Prune(WallClockMs());
+            return;
+        }
+    }
+    m_hourly_writable = false;
+    OutputDebugStringW(L"[PNM] Hourly history unavailable; original file retained.\n");
+}
+
+void CDetailWindow::SaveHourlyHistory() {
+    if (!m_hourly_writable || !m_hourly_dirty) return;
+    const auto dir = std::filesystem::path(m_config_dir);
+    const auto path = dir / L"history-hourly-v1.dat";
+    const auto temp = dir / (L"history-hourly-v1." + std::to_wstring(GetCurrentProcessId()) + L".tmp");
+    std::ofstream output(temp, std::ios::binary | std::ios::trunc);
+    const bool written = m_hourly.Write(output);
+    output.close();
+    if (written && output && MoveFileExW(temp.c_str(), path.c_str(),
+                                         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        m_hourly_dirty = false;
+    } else {
+        DeleteFileW(temp.c_str());
+        OutputDebugStringW(L"[PNM] Hourly history save failed; will retry.\n");
+    }
+}
+
+bool CDetailWindow::MigrateLegacyHistoryToHourly() {
+    if (m_config_dir.empty() || !m_hourly_writable || m_hourly.legacyMerged) return false;
+    const auto migration_now = WallClockMs();
+    const auto oldest = pnm::HourlyHistory::Oldest(migration_now);
+
+    struct LegacyValue {
+        int tier = 99;
+        uint64_t down = 0;
+        uint64_t up = 0;
+    };
+    std::map<std::tuple<std::u16string, ULONGLONG, bool>, LegacyValue> values;
+    auto add_queue = [&](const ProcessHistory& history,
+                         const std::deque<HistorySnapshot>& queue, int tier) {
+        for (const auto& snapshot : queue) {
+            const bool is_daily = tier == 3;
+            const auto bucket = is_daily ? pnm::HourlyHistory::DayStart(snapshot.tick) : snapshot.tick;
+            // A daily aggregate covers its entire local day. Keep it when any
+            // part of that day overlaps the retained range.
+            if (is_daily ? bucket > migration_now || bucket + pnm::HourlyHistory::Day <= oldest
+                         : snapshot.tick < oldest || snapshot.tick > migration_now) continue;
+            const std::u16string name(history.name.begin(), history.name.end());
+            auto key = std::make_tuple(name, snapshot.tick, is_daily);
+            auto found = values.find(key);
+            const auto down = snapshot.cum_recv;
+            const auto up = snapshot.cum_sent;
+            if (found == values.end()) {
+                values.emplace(std::move(key), LegacyValue{ tier, down, up });
+            } else if (tier < found->second.tier) {
+                found->second = LegacyValue{ tier, down, up };
+            } else if (tier == 3) {
+                found->second.down = pnm::HourlyHistory::SaturatingAdd(found->second.down, down);
+                found->second.up = pnm::HourlyHistory::SaturatingAdd(found->second.up, up);
+            }
+        }
+    };
+    for (const auto& [name, history] : m_history) {
+        add_queue(history, history.raw, 0);
+        add_queue(history, history.min, 1);
+        add_queue(history, history.hour, 2);
+        add_queue(history, history.day, 3);
+    }
+    auto merged = m_hourly;
+    std::map<std::tuple<std::u16string, ULONGLONG, bool>, LegacyValue> by_bucket;
+    for (const auto& [key, value] : values) {
+        const auto& [name, tick, is_daily] = key;
+        const auto day_start = pnm::HourlyHistory::DayStart(tick);
+        const auto bucket_tick = is_daily ? day_start
+            : day_start + (tick - day_start) / pnm::HourlyHistory::Hour * pnm::HourlyHistory::Hour;
+        const auto bucket_key = std::make_tuple(name, bucket_tick, is_daily);
+        auto [it, inserted] = by_bucket.emplace(bucket_key, LegacyValue{ value.tier, value.down, value.up });
+        if (!inserted) {
+            it->second.down = pnm::HourlyHistory::SaturatingAdd(it->second.down, value.down);
+            it->second.up = pnm::HourlyHistory::SaturatingAdd(it->second.up, value.up);
+        }
+    }
+    for (const auto& [key, value] : by_bucket) {
+        const auto& [name, tick, is_daily] = key;
+        const auto& table = is_daily ? m_hourly.daily : m_hourly.buckets;
+        const auto existing = table.find(tick);
+        if (existing != table.end() && existing->second.count(name)) continue;
+        if (value.down || value.up) {
+            const bool inserted = is_daily ? merged.SetDayTotal(tick, name, value.down, value.up)
+                                           : merged.SetBucketTotal(tick, name, value.down, value.up);
+            if (!inserted) {
+            OutputDebugStringW(L"[PNM] Legacy migration exceeds database limits.\n");
+            return false;
+            }
+        }
+    }
+    merged.legacyMerged = true;
+    m_hourly = std::move(merged);
+    m_hourly.Prune(WallClockMs());
+    m_hourly_dirty = true;
+    SaveHourlyHistory();
+    return !m_hourly_dirty;
+}
+
+void CDetailWindow::RebuildHistoryFromHourly() {
+    m_history.clear();
+    ULONGLONG earliest = ULLONG_MAX;
+    for (const auto& [hour, apps] : m_hourly.buckets) {
+        const auto history_tick = hour;
+        earliest = min(earliest, history_tick);
+        for (const auto& [name16, usage] : apps) {
+            std::wstring name(name16.begin(), name16.end());
+            auto& history = m_history[name];
+            history.name = name;
+            HistorySnapshot snapshot = { history_tick, usage.down, usage.up, true };
+            history.hour.push_back(snapshot);
+        }
+    }
+    for (const auto& [day, apps] : m_hourly.daily) {
+        earliest = min(earliest, day);
+        for (const auto& [name16, usage] : apps) {
+            std::wstring name(name16.begin(), name16.end());
+            auto& history = m_history[name];
+            history.name = name;
+            history.day.push_back({ day, usage.down, usage.up, true });
+        }
+    }
+    if (earliest != ULLONG_MAX) m_history_start_tick = earliest;
+    m_history_dirty = true;
 }
 
 void CDetailWindow::LoadHistory() {
     if (m_config_dir.empty()) { OutputDebugStringW(L"[PNM] LoadHistory: config_dir empty!"); return; }
+    LoadHourlyHistory();
+
+    // Legacy history is intentionally excluded from the new UI.  A previous
+    // build may already have copied it into PNH1; discard that one-time merged
+    // database so the user starts with a clean current-session history.
+    if (m_hourly_writable && m_hourly.legacyMerged) {
+        m_hourly = {};
+        m_hourly_writable = true;
+        m_hourly_dirty = true;
+        SaveHourlyHistory();
+    }
+    RebuildHistoryFromHourly();
+    // Do not import the legacy history.dat. It is retained as a backup only.
+    if (!m_hourly_writable) return;
+    return;
+    /*
     wchar_t path[MAX_PATH];
     swprintf_s(path, MAX_PATH, L"%s\\history.dat", m_config_dir.c_str());
     FILE* f = _wfopen(path, L"rb");
     if (!f) { OutputDebugStringW(L"[PNM] LoadHistory: file not found"); return; }
     uint32_t magic, version, count;
     if (fread(&magic, 4, 1, f) != 1 || magic != 0x504E4D48) { fclose(f); return; }
-    if (fread(&version, 4, 1, f) != 1) { fclose(f); return; }
-    if (fread(&count, 4, 1, f) != 1) { fclose(f); return; }
+    if (fread(&version, 4, 1, f) != 1 || version < 1 || version > 4) { fclose(f); return; }
+    if (fread(&count, 4, 1, f) != 1 || count > pnm::HourlyHistory::MaxRows) { fclose(f); return; }
     ULONGLONG max_age = MS_PER_YEAR;
     // Version 2 stored GetTickCount64() ticks (uptime); version 3 stores wall-clock ms.
     // Convert old ticks to wall-clock using the offset at load time.
@@ -966,7 +1102,8 @@ void CDetailWindow::LoadHistory() {
     bool needs_tick_convert = (version < 3);   // uptime ticks → wall-clock
     bool needs_delta_convert = (version < 4);  // cumulative → delta
     ULONGLONG readq_now = needs_tick_convert ? uptime_now : wall_now;
-    for (uint32_t i = 0; i < count; i++) {
+    uint32_t i = 0;
+    for (; i < count; i++) {
         uint32_t nl; if (fread(&nl, 4, 1, f) != 1 || nl > 512) break;
         std::wstring name(nl, L'\0'); if (fread(&name[0], sizeof(wchar_t), nl, f) != nl) break;
         uint32_t pl; if (fread(&pl, 4, 1, f) != 1 || pl > MAX_PATH) break;
@@ -1014,54 +1151,12 @@ void CDetailWindow::LoadHistory() {
             to_delta(hist.day);
         }
     }
+    const bool complete = i == count && fgetc(f) == EOF && !ferror(f);
     fclose(f);
-
-    // Compress loaded data: SUM deltas within each time window
-    ULONGLONG now = WallClockMs();
-    for (auto& [name, h] : m_history) {
-        // raw → min: SUM deltas per minute
-        while (!h.raw.empty()) {
-            ULONGLONG win_end = h.raw.front().tick + 60000;
-            HistorySnapshot acc = { 0, 0, 0, false };
-            while (!h.raw.empty() && h.raw.front().tick < win_end) {
-                acc.tick = h.raw.front().tick;
-                acc.cum_recv += h.raw.front().cum_recv;
-                acc.cum_sent += h.raw.front().cum_sent;
-                h.raw.pop_front();
-            }
-            h.min.push_back(acc);
-        }
-        while ((int)h.min.size() > MAX_MIN) h.min.pop_front();
-
-        // min → hour: SUM deltas per hour
-        while (!h.min.empty()) {
-            ULONGLONG win_end = h.min.front().tick + 3600000;
-            HistorySnapshot acc = { 0, 0, 0, false };
-            while (!h.min.empty() && h.min.front().tick < win_end) {
-                acc.tick = h.min.front().tick;
-                acc.cum_recv += h.min.front().cum_recv;
-                acc.cum_sent += h.min.front().cum_sent;
-                h.min.pop_front();
-            }
-            h.hour.push_back(acc);
-        }
-        while ((int)h.hour.size() > MAX_HOUR) h.hour.pop_front();
-
-        // hour → day: SUM deltas per day
-        // hour 鈫?day: SUM deltas per natural day (local midnight aligned),
-        // matching the query ranges (Today = local 00:00 .. now)
-        while (!h.hour.empty()) {
-            ULONGLONG day_start = LocalDayStartOf(h.hour.front().tick);
-            ULONGLONG win_end = day_start + 86400000;
-            HistorySnapshot acc = { day_start, 0, 0, false };
-            while (!h.hour.empty() && h.hour.front().tick < win_end) {
-                acc.cum_recv += h.hour.front().cum_recv;
-                acc.cum_sent += h.hour.front().cum_sent;
-                h.hour.pop_front();
-            }
-            h.day.push_back(acc);
-        }
-        while ((int)h.day.size() > MAX_DAY) h.day.pop_front();
+    if (!complete) {
+        m_history.clear();
+        OutputDebugStringW(L"[PNM] Legacy history is incomplete; migration skipped.\n");
+        return;
     }
 
     // Adjust m_history_start_tick to earliest surviving data (wall-clock ms)
@@ -1074,21 +1169,28 @@ void CDetailWindow::LoadHistory() {
     if (earliest < m_history_start_tick && earliest != ULLONG_MAX) {
         m_history_start_tick = earliest;
     }
+    for (const auto& [name, history] : m_history) {
+        if (!history.exe_path.empty()) m_history_exe_paths[name] = history.exe_path;
+    }
+    MigrateLegacyHistoryToHourly();
+    RebuildHistoryFromHourly();
     wchar_t dbg[128];
     swprintf_s(dbg, 128, L"[PNM] LoadHistory: loaded %u processes, earliest=%llu", (unsigned)m_history.size(), earliest);
     OutputDebugStringW(dbg);
+    */
 }
 
 // ============================================================
 // Data update
 // ============================================================
 
-void CDetailWindow::UpdateData(const std::vector<ProcTraffic>& stats, double total_up, double total_down) {
+void CDetailWindow::UpdateData(const std::vector<ProcTraffic>& stats, double total_up, double total_down,
+                               bool usesEtw, ULONGLONG sampleTick, ULONGLONG sampleWall) {
     m_total_up = total_up;
     m_total_down = total_down;
 
     // Always record history
-    RecordHistory(stats);
+    RecordHistory(stats, usesEtw, sampleTick, sampleWall);
 
     // Auto-save every 30 seconds (was 60, reduced for safety on TM restart)
     ULONGLONG now = GetTickCount64();
@@ -1257,7 +1359,7 @@ int CDetailWindow::GetHeaderHeight() const { return TITLE_BAR_H; }
 int CDetailWindow::GetTabsHeight() const { return TAB_BAR_H; }
 int CDetailWindow::GetTimeRangeHeight() const { return m_active_tab == 1 ? TIME_RANGE_H : 0; }
 int CDetailWindow::GetSummaryHeight() const { return SUMMARY_H; }
-int CDetailWindow::GetTableHeaderHeight() const { return TABLE_HEADER_H; }
+int CDetailWindow::GetTableHeaderHeight() const { return m_active_tab == 2 ? 0 : TABLE_HEADER_H; }
 int CDetailWindow::GetRowHeight() const { return ROW_H; }
 
 int CDetailWindow::GetTableAreaTop() const {
@@ -1970,7 +2072,7 @@ LRESULT CDetailWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TIMER:
         if (wp == TIMER_DEFER_REBUILD) {
             KillTimer(m_hwnd, TIMER_DEFER_REBUILD);
-            m_history_dirty = true;
+        m_history_dirty = true;
             RebuildRows();
         }
         return 0;
@@ -2059,6 +2161,99 @@ void CDetailWindow::OnLButtonDown(int x, int y) {
             m_rows.clear();
             InvalidateRect(m_hwnd, NULL, FALSE);  // full redraw for tab switch
             SetTimer(m_hwnd, TIMER_DEFER_REBUILD, 10, NULL);
+        }
+        return;
+    }
+    if (PtInRect(&m_rcTab2, { x, y })) {
+        if (m_active_tab != 2) {
+            m_active_tab = 2;
+            m_scroll_pos = 0;
+            m_rows.clear();
+            InvalidateRect(m_hwnd, NULL, FALSE);
+        }
+        return;
+    }
+
+    if (m_active_tab == 2) {
+        if (m_chart_total_rows > m_chart_visible_rows && PtInRect(&m_rcChartScrollTrack, { x, y })) {
+            if (PtInRect(&m_rcChartScrollThumb, { x, y })) {
+                m_chart_dragging = true;
+                m_chart_drag_y = y;
+                m_chart_drag_scroll = m_chart_table_scroll;
+                ::SetCapture(m_hwnd);
+            } else {
+                // Click on the track pages toward the click position.
+                m_chart_table_scroll += (y < m_rcChartScrollThumb.top ? -m_chart_visible_rows : m_chart_visible_rows);
+                m_chart_table_scroll = max(0, min(m_chart_table_scroll,
+                    m_chart_total_rows - m_chart_visible_rows));
+                InvalidateRect(m_hwnd, NULL, FALSE);
+            }
+            return;
+        }
+        if (PtInRect(&m_rcChartPrev, { x, y })) {
+            if (m_chart_day_start >= pnm::HourlyHistory::Day)
+                m_chart_day_start -= pnm::HourlyHistory::Day;
+            m_chart_selected_hour = -1;
+            InvalidateRect(m_hwnd, NULL, FALSE);
+            return;
+        }
+        if (PtInRect(&m_rcChartToday, { x, y })) {
+            const auto now = WallClockMs();
+            m_chart_day_start = ((now + pnm::HourlyHistory::Offset) / pnm::HourlyHistory::Day)
+                * pnm::HourlyHistory::Day - pnm::HourlyHistory::Offset;
+            m_chart_selected_hour = -1;
+            InvalidateRect(m_hwnd, NULL, FALSE);
+            return;
+        }
+        if (PtInRect(&m_rcChartNext, { x, y })) {
+            const auto now = WallClockMs();
+            const auto today = ((now + pnm::HourlyHistory::Offset) / pnm::HourlyHistory::Day)
+                * pnm::HourlyHistory::Day - pnm::HourlyHistory::Offset;
+            if (m_chart_day_start + pnm::HourlyHistory::Day <= today)
+                m_chart_day_start += pnm::HourlyHistory::Day;
+            m_chart_selected_hour = -1;
+            InvalidateRect(m_hwnd, NULL, FALSE);
+            return;
+        }
+        const POINT table_pt = { x, y };
+        if (PtInRect(&m_rcChartHeader, table_pt)) {
+            const int col = x < m_chart_col_x[1] ? 0 : (x < m_chart_col_x[2] ? 1 : 2);
+            if (m_chart_sort_col == col) {
+                m_chart_sort_asc = !m_chart_sort_asc;
+            } else {
+                m_chart_sort_col = col;
+                m_chart_sort_asc = (col == 0);  // names ascending, amounts largest first
+            }
+            m_chart_table_scroll = 0;
+            InvalidateRect(m_hwnd, NULL, FALSE);
+            return;
+        }
+        if (PtInRect(&m_rcChartTable, table_pt)) {
+            for (const auto& hit : m_chart_hits) {
+                if (hit.hour != -1 || !PtInRect(&hit.rc, table_pt)) continue;
+                const auto found = m_chart_expanded.find(hit.name);
+                if (found != m_chart_expanded.end()) m_chart_expanded.erase(found);
+                else m_chart_expanded.insert(hit.name);
+                InvalidateRect(m_hwnd, NULL, FALSE);
+                break;
+            }
+            return;
+        }
+        int clicked_hour = -1;
+        if (x >= m_rcChartPlot.left && x < m_rcChartPlot.right &&
+            y >= m_rcChartPlot.top && y <= m_rcChartPlot.bottom && m_chart_bar_w > 0) {
+            const int slot = m_chart_bar_w + m_chart_bar_gap;
+            const int hour = (x - m_rcChartPlot.left) / slot;
+            const auto bucket = pnm::HourlyHistory::DayStart(m_chart_day_start) +
+                static_cast<uint64_t>(max(0, hour)) * pnm::HourlyHistory::Hour;
+            if (hour >= 0 && hour < 24 && (x - m_rcChartPlot.left) % slot < m_chart_bar_w &&
+                m_hourly.buckets.find(bucket) != m_hourly.buckets.end())
+                clicked_hour = hour;
+        }
+        if (clicked_hour >= 0) {
+            m_chart_selected_hour = clicked_hour == m_chart_selected_hour ? -1 : clicked_hour;
+            m_chart_table_scroll = 0;
+            InvalidateRect(m_hwnd, NULL, FALSE);
         }
         return;
     }
@@ -2165,6 +2360,10 @@ void CDetailWindow::OnLButtonUp(int x, int y) {
         m_dragging_scrollbar = false;
         ReleaseCapture();
     }
+    if (m_chart_dragging) {
+        m_chart_dragging = false;
+        ReleaseCapture();
+    }
 }
 
 void CDetailWindow::OnLButtonDblClk(int x, int y) {
@@ -2203,6 +2402,18 @@ void CDetailWindow::OnMouseMove(int x, int y) {
         return;
     }
 
+    if (m_chart_dragging) {
+        const int track_h = m_rcChartScrollTrack.bottom - m_rcChartScrollTrack.top;
+        const int range = track_h - m_chart_thumb_h;
+        const int max_scroll = m_chart_total_rows - m_chart_visible_rows;
+        if (range > 0 && max_scroll > 0) {
+            m_chart_table_scroll = max(0, min(max_scroll,
+                m_chart_drag_scroll + (y - m_chart_drag_y) * max_scroll / range));
+            InvalidateRect(m_hwnd, NULL, FALSE);
+        }
+        return;
+    }
+
     if (!m_tracking_mouse) {
         TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, m_hwnd, 0 };
         TrackMouseEvent(&tme);
@@ -2212,12 +2423,45 @@ void CDetailWindow::OnMouseMove(int x, int y) {
     bool old_close = m_hovering_close;
     bool old_min = m_hovering_min;
     int old_row = m_hovered_row;
+    int old_chart_hour = m_chart_hover_hour;
+    int old_chart_row = m_chart_hover_row;
 
     m_hovering_close = PtInRect(&m_rcClose, { x, y }) != 0;
     m_hovering_min = PtInRect(&m_rcMin, { x, y }) != 0;
     m_hovered_row = HitTestRow(y);
 
-    if (m_hovering_close != old_close || m_hovering_min != old_min || m_hovered_row != old_row) {
+    if (m_active_tab == 2) {
+        RECT client;
+        GetClientRect(m_hwnd, &client);
+        m_chart_hover_hour = -1;
+        if (x >= m_rcChartPlot.left && x < m_rcChartPlot.right &&
+            y >= m_rcChartPlot.top && y <= m_rcChartPlot.bottom && m_chart_bar_w > 0) {
+            const int slot = m_chart_bar_w + m_chart_bar_gap;
+            const int hour = (x - m_rcChartPlot.left) / slot;
+            const int within = (x - m_rcChartPlot.left) % slot;
+            const auto bucket = pnm::HourlyHistory::DayStart(m_chart_day_start) +
+                static_cast<uint64_t>(max(0, hour)) * pnm::HourlyHistory::Hour;
+            if (hour >= 0 && hour < 24 && within < m_chart_bar_w &&
+                m_hourly.buckets.find(bucket) != m_hourly.buckets.end())
+                m_chart_hover_hour = hour;
+        }
+        m_chart_mouse_x = x;
+        m_chart_mouse_y = y;
+        m_chart_hover_row = -1;
+        const POINT table_pt = { x, y };
+        if (PtInRect(&m_rcChartTable, table_pt)) {
+            for (const auto& hit : m_chart_hits) {
+                if (PtInRect(&hit.rc, table_pt)) { m_chart_hover_row = hit.vrow; break; }
+            }
+        }
+    } else {
+        m_chart_hover_hour = -1;
+        m_chart_hover_row = -1;
+    }
+
+    if (m_hovering_close != old_close || m_hovering_min != old_min ||
+        m_hovered_row != old_row || m_chart_hover_hour != old_chart_hour ||
+        m_chart_hover_row != old_chart_row) {
         InvalidateRect(m_hwnd, NULL, FALSE);
     }
 
@@ -2235,10 +2479,28 @@ void CDetailWindow::OnMouseLeave() {
     m_hovering_close = false;
     m_hovering_min = false;
     m_hovered_row = -1;
+    m_chart_hover_hour = -1;
+    m_chart_hover_row = -1;
     InvalidateRect(m_hwnd, NULL, FALSE);
 }
 
 void CDetailWindow::OnMouseWheel(int delta) {
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    ScreenToClient(m_hwnd, &cursor);
+    if (m_active_tab == 2 && PtInRect(&m_rcChartTable, cursor)) {
+        RECT client{};
+        GetClientRect(m_hwnd, &client);
+        const int reserve = max(190, (int)(220 * m_dpi_scale));
+        const int plot_bottom = max(m_rcChartPlot.top + 24, client.bottom - PADDING - reserve);
+        const int table_top = plot_bottom + 30;
+        const int row_h = max(20, (int)(22 * m_dpi_scale));
+        const int visible_rows = max(1, (client.bottom - PADDING - PADDING - table_top - row_h) / row_h);
+        const int step = max(1, visible_rows - 1);
+        m_chart_table_scroll = max(0, m_chart_table_scroll + (delta > 0 ? -step : step));
+        InvalidateRect(m_hwnd, &m_rcChartTable, FALSE);
+        return;
+    }
     ScrollTo(m_scroll_pos - (delta > 0 ? ROW_H * 3 : -ROW_H * 3));
 }
 
@@ -2366,7 +2628,441 @@ void CDetailWindow::DrawTabs(HDC hdc, int w, int y) {
         DeleteObject(hPen);
     }
 
+    const wchar_t* tab2 = TR(L"流量图表");
+    GetTextExtentPoint32W(hdc, tab2, (int)wcslen(tab2), &sz);
+    m_rcTab2 = { m_rcTab1.right + 12, y + 4, m_rcTab1.right + 12 + sz.cx + 16, y + TAB_BAR_H - 4 };
+    SetTextColor(hdc, m_active_tab == 2 ? GetAccentColor(false) : GetSecondaryTextColor());
+    DrawTextW(hdc, tab2, -1, &m_rcTab2, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+    if (m_active_tab == 2) {
+        HPEN hPen = CreatePen(PS_SOLID, 2, GetAccentColor(false));
+        HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
+        MoveToEx(hdc, m_rcTab2.left + 2, y + TAB_BAR_H - 4, NULL);
+        LineTo(hdc, m_rcTab2.right - 2, y + TAB_BAR_H - 4);
+        SelectObject(hdc, hOldPen);
+        DeleteObject(hPen);
+    }
+
     SelectObject(hdc, hOldFont);
+}
+
+void CDetailWindow::DrawHourlyChart(HDC hdc, int w, int y, int client_h) {
+    RECT area = { PADDING, y, w - PADDING, client_h - PADDING };
+    HBRUSH bg = CreateSolidBrush(GetBgColor());
+    FillRect(hdc, &area, bg);
+    DeleteObject(bg);
+
+    const auto now = WallClockMs();
+    const auto today = pnm::HourlyHistory::DayStart(now);
+    if (!m_chart_day_start) m_chart_day_start = today;
+    const auto day_start = m_chart_day_start;
+    const auto target_day = pnm::HourlyHistory::DayStart(day_start);
+    const auto day_bucket = m_hourly.daily.find(target_day);
+    const bool aggregate_day = day_bucket != m_hourly.daily.end();
+    struct Bar { uint64_t down = 0, up = 0; } bars[24];
+    uint64_t max_total = 0;
+    for (int i = 0; i < 24; ++i) {
+        if (aggregate_day) continue;
+        const auto bucket = target_day + static_cast<uint64_t>(i) * pnm::HourlyHistory::Hour;
+        auto it = m_hourly.buckets.find(bucket);
+        if (it == m_hourly.buckets.end()) continue;
+        for (const auto& [name, usage] : it->second) {
+            bars[i].down = pnm::HourlyHistory::SaturatingAdd(bars[i].down, usage.down);
+            bars[i].up = pnm::HourlyHistory::SaturatingAdd(bars[i].up, usage.up);
+        }
+        max_total = max(max_total, pnm::HourlyHistory::SaturatingAdd(bars[i].down, bars[i].up));
+    }
+
+    HFONT old_font = (HFONT)SelectObject(hdc, m_font_row);
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, GetSecondaryTextColor());
+    tm local_tm = {};
+    time_t day_seconds = static_cast<time_t>((day_start + pnm::HourlyHistory::Offset) / 1000);
+    gmtime_s(&local_tm, &day_seconds);
+    wchar_t date_text[64];
+    swprintf_s(date_text, L"%04d-%02d-%02d", local_tm.tm_year + 1900,
+               local_tm.tm_mon + 1, local_tm.tm_mday);
+    RECT title = { area.left, area.top + 4, max(area.left + 40, area.right - 190), area.top + 30 };
+    DrawTextW(hdc, date_text, -1, &title, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+    // Right-align the three navigation buttons inside the area; measure before drawing.
+    auto button_w = [&](const wchar_t* text) {
+        SIZE s = {};
+        GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &s);
+        return s.cx + 18;
+    };
+    // Keep a visible gap between buttons, scaled with DPI.
+    const int nav_gap = max(6, (int)(10 * m_dpi_scale));
+    const int nav_total = button_w(TR(L"前一天")) + button_w(TR(L"今天")) + button_w(TR(L"后一天")) + nav_gap * 2;
+    const int nav_left = max(area.left, area.right - nav_total);
+    auto draw_button = [&](RECT* button, const wchar_t* text, int left) {
+        SIZE size = {};
+        GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &size);
+        *button = { left, area.top, left + size.cx + 18, area.top + size.cy + 10 };
+        HBRUSH brush = CreateSolidBrush(GetHeaderBgColor());
+        HPEN pen = CreatePen(PS_SOLID, 1, GetBorderColor());
+        HBRUSH old_brush = (HBRUSH)SelectObject(hdc, brush);
+        HPEN old_pen = (HPEN)SelectObject(hdc, pen);
+        RoundRect(hdc, button->left, button->top, button->right, button->bottom, 4, 4);
+        SelectObject(hdc, old_brush); SelectObject(hdc, old_pen);
+        DeleteObject(brush); DeleteObject(pen);
+        DrawTextW(hdc, text, -1, button, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+    };
+    int button_x = nav_left;
+    draw_button(&m_rcChartPrev, TR(L"前一天"), button_x);
+    button_x = m_rcChartPrev.right + nav_gap;
+    draw_button(&m_rcChartToday, TR(L"今天"), button_x);
+    button_x = m_rcChartToday.right + nav_gap;
+    draw_button(&m_rcChartNext, TR(L"后一天"), button_x);
+    const int title_right = max(area.left + 20, nav_left - 8);
+    title.right = max(title.left, title_right);
+    DrawTextW(hdc, date_text, -1, &title, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+
+    // Measure every Y-axis tick label so the widest one always fits left of the axis.
+    int axis_text_w = 0;
+    for (int tick = 0; tick <= 4; ++tick) {
+        wchar_t label[32];
+        const uint64_t value = max_total / 4 * tick + (max_total % 4) * tick / 4;
+        FormatBytes(value, label, 32);
+        SIZE label_size = {};
+        GetTextExtentPoint32W(hdc, label, (int)wcslen(label), &label_size);
+        axis_text_w = max(axis_text_w, (int)label_size.cx);
+    }
+    const int scale_pad = max(48, axis_text_w + 14);
+    const int chart_left = area.left + scale_pad;
+    const int chart_right = max(chart_left + 24, area.right - 4);
+    // Start the plot below the navigation buttons with a clear gap, so bars and the top tick never touch them.
+    SIZE nav_text = {};
+    GetTextExtentPoint32W(hdc, TR(L"今天"), (int)wcslen(TR(L"今天")), &nav_text);
+    const int nav_bottom = area.top + nav_text.cy + 10;
+    const int chart_top = max(area.top + 44, nav_bottom + nav_gap * 2);
+    // Reserve the lower part for the selected date's complete program table.
+    const int detail_reserve = max(190, (int)(220 * m_dpi_scale));
+    const int chart_bottom = max(chart_top + 24, area.bottom - detail_reserve);
+    m_rcChartPlot = { chart_left, chart_top, chart_right, chart_bottom };
+    const int chart_h = max(1, chart_bottom - chart_top);
+    const int chart_w = max(1, chart_right - chart_left);
+    const int gap = max(1, min(4, (int)(4 * m_dpi_scale)));
+    const int bar_w = max(4, (chart_w - gap * 23) / 24);
+    m_chart_bar_w = bar_w;
+    m_chart_bar_gap = gap;
+
+    HPEN axis_pen = CreatePen(PS_SOLID, 1, GetBorderColor());
+    HPEN old_axis_pen = (HPEN)SelectObject(hdc, axis_pen);
+    MoveToEx(hdc, chart_left, chart_top, NULL);
+    LineTo(hdc, chart_left, chart_bottom);
+    LineTo(hdc, chart_right, chart_bottom);
+    SelectObject(hdc, old_axis_pen);
+    DeleteObject(axis_pen);
+
+    SIZE axis_sz = {};
+    GetTextExtentPoint32W(hdc, L"0", 1, &axis_sz);
+    const int label_half = axis_sz.cy / 2 + 4;
+    wchar_t axis_value[32];
+    for (int tick = 0; tick <= 4; ++tick) {
+        const int tick_y = chart_bottom - chart_h * tick / 4;
+        const uint64_t value = max_total / 4 * tick + (max_total % 4) * tick / 4;
+        FormatBytes(value, axis_value, 32);
+        RECT axis_label = { PADDING - 4, tick_y - label_half, chart_left - 6, tick_y + label_half };
+        DrawTextW(hdc, axis_value, -1, &axis_label, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+        if (tick > 0 && tick < 4) {
+            HPEN grid_pen = CreatePen(PS_DOT, 1, GetBorderColor());
+            HPEN old_grid_pen = (HPEN)SelectObject(hdc, grid_pen);
+            MoveToEx(hdc, chart_left + 1, tick_y, NULL);
+            LineTo(hdc, chart_right, tick_y);
+            SelectObject(hdc, old_grid_pen);
+            DeleteObject(grid_pen);
+        }
+    }
+    HBRUSH down_brush = CreateSolidBrush(GetAccentColor(false));
+    HBRUSH up_brush = CreateSolidBrush(GetAccentColor(true));
+    for (int i = 0; i < 24; ++i) {
+        const int x = chart_left + i * (bar_w + gap);
+        const uint64_t total = pnm::HourlyHistory::SaturatingAdd(bars[i].down, bars[i].up);
+        // Clamp to the plot so a bar can never rise above the top tick or past the right axis.
+        const int total_h = max_total ? min(chart_h, static_cast<int>((long double)total / max_total * chart_h)) : 0;
+        const int down_h = total ? static_cast<int>((double)bars[i].down / total * total_h) : 0;
+        const int bx2 = min(x + bar_w, chart_right);
+        RECT down_rc = { x, chart_bottom - down_h, bx2, chart_bottom };
+        RECT up_rc = { x, chart_bottom - total_h, bx2, chart_bottom - down_h };
+        if (down_h) FillRect(hdc, &down_rc, down_brush);
+        if (total_h - down_h) FillRect(hdc, &up_rc, up_brush);
+        wchar_t hour[8]; swprintf_s(hour, L"%02d", i);
+        RECT label = { x - 2, chart_bottom + 4, x + bar_w + 2, area.bottom };
+        DrawTextW(hdc, hour, -1, &label, DT_CENTER | DT_SINGLELINE | DT_TOP);
+    }
+    DeleteObject(down_brush);
+    DeleteObject(up_brush);
+
+    if (max_total == 0) {
+        RECT empty = { chart_left, chart_top, chart_right, chart_bottom };
+        const wchar_t* empty_text = aggregate_day
+            ? TR(L"此日期包含旧日汇总数据，无法还原小时分布")
+            : TR(L"今天还没有可显示的小时流量数据");
+        DrawTextW(hdc, empty_text, -1, &empty,
+                  DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+    }
+    pnm::HourlyHistory::Apps day_apps;
+    if (m_chart_selected_hour >= 0 && m_chart_selected_hour < 24 && !aggregate_day) {
+        const auto bucket = target_day + static_cast<uint64_t>(m_chart_selected_hour) * pnm::HourlyHistory::Hour;
+        const auto it = m_hourly.buckets.find(bucket);
+        if (it != m_hourly.buckets.end()) day_apps = it->second;
+    } else if (aggregate_day) {
+        day_apps = day_bucket->second;
+    } else {
+        day_apps = m_hourly.SummarizeDay(target_day);
+    }
+    uint64_t day_down = 0, day_up = 0;
+    for (const auto& [name, usage] : day_apps) {
+        day_down = pnm::HourlyHistory::SaturatingAdd(day_down, usage.down);
+        day_up = pnm::HourlyHistory::SaturatingAdd(day_up, usage.up);
+    }
+    if (m_chart_selected_hour < 0) {
+        for (const auto& bar : bars) {
+            day_down = pnm::HourlyHistory::SaturatingAdd(day_down, bar.down);
+            day_up = pnm::HourlyHistory::SaturatingAdd(day_up, bar.up);
+        }
+    }
+    wchar_t summary[128];
+    wchar_t down_text[32], up_text[32];
+    FormatBytes(day_down, down_text, 32); FormatBytes(day_up, up_text, 32);
+    if (m_chart_selected_hour >= 0 && m_chart_selected_hour < 24) {
+        swprintf_s(summary, L"%s %02d:00-%02d:00  %s: %s    %s: %s", date_text,
+                   m_chart_selected_hour, (m_chart_selected_hour + 1) % 24,
+                   TR(L"下载"), down_text, TR(L"上传"), up_text);
+    } else {
+    swprintf_s(summary, L"%s  %s: %s    %s: %s", date_text, TR(L"下载"), down_text,
+               TR(L"上传"), up_text);
+    }
+    RECT summary_rc = { area.left, area.bottom - 24, area.right - 64, area.bottom };
+    DrawTextW(hdc, summary, -1, &summary_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+    // The selected date controls the scope; every program is shown in one detail table.
+    // Detail table: sortable header, hover highlight, and per-program expansion into hour rows.
+    const int tbl_left = area.left;
+    const int tbl_right = area.right;
+    const int pad = max(6, (int)(8 * m_dpi_scale));
+    // Hour labels sit below the plot; the table starts below them with a gap.
+    SIZE hour_size = {};
+    GetTextExtentPoint32W(hdc, L"00", 2, &hour_size);
+    const int table_top = chart_bottom + 4 + hour_size.cy + 10;
+    const int row_h = max(20, (int)(22 * m_dpi_scale));
+    const int table_bottom = area.bottom - 30;
+    const int visible_rows = max(0, (table_bottom - table_top - row_h) / row_h);
+    const int name_w = max(120, (tbl_right - tbl_left) * 2 / 5);
+    const int down_x = tbl_left + name_w;
+    const int up_x = tbl_left + (tbl_right - tbl_left) * 3 / 5;
+    m_rcChartTable = { tbl_left, table_top, tbl_right, table_bottom };
+    m_rcChartHeader = { tbl_left, table_top, tbl_right, table_top + row_h };
+    m_chart_col_x[0] = tbl_left;
+    m_chart_col_x[1] = down_x;
+    m_chart_col_x[2] = up_x;
+    const int sb_w = max(6, (int)(8 * m_dpi_scale));
+    m_chart_col_x[3] = tbl_right - sb_w;
+
+    // Sort programs by the chosen column (0 name, 1 download, 2 upload).
+    struct AppEntry { std::u16string name; pnm::HourlyHistory::Usage usage; };
+    std::vector<AppEntry> entries;
+    entries.reserve(day_apps.size());
+    for (const auto& [name, usage] : day_apps) entries.push_back({ name, usage });
+    const int sort_col = m_chart_sort_col;
+    const bool sort_asc = m_chart_sort_asc;
+    std::stable_sort(entries.begin(), entries.end(),
+        [sort_col, sort_asc](const AppEntry& a, const AppEntry& b) {
+            int cmp = 0;
+            if (sort_col == 0) cmp = a.name.compare(b.name);
+            else if (sort_col == 1) cmp = a.usage.down < b.usage.down ? -1 : (a.usage.down > b.usage.down ? 1 : 0);
+            else cmp = a.usage.up < b.usage.up ? -1 : (a.usage.up > b.usage.up ? 1 : 0);
+            return sort_asc ? cmp < 0 : cmp > 0;
+        });
+
+    // Hour usage of one program on the selected day (empty for old daily-only dates).
+    auto hour_usage = [&](const std::u16string& name, int h) {
+        pnm::HourlyHistory::Usage u{};
+        if (aggregate_day || h < 0 || h > 23) return u;
+        const auto bucket_it = m_hourly.buckets.find(target_day + static_cast<uint64_t>(h) * pnm::HourlyHistory::Hour);
+        if (bucket_it == m_hourly.buckets.end()) return u;
+        const auto app_it = bucket_it->second.find(name);
+        if (app_it != bucket_it->second.end()) u = app_it->second;
+        return u;
+    };
+
+    // Visible rows: each program, followed by its hour rows when expanded. hour -1 = program, -2 = note.
+    struct VisRow { int app; int hour; };
+    std::vector<VisRow> vrows;
+    for (int ai = 0; ai < (int)entries.size(); ++ai) {
+        vrows.push_back({ ai, -1 });
+        if (!m_chart_expanded.count(entries[ai].name)) continue;
+        bool any = false;
+        for (int h = 0; h < 24 && !aggregate_day; ++h) {
+            const auto u = hour_usage(entries[ai].name, h);
+            if (u.down == 0 && u.up == 0) continue;
+            vrows.push_back({ ai, h });
+            any = true;
+        }
+        if (!any) vrows.push_back({ ai, -2 });
+    }
+    m_chart_table_scroll = max(0, min(m_chart_table_scroll,
+        max(0, (int)vrows.size() - visible_rows)));
+
+    // Header: same rounded header strip, font and colors as DrawTableHeader.
+    {
+        HBRUSH hHeadBrush = CreateSolidBrush(GetHeaderBgColor());
+        HPEN hHeadPen = CreatePen(PS_SOLID, 1, GetBorderColor());
+        HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, hHeadBrush);
+        HPEN hOldPen = (HPEN)SelectObject(hdc, hHeadPen);
+        RoundRect(hdc, m_rcChartHeader.left, m_rcChartHeader.top,
+                  m_rcChartHeader.right, m_rcChartHeader.bottom, 4, 4);
+        SelectObject(hdc, hOldBrush);
+        SelectObject(hdc, hOldPen);
+        DeleteObject(hHeadBrush);
+        DeleteObject(hHeadPen);
+    }
+    HFONT hOldTableFont = (HFONT)SelectObject(hdc, m_font_header);
+    SetBkMode(hdc, TRANSPARENT);
+    wchar_t name_header[128];
+    if (m_chart_selected_hour >= 0 && m_chart_selected_hour < 24) {
+        swprintf_s(name_header, L"%s (%02d:00-%02d:00)", TR(L"程序名"),
+                   m_chart_selected_hour, (m_chart_selected_hour + 1) % 24);
+    } else {
+        wcscpy_s(name_header, TR(L"程序名"));
+    }
+    const wchar_t* header_titles[3] = { name_header, TR(L"下载量"), TR(L"上传量") };
+    for (int c = 0; c < 3; ++c) {
+        RECT cell = { m_chart_col_x[c] + pad, table_top, m_chart_col_x[c + 1] - pad, table_top + row_h };
+        const bool active = (c == sort_col);
+        SetTextColor(hdc, active ? GetAccentColor(false) : GetSecondaryTextColor());
+        wchar_t title[160];
+        if (active) swprintf_s(title, L"%s %s", header_titles[c], sort_asc ? L"\u25B2" : L"\u25BC");
+        else wcscpy_s(title, header_titles[c]);
+        DrawTextW(hdc, title, -1, &cell, (c == 0 ? DT_LEFT : DT_RIGHT) | DT_SINGLELINE | DT_VCENTER);
+    }
+
+    // Rows: same alternating and hover brushes, bottom border and accent colors as DrawTableRows.
+    SelectObject(hdc, m_font_row);
+    m_chart_hits.clear();
+    int row_y = table_top + row_h;
+    auto draw_values = [&](const pnm::HourlyHistory::Usage& u) {
+        wchar_t down_value[32], up_value[32];
+        FormatBytes(u.down, down_value, 32);
+        FormatBytes(u.up, up_value, 32);
+        RECT down_rc = { down_x, row_y, up_x - 4, row_y + row_h };
+        RECT up_rc = { up_x, row_y, tbl_right - sb_w - pad, row_y + row_h };
+        SetTextColor(hdc, u.down > 0 ? GetAccentColor(false) : GetSecondaryTextColor());
+        DrawTextW(hdc, down_value, -1, &down_rc, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+        SetTextColor(hdc, u.up > 0 ? GetAccentColor(true) : GetSecondaryTextColor());
+        DrawTextW(hdc, up_value, -1, &up_rc, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+    };
+    const int indent = (int)(24 * m_dpi_scale);
+    const int arrow_w = (int)(14 * m_dpi_scale);
+    for (int vi = m_chart_table_scroll; vi < (int)vrows.size(); ++vi) {
+        if (row_y + row_h > table_bottom) break;
+        const VisRow vr = vrows[vi];
+        const auto& e = entries[vr.app];
+        RECT row_rc = { tbl_left, row_y, tbl_right, row_y + row_h };
+        FillRect(hdc, &row_rc, vi == m_chart_hover_row ? m_br_hover : m_br_row[vi % 2]);
+        HPEN hRowPen = (HPEN)SelectObject(hdc, m_pen_border);
+        MoveToEx(hdc, tbl_left, row_y + row_h - 1, NULL);
+        LineTo(hdc, tbl_right, row_y + row_h - 1);
+        SelectObject(hdc, hRowPen);
+        m_chart_hits.push_back({ row_rc, e.name, vr.hour, vi });
+
+        if (vr.hour == -1) {
+            const bool expanded = m_chart_expanded.count(e.name) != 0;
+            SelectObject(hdc, m_font_small);
+            SetTextColor(hdc, GetSecondaryTextColor());
+            RECT arrow_rc = { tbl_left + pad, row_y, tbl_left + pad + arrow_w, row_y + row_h };
+            DrawTextW(hdc, expanded ? L"\u25BC" : L"\u25B6", -1, &arrow_rc, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+            SelectObject(hdc, m_font_row);
+            std::wstring name(e.name.begin(), e.name.end());
+            RECT name_rc = { tbl_left + pad + arrow_w + 4, row_y, down_x - 6, row_y + row_h };
+            SetTextColor(hdc, GetTextColor());
+            DrawTextW(hdc, name.c_str(), -1, &name_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+            draw_values(e.usage);
+        } else if (vr.hour >= 0) {
+            wchar_t label[32];
+            swprintf_s(label, L"%02d:00-%02d:00", vr.hour, (vr.hour + 1) % 24);
+            RECT label_rc = { tbl_left + pad + indent, row_y, down_x - 6, row_y + row_h };
+            SetTextColor(hdc, GetSecondaryTextColor());
+            DrawTextW(hdc, label, -1, &label_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+            draw_values(hour_usage(e.name, vr.hour));
+        } else {
+            RECT note_rc = { tbl_left + pad + indent, row_y, tbl_right - sb_w - pad, row_y + row_h };
+            SetTextColor(hdc, GetSecondaryTextColor());
+            DrawTextW(hdc, aggregate_day ? TR(L"此日期为旧日汇总，无小时明细")
+                                         : TR(L"该程序在此日期没有小时明细"),
+                      -1, &note_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        }
+        row_y += row_h;
+    }
+    SelectObject(hdc, hOldTableFont);
+    // Vertical scrollbar at the table's right edge replaces the page indicator.
+    m_chart_visible_rows = visible_rows;
+    m_chart_total_rows = (int)vrows.size();
+    if (m_chart_total_rows > visible_rows && visible_rows > 0) {
+        m_rcChartScrollTrack = { tbl_right - sb_w, table_top + row_h, tbl_right, table_bottom };
+        const int track_h = m_rcChartScrollTrack.bottom - m_rcChartScrollTrack.top;
+        const int max_scroll = m_chart_total_rows - visible_rows;
+        m_chart_thumb_h = max(20, track_h * visible_rows / m_chart_total_rows);
+        const int range = track_h - m_chart_thumb_h;
+        const int thumb_top = m_rcChartScrollTrack.top +
+            (max_scroll > 0 ? range * m_chart_table_scroll / max_scroll : 0);
+        m_rcChartScrollThumb = { m_rcChartScrollTrack.left + 1, thumb_top,
+                                 m_rcChartScrollTrack.right - 1, thumb_top + m_chart_thumb_h };
+        HBRUSH track_brush = CreateSolidBrush(GetHeaderBgColor());
+        FillRect(hdc, &m_rcChartScrollTrack, track_brush);
+        DeleteObject(track_brush);
+        HBRUSH thumb_brush = CreateSolidBrush(GetBorderColor());
+        FillRect(hdc, &m_rcChartScrollThumb, thumb_brush);
+        DeleteObject(thumb_brush);
+    } else {
+        m_rcChartScrollTrack = {};
+        m_rcChartScrollThumb = {};
+        m_chart_thumb_h = 0;
+    }
+
+        if (m_chart_hover_hour >= 0 && m_chart_hover_hour < 24) {
+            const int i = m_chart_hover_hour;
+        const uint64_t total = pnm::HourlyHistory::SaturatingAdd(bars[i].down, bars[i].up);
+        wchar_t down_value[32], up_value[32], total_value[32], tooltip[192];
+        FormatBytes(bars[i].down, down_value, 32);
+        FormatBytes(bars[i].up, up_value, 32);
+        FormatBytes(total, total_value, 32);
+        if (m_chart_selected_hour == i) {
+            swprintf_s(tooltip, L"%02d:00-%02d:00\n%s: %s\n%s: %s\n%s: %s\n%s",
+                       i, (i + 1) % 24, TR(L"下载"), down_value, TR(L"上传"), up_value,
+                       TR(L"合计"), total_value, TR(L"已筛选此小时"));
+        } else {
+            swprintf_s(tooltip, L"%02d:00-%02d:00\n%s: %s\n%s: %s\n%s: %s",
+                       i, (i + 1) % 24, TR(L"下载"), down_value, TR(L"上传"), up_value,
+                       TR(L"合计"), total_value);
+        }
+        // Scale the tooltip width with DPI so the value lines are not wrapped.
+        const int tip_width = min((int)(260 * m_dpi_scale), max(80, m_rcChartPlot.right - m_rcChartPlot.left - 4));
+        // Size the box from the measured text, so every line (including 下载/上传/合计) stays visible.
+        RECT tip_calc = { 0, 0, tip_width - 20, 0 };
+        DrawTextW(hdc, tooltip, -1, &tip_calc, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX | DT_CALCRECT);
+        const int tip_height = max(48, (int)(tip_calc.bottom - tip_calc.top) + 16);
+        int tip_left = m_chart_mouse_x + 12;
+        int tip_top = m_chart_mouse_y + 12;
+        if (tip_left + tip_width > m_rcChartPlot.right - 2)
+            tip_left = m_chart_mouse_x - 12 - tip_width;
+        if (tip_top + tip_height > m_rcChartPlot.bottom - 2)
+            tip_top = m_chart_mouse_y - 12 - tip_height;
+        tip_left = max(m_rcChartPlot.left + 2, min(tip_left, m_rcChartPlot.right - tip_width - 2));
+        tip_top = max(m_rcChartPlot.top + 2, min(tip_top, m_rcChartPlot.bottom - tip_height - 2));
+        RECT tip = { tip_left, tip_top, tip_left + tip_width, tip_top + tip_height };
+        HBRUSH tip_brush = CreateSolidBrush(GetHeaderBgColor());
+        HPEN tip_pen = CreatePen(PS_SOLID, 1, GetBorderColor());
+        HBRUSH old_brush = (HBRUSH)SelectObject(hdc, tip_brush);
+        HPEN old_pen = (HPEN)SelectObject(hdc, tip_pen);
+        RoundRect(hdc, tip.left, tip.top, tip.right, tip.bottom, 5, 5);
+        SelectObject(hdc, old_brush); SelectObject(hdc, old_pen);
+        DeleteObject(tip_brush); DeleteObject(tip_pen);
+        SetTextColor(hdc, GetTextColor());
+        RECT tip_text = { tip.left + 10, tip.top + 8, tip.right - 10, tip.bottom - 8 };
+        DrawTextW(hdc, tooltip, -1, &tip_text, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+    }
+    SelectObject(hdc, old_font);
 }
 
 void CDetailWindow::DrawTimeRangeButtons(HDC hdc, int w, int y) {
@@ -3016,11 +3712,14 @@ void CDetailWindow::OnPaint() {
     DrawSpeedSummary(memDC, w, y);
     y += GetSummaryHeight();
 
-    DrawTableHeader(memDC, w, y);
-    y += GetTableHeaderHeight();
-
-    DrawTableRows(memDC, w, y, h);
-    DrawScrollbar(memDC, w, h);
+    if (m_active_tab == 2) {
+        DrawHourlyChart(memDC, w, y, h);
+    } else {
+        DrawTableHeader(memDC, w, y);
+        y += GetTableHeaderHeight();
+        DrawTableRows(memDC, w, y, h);
+        DrawScrollbar(memDC, w, h);
+    }
 
     BitBlt(hdc, 0, 0, w, h, memDC, 0, 0, SRCCOPY);
     SelectObject(memDC, oldBmp);
