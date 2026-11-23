@@ -78,8 +78,12 @@ inline void FormatBytes(uint64_t bytes, wchar_t* buf, int n) {
 // WER LocalDumps 登记（crash.dmp 之外的另一半转储来源；issue #20 起受
 // settings.json "crash_dump" 开关控制）。root / key_path 可注入：生产环境
 // 传 HKLM + PNM_WerLocalDumpsKey()，自动化验证传 HKCU 临时键，不碰真实登记。
-// 登记与移除都不带 KEY_WOW64_64KEY：32 位进程会落到 WOW6432Node 视图，
-// 两边保持同一视图才「自己写的自己能删」（既有行为，未改）。
+// 登记与移除固定走 64 位注册表视图（KEY_WOW64_64KEY）：WER 只读 64 位视图，
+// 崩溃的哪怕是 32 位进程也一样（2026-11-24 实测：32 位进程崩溃时系统派的是
+// SysWOW64\WerFault.exe，但 WOW6432Node 视图里的登记不生效，转储退回
+// %LOCALAPPDATA%\CrashDumps；同一份登记写到 64 位视图才落进 DumpFolder）。
+// 此前两边都不带标志，x86 版的登记一直落在 WOW6432Node 视图，等于没登记。
+// 32 位 Windows 上这个标志被系统忽略，行为不变。
 // ============================================================
 
 inline const wchar_t* PNM_WerLocalDumpsKey() {
@@ -104,7 +108,8 @@ inline bool PNM_WerFolderIsOurs(const wchar_t* folder) {
 // 写的 crash.log / crash.dmp 不受影响）。
 inline bool PNM_WerRegister(HKEY root, const wchar_t* key_path, const wchar_t* dump_dir) {
     HKEY hk = nullptr;
-    if (RegCreateKeyExW(root, key_path, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &hk, nullptr) != ERROR_SUCCESS)
+    REGSAM sam = KEY_SET_VALUE | KEY_WOW64_64KEY;
+    if (RegCreateKeyExW(root, key_path, 0, nullptr, 0, sam, nullptr, &hk, nullptr) != ERROR_SUCCESS)
         return false;
     DWORD type = 1;   // MiniDump（曾为全量 2：单份 300-400MB，上报机器累计 1.4GB）
     DWORD count = 3;  // 最多保留 3 份
@@ -125,7 +130,8 @@ enum PnmWerUnreg {
 
 inline PnmWerUnreg PNM_WerUnregister(HKEY root, const wchar_t* key_path) {
     HKEY hk = nullptr;
-    LSTATUS st = RegOpenKeyExW(root, key_path, 0, KEY_QUERY_VALUE, &hk);
+    REGSAM sam = KEY_QUERY_VALUE | KEY_WOW64_64KEY;
+    LSTATUS st = RegOpenKeyExW(root, key_path, 0, sam, &hk);
     if (st == ERROR_FILE_NOT_FOUND) return PNM_WER_NOT_FOUND;
     // 打不开就读不到 DumpFolder，无法判断归属：按「没关干净」上报，不装作已移除
     if (st != ERROR_SUCCESS) return PNM_WER_REMOVE_FAILED;
@@ -134,7 +140,7 @@ inline PnmWerUnreg PNM_WerUnregister(HKEY root, const wchar_t* key_path) {
     bool have = RegQueryValueExW(hk, L"DumpFolder", nullptr, nullptr, (BYTE*)folder, &bytes) == ERROR_SUCCESS;
     RegCloseKey(hk);
     if (!have || !PNM_WerFolderIsOurs(folder)) return PNM_WER_NOT_OURS;
-    return RegDeleteKeyW(root, key_path) == ERROR_SUCCESS ? PNM_WER_REMOVED : PNM_WER_REMOVE_FAILED;
+    return RegDeleteKeyExW(root, key_path, KEY_WOW64_64KEY, 0) == ERROR_SUCCESS ? PNM_WER_REMOVED : PNM_WER_REMOVE_FAILED;
 }
 
 // ============================================================
