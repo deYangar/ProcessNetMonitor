@@ -94,6 +94,11 @@ public:
     // BEFORE SetCapture, so its own sync hit a null capture and capture.log
     // was never written for the whole session (issue #11 diagnostics).
     void SyncDebugLogs();
+    // Crash dumps (crash.dmp + WER LocalDumps); default ON (issue #20).
+    // crash.log is not gated. Applied by plugin_main's ApplyCrashDump; the
+    // options dialog's OK saves settings once for every switch.
+    bool GetCrashDump() const { return m_crash_dump; }
+    void SetCrashDump(bool v) { m_crash_dump = v; }
 
 
     // History time range (natural-day aligned, local midnight)
@@ -233,6 +238,7 @@ private:
     bool m_context_menu_open = false;
     bool m_history_dirty = true;  // only rebuild history rows when new data arrives
     bool m_debug_logs = false;    // debug logging switch (default OFF; setting: settings.json "debug_logs")
+    bool m_crash_dump = true;     // crash dumps switch (default ON; setting: settings.json "crash_dump")
     DWORD m_context_menu_pid = 0;
     std::wstring m_context_menu_path;
 

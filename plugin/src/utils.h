@@ -74,6 +74,70 @@ inline void FormatBytes(uint64_t bytes, wchar_t* buf, int n) {
 }
 
 // ============================================================
+// ============================================================
+// WER LocalDumps 登记（crash.dmp 之外的另一半转储来源；issue #20 起受
+// settings.json "crash_dump" 开关控制）。root / key_path 可注入：生产环境
+// 传 HKLM + PNM_WerLocalDumpsKey()，自动化验证传 HKCU 临时键，不碰真实登记。
+// 登记与移除都不带 KEY_WOW64_64KEY：32 位进程会落到 WOW6432Node 视图，
+// 两边保持同一视图才「自己写的自己能删」（既有行为，未改）。
+// ============================================================
+
+inline const wchar_t* PNM_WerLocalDumpsKey() {
+    return L"SOFTWARE\\Microsoft\\Windows\\Windows Error Reporting\\LocalDumps\\TrafficMonitor.exe";
+}
+
+// DumpFolder 指向本插件的 debug\werdumps 才算「我们自己写的登记」——
+// PTM 登记的是同一个键（后加载者覆盖 DumpFolder），不是我们的一律不动。
+// 按路径后缀 + 忽略大小写匹配：portable 目录被整体搬走后旧登记仍认得出。
+inline bool PNM_WerFolderIsOurs(const wchar_t* folder) {
+    if (!folder) return false;
+    size_t len = wcslen(folder);
+    while (len > 0 && folder[len - 1] == L'\\') len--;
+    static const wchar_t kSuffix[] = L"\\plugins\\ProcessNetMonitor\\debug\\werdumps";
+    const size_t slen = (sizeof(kSuffix) / sizeof(kSuffix[0])) - 1;
+    if (len < slen) return false;
+    return CompareStringOrdinal(folder + len - slen, (int)slen, kSuffix, (int)slen, TRUE) == CSTR_EQUAL;
+}
+
+// 写 DumpFolder / DumpType=1（MiniDump）/ DumpCount=3。需要管理员权限，
+// 非提权进程写不进 HKLM 时返回 false（WER 那一半转储不可用，插件自己
+// 写的 crash.log / crash.dmp 不受影响）。
+inline bool PNM_WerRegister(HKEY root, const wchar_t* key_path, const wchar_t* dump_dir) {
+    HKEY hk = nullptr;
+    if (RegCreateKeyExW(root, key_path, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &hk, nullptr) != ERROR_SUCCESS)
+        return false;
+    DWORD type = 1;   // MiniDump（曾为全量 2：单份 300-400MB，上报机器累计 1.4GB）
+    DWORD count = 3;  // 最多保留 3 份
+    bool ok = RegSetValueExW(hk, L"DumpFolder", 0, REG_SZ, (const BYTE*)dump_dir,
+                             (DWORD)((wcslen(dump_dir) + 1) * sizeof(wchar_t))) == ERROR_SUCCESS
+        && RegSetValueExW(hk, L"DumpType", 0, REG_DWORD, (const BYTE*)&type, sizeof(type)) == ERROR_SUCCESS
+        && RegSetValueExW(hk, L"DumpCount", 0, REG_DWORD, (const BYTE*)&count, sizeof(count)) == ERROR_SUCCESS;
+    RegCloseKey(hk);
+    return ok;
+}
+
+enum PnmWerUnreg {
+    PNM_WER_REMOVED = 0,     // 登记已移除
+    PNM_WER_NOT_FOUND,       // 本来就没有登记
+    PNM_WER_NOT_OURS,        // 登记指向别的目录（如 PTM 的），不动
+    PNM_WER_REMOVE_FAILED,   // 是我们的登记但删不掉（非提权写不了 HKLM）
+};
+
+inline PnmWerUnreg PNM_WerUnregister(HKEY root, const wchar_t* key_path) {
+    HKEY hk = nullptr;
+    LSTATUS st = RegOpenKeyExW(root, key_path, 0, KEY_QUERY_VALUE, &hk);
+    if (st == ERROR_FILE_NOT_FOUND) return PNM_WER_NOT_FOUND;
+    // 打不开就读不到 DumpFolder，无法判断归属：按「没关干净」上报，不装作已移除
+    if (st != ERROR_SUCCESS) return PNM_WER_REMOVE_FAILED;
+    wchar_t folder[MAX_PATH] = {};
+    DWORD bytes = sizeof(folder);
+    bool have = RegQueryValueExW(hk, L"DumpFolder", nullptr, nullptr, (BYTE*)folder, &bytes) == ERROR_SUCCESS;
+    RegCloseKey(hk);
+    if (!have || !PNM_WerFolderIsOurs(folder)) return PNM_WER_NOT_OURS;
+    return RegDeleteKeyW(root, key_path) == ERROR_SUCCESS ? PNM_WER_REMOVED : PNM_WER_REMOVE_FAILED;
+}
+
+// ============================================================
 // OS version gate
 // RtlGetVersion via GetProcAddress: the truth-telling API (no
 // VerifyVersionInfo compatibility lie), and never enters the import

@@ -1298,6 +1298,7 @@ void CDetailWindow::SaveSettings() {
     fprintf(f, "  \"popup_effect\": %d,\n", m_popup_effect);
     fprintf(f, "  \"popup_opacity\": %d,\n", m_popup_opacity);
     fprintf(f, "  \"debug_logs\": %s,\n", m_debug_logs ? "true" : "false");
+    fprintf(f, "  \"crash_dump\": %s,\n", m_crash_dump ? "true" : "false");
     // 颜色模式：0=跟随系统 1=深色 2=浅色（详情窗与悬浮提示共享）
     fprintf(f, "  \"color_mode\": %d,\n", s_color_mode);
     // 界面语言：auto 或 BCP-47（现值域纯 ASCII；显式 UTF-8 转换以防将来塞入非 ASCII）
@@ -1461,6 +1462,17 @@ void CDetailWindow::LoadSettings() {
             }
         }
     }
+    // Parse crash_dump (default ON; issue #20)
+    {
+        size_t pos = json.find("\"crash_dump\"");
+        if (pos != std::string::npos) {
+            pos = json.find(':', pos);
+            if (pos != std::string::npos) {
+                std::string sub = json.substr(pos + 1, 16);
+                m_crash_dump = (sub.find("false") == std::string::npos);
+            }
+        }
+    }
     // Parse lang (default "auto" = follow TM; otherwise a BCP-47 tag)
     {
         size_t pos = json.find("\"lang\"");
@@ -1548,7 +1560,8 @@ void CDetailWindow::SyncDebugLogs() {
 }
 
 // Debug-log master switch: persists to settings.json and syncs the capture
-// backends (etw_capture.log / capture.log). Crash diagnostics stay ON.
+// backends (etw_capture.log / capture.log). crash.log stays ON; crash.dmp /
+// WER dumps follow the separate "crash_dump" switch.
 void CDetailWindow::SetDebugLogs(bool on) {
     m_debug_logs = on;
     SaveSettings();
@@ -1702,7 +1715,7 @@ void CDetailWindow::ShowContextMenu(int row, int x, int y) {
     if (m_active_tab == 0 && m_context_menu_pid)
         AppendMenuW(hMenu, MF_STRING, 3, TR(L"\u7ED3\u675F\u8FDB\u7A0B"));
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-    // Debug-log master switch (default OFF; crash diagnostics stay ON)
+    // Debug-log master switch (default OFF; crash.log stays ON, dumps follow "crash_dump")
     AppendMenuW(hMenu, MF_STRING, 100,
                 m_debug_logs ? TR(L"\u8C03\u8BD5\u65E5\u5FD7: \u5F00 (\u70B9\u51FB\u5173\u95ED)")
                              : TR(L"\u8C03\u8BD5\u65E5\u5FD7: \u5173 (\u70B9\u51FB\u5F00\u542F)"));

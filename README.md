@@ -197,13 +197,13 @@ ProcessNetMonitor/
       ├── settings.json / history.dat   ← 配置
       ├── lang/                         ← 语言文件（如 English.ini）
       └── debug/                        ← 诊断输出
-          ├── werdumps/                 ← WER 转储目录（启动时创建，常驻空目录）
+          ├── werdumps/                 ← WER 转储目录（崩溃转储开启时启动创建，常驻空目录）
           ├── etw_capture.log           ← ETW 采集诊断（开关开启后每 5 秒一条）
           ├── capture.log               ← 传统采集诊断（开关开启后生成）
           ├── crash.log                 ← 崩溃日志（仅崩溃时生成）
           └── crash.dmp / crash.dmp.log ← 崩溃转储（仅崩溃时生成）
   ```
-- **崩溃日志不受开关控制**：crash.log / crash.dmp / werdumps/ 仅在崩溃时写入，平时不产生文件（debug 目录仅含空的 werdumps 文件夹），保持始终启用以便排查闪退。
+- **崩溃转储默认开启，可手动关闭**：插件设置里的「崩溃转储」控制 crash.dmp 与 werdumps/ 两处内存转储，点 OK 即生效。默认开启是因为「一打开 TrafficMonitor 就崩溃」的机器来不及先去开开关。crash.log 只是几行文本，不受开关控制，保持始终启用以便排查闪退。
 - **遇到闪退时**：把 `debug/` 目录（含 crash.log、werdumps 下的 .dmp）连同 DLL 版本一起反馈即可定位。
 
 ## 版本历史

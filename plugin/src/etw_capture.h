@@ -49,8 +49,8 @@ public:
 
     // Debug-log master switch (default OFF, user setting in settings.json /
     // detail-window context menu). Controls etw_capture.log / capture.log
-    // generation. Crash diagnostics (crash.log / crash.dmp / werdumps) are
-    // ALWAYS enabled so crashes stay diagnosable even with logging off.
+    // generation. Independent of this switch: crash.log is always on, and
+    // crash.dmp / werdumps follow "crash_dump" (default ON).
     static void SetDebugLogs(bool on) { s_debug_logs.store(on); }
     static bool DebugLogs() { return s_debug_logs.load(); }
     static std::atomic<bool> s_debug_logs;

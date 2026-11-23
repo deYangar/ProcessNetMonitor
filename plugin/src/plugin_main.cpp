@@ -14,6 +14,10 @@
 // From tooltip_popup.cpp DllMain - DLL's HINSTANCE
 extern HINSTANCE s_dll_hinst;
 
+// Crash-dump switch (issue #20; settings.json "crash_dump", default ON).
+// Read by PnmCrashHandler on the crash path: lock-free load only.
+static std::atomic<bool> g_crash_dump{ true };
+
 // ---- crash diagnostics: write minidump + crash.log on unhandled exception ----
 static LONG WINAPI PnmCrashHandler(EXCEPTION_POINTERS* ep) {
     // Only dump real crashes - ignore benign first-chance/debug exceptions
@@ -104,6 +108,8 @@ static LONG WINAPI PnmCrashHandler(EXCEPTION_POINTERS* ep) {
             }
         }
         // ---- 2) crash.dmp (best effort - may fail during failfast) ----
+        // Gated by the "crash_dump" switch (issue #20); crash.log above is not.
+        if (!g_crash_dump.load(std::memory_order_relaxed)) return EXCEPTION_CONTINUE_SEARCH;
         static const wchar_t dsuf[] = L"\\crash.dmp";
         size_t dlen2 = (sizeof(dsuf) / sizeof(wchar_t)) - 1;
         if (dlen + dlen2 < MAX_PATH) {
@@ -199,27 +205,30 @@ static void PnmInvalidParamHandler(const wchar_t* expr, const wchar_t* func,
 // WER LocalDumps: kernel-level crash dumps that do NOT depend on in-process
 // handlers. failfast termination (0xc0000409) bypasses SEH/VEH entirely, so
 // only WER can reliably capture it. Requires admin (HKLM); best effort.
-static void SetupWerLocalDumps() {
-    HKEY hk = nullptr;
-    LSTATUS st = RegCreateKeyExW(HKEY_LOCAL_MACHINE,
-        L"SOFTWARE\\Microsoft\\Windows\\Windows Error Reporting\\LocalDumps\\TrafficMonitor.exe",
-        0, nullptr, 0, KEY_SET_VALUE, nullptr, &hk, nullptr);
-    if (st != ERROR_SUCCESS) return;
-    wchar_t dump_dir[MAX_PATH] = L"";
-    if (PNM_GetDebugDir(dump_dir, MAX_PATH) && dump_dir[0]) {
-        wcscat_s(dump_dir, L"\\werdumps");
-        CreateDirectoryW(dump_dir, nullptr);
-        RegSetValueExW(hk, L"DumpFolder", 0, REG_SZ,
-                       (const BYTE*)dump_dir, (DWORD)((wcslen(dump_dir) + 1) * sizeof(wchar_t)));
-        // Mini dumps (was full=2: each crash left a 300-400MB .dmp, 1.4GB
-        // total on the reporter's machine). Mini dumps still capture the
-        // faulting stack the crash.log references.
-        DWORD type = 1;  // MiniDump
-        RegSetValueExW(hk, L"DumpType", 0, REG_DWORD, (const BYTE*)&type, sizeof(type));
-        DWORD count = 3;  // keep at most 3 dumps
-        RegSetValueExW(hk, L"DumpCount", 0, REG_DWORD, (const BYTE*)&count, sizeof(count));
+//
+// 把「崩溃转储」开关落到 WER 这一半（crash.dmp 那一半由 g_crash_dump 在
+// PnmCrashHandler 里读）：开 = 写登记，关 = 只删我们自己写的那条登记。
+// 启动时（读完成设置后）和设置窗点 OK 时各调一次，立即生效不用重启 TM。
+// hint_parent 非空 = 用户刚在设置窗里关的：登记是我们的却删不掉（非提权
+// 进程写不了 HKLM）就明说，不然用户关了开关转储照落，以为开关坏了。
+static void ApplyCrashDump(bool enabled, HWND hint_parent) {
+    g_crash_dump.store(enabled, std::memory_order_relaxed);
+    wchar_t dbg[MAX_PATH] = L"";
+    if (!PNM_GetDebugDir(dbg, MAX_PATH) || !dbg[0]) return;
+    if (enabled) {
+        wchar_t wer_dir[MAX_PATH];
+        wcscpy_s(wer_dir, dbg);
+        wcscat_s(wer_dir, L"\\werdumps");
+        CreateDirectoryW(wer_dir, nullptr);
+        PNM_WerRegister(HKEY_LOCAL_MACHINE, PNM_WerLocalDumpsKey(), wer_dir);
+        return;
     }
-    RegCloseKey(hk);
+    if (PNM_WerUnregister(HKEY_LOCAL_MACHINE, PNM_WerLocalDumpsKey()) == PNM_WER_REMOVE_FAILED &&
+        hint_parent) {
+        MessageBoxW(hint_parent,
+            TR(L"崩溃转储已关闭，但移除系统里的转储登记需要管理员权限。请以管理员身份运行一次 TrafficMonitor，再回到这里关一次。"),
+            TR(L"插件设置"), MB_OK | MB_ICONWARNING);
+    }
 }
 
 // One-line status for popup/tooltip when ETW cannot own the kernel session
@@ -984,10 +993,11 @@ void CProcessNetPlugin::InitOnce(const wchar_t* cfg_base) {
     // Crash diagnostics: the filter catches normal unhandled exceptions;
     // the vectored handler also has a chance to catch failfast termination
     // (e.g. heap corruption 0xc0000374), which bypasses the filter.
+    // crash.log always on; crash.dmp / WER LocalDumps follow the "crash_dump"
+    // setting, applied right after LoadSettings below.
     SetUnhandledExceptionFilter(PnmCrashHandler);
     AddVectoredExceptionHandler(1, PnmCrashHandler);
     _set_invalid_parameter_handler(PnmInvalidParamHandler);
-    SetupWerLocalDumps();
     // Use DLL's HINSTANCE (not EXE's) so resource loading (icons, etc.) works
     HINSTANCE hInst = s_dll_hinst ? s_dll_hinst : (HINSTANCE)GetModuleHandleW(NULL);
     m_popup_created = m_popup.Initialize(hInst);
@@ -1002,7 +1012,8 @@ void CProcessNetPlugin::InitOnce(const wchar_t* cfg_base) {
     // Plugin config dir: <plugins>\ProcessNetMonitor (GetPluginConfigDir returns
     // the plugins/ folder on 1.86). capture.log / etw_capture.log follow the
     // "debug_logs" setting (default OFF), synced inside LoadSettings. Crash
-    // diagnostics (crash.log / crash.dmp / werdumps) are always enabled.
+    // diagnostics: crash.log always on; crash.dmp / werdumps follow
+    // "crash_dump" (default ON).
     // Production ETW per-process counter (attaches/starts NT Kernel Logger)
     std::wstring cfg_dir;
     if (cfg_base && cfg_base[0]) {
@@ -1023,6 +1034,8 @@ void CProcessNetPlugin::InitOnce(const wchar_t* cfg_base) {
 
     m_detail.LoadHistory();
     m_detail.LoadSettings();   // 读取界面语言等设置（lang 字段）
+    // 崩溃转储开关依赖刚读入的设置：WER 登记写/删必须排在 LoadSettings 之后
+    ApplyCrashDump(m_detail.GetCrashDump(), nullptr);
 
     // ---- 本地化：扫描 <dll dir>\ProcessNetMonitor\lang\ 目录，按设置加载语言文件 ----
     // 语言文件与 TM 的 language\*.ini 同格式（UTF-8 BOM + [text] section）。
@@ -1603,6 +1616,7 @@ static void OptionsApplyLang(HWND hwnd) {
     SetWindowTextW(GetDlgItem(hwnd, 1011), TR(L"IP\u5E93\u81EA\u52A8\u66F4\u65B0\u95F4\u9694\uFF08\u5929\uFF0C\u9ED8\u8BA47\uFF09"));
     SetWindowTextW(GetDlgItem(hwnd, 1009), TR(L"\u7ACB\u5373\u66F4\u65B0"));
     SetWindowTextW(GetDlgItem(hwnd, 1006), TR(L"\u8C03\u8BD5\u65E5\u5FD7\uFF08\u5199\u5165\u63D2\u4EF6\u76EE\u5F55 debug\\\uFF09"));
+    SetWindowTextW(GetDlgItem(hwnd, 1026), TR(L"崩溃转储（崩溃时保存内存快照）"));
     SetWindowTextW(GetDlgItem(hwnd, 1013), TR(L"\u5728 TrafficMonitor \u9F20\u6807\u60AC\u505C\u63D0\u793A\u4E2D\u663E\u793A\u8FDB\u7A0B\u7F51\u901F\u4FE1\u606F"));
     SetWindowTextW(GetDlgItem(hwnd, 1020), TR(L"启用悬浮网速提示（关闭后仅 TrafficMonitor 官方悬停提示）"));
     SetWindowTextW(GetDlgItem(hwnd, 1026), TR(L"在浮窗中显示 TrafficMonitor 鼠标提示"));
@@ -2023,6 +2037,15 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         if (CProcessNetPlugin::Instance().m_detail.GetDebugLogs())
             SendMessageW(GetDlgItem(hwnd, 1006), BM_SETCHECK, BST_CHECKED, 0);
 
+        // Crash-dump checkbox (default ON): crash.dmp + WER LocalDumps.
+        // crash.log is not gated - a few lines of text, and the only crash
+        // trace left when dumps are off (issue #20)
+        CreateWindowW(L"BUTTON", TR(L"崩溃转储（崩溃时保存内存快照）"),
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            10, 214, 610, 22, hwnd, (HMENU)1026, nullptr, nullptr);
+        if (CProcessNetPlugin::Instance().m_detail.GetCrashDump())
+            SendMessageW(GetDlgItem(hwnd, 1026), BM_SETCHECK, BST_CHECKED, 0);
+
         // Show/hide the plugin's section in TM's native hover tooltip
         // (issue #9: the plugin already has its own popup/detail window).
         // Only controls GetTooltipInfo(); the resident Up/Down items are
@@ -2030,7 +2053,7 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         CreateWindowW(L"BUTTON",
             TR(L"\u5728 TrafficMonitor \u9F20\u6807\u60AC\u505C\u63D0\u793A\u4E2D\u663E\u793A\u8FDB\u7A0B\u7F51\u901F\u4FE1\u606F"),
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            10, 214, 610, 22, hwnd, (HMENU)1013, nullptr, nullptr);
+            10, 242, 610, 22, hwnd, (HMENU)1013, nullptr, nullptr);
         if (CProcessNetItem::s_show_speed_items)
             SendMessageW(GetDlgItem(hwnd, 1013), BM_SETCHECK, BST_CHECKED, 0);
 
@@ -2041,16 +2064,16 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         CreateWindowW(L"BUTTON",
             TR(L"启用悬浮网速提示（关闭后仅 TrafficMonitor 官方悬停提示）"),
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            10, 242, 610, 22, hwnd, (HMENU)1020, nullptr, nullptr);
+            10, 270, 610, 22, hwnd, (HMENU)1020, nullptr, nullptr);
         if (CProcessNetPlugin::Instance().m_detail.GetPopupEnabled())
             SendMessageW(GetDlgItem(hwnd, 1020), BM_SETCHECK, BST_CHECKED, 0);
 
         // 界面语言 label + combo (跟随系统 + 扫描到的语言)
         CreateWindowW(L"STATIC", TR(L"\u754C\u9762\u8BED\u8A00"),
-            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 10, 270, 90, 20, hwnd, (HMENU)1015, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 10, 298, 90, 20, hwnd, (HMENU)1015, nullptr, nullptr);
         HWND hLangCombo = CreateWindowW(L"COMBOBOX", L"",
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-            90, 268, 190, 200, hwnd, (HMENU)1014, nullptr, nullptr);
+            90, 296, 190, 200, hwnd, (HMENU)1014, nullptr, nullptr);
         {
             SendMessageW(hLangCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"\u8DDF\u968F\u7CFB\u7EDF"));
             int cur = 0;
@@ -2070,10 +2093,10 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
 
         // 颜色模式 label + combo（自动=跟随系统 / 深色 / 浅色，详情窗与悬浮提示共用）
         CreateWindowW(L"STATIC", TR(L"\u989C\u8272\u6A21\u5F0F"),
-            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 10, 300, 90, 20, hwnd, (HMENU)1019, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 10, 328, 90, 20, hwnd, (HMENU)1019, nullptr, nullptr);
         HWND hColorCombo = CreateWindowW(L"COMBOBOX", L"",
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-            100, 298, 190, 120, hwnd, (HMENU)1018, nullptr, nullptr);
+            100, 326, 190, 120, hwnd, (HMENU)1018, nullptr, nullptr);
         {
             SendMessageW(hColorCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"\u81EA\u52A8"));
             SendMessageW(hColorCombo, CB_ADDSTRING, 0, (LPARAM)TR(L"\u6DF1\u8272"));
@@ -2084,10 +2107,10 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         // 悬浮窗背景效果 label + combo（TranslucentTB 模式集：亚克力=系统
         // 磨砂，透明=无模糊纯透，模糊=仅模糊无亚克力噪声，不透明=普通窗口）
         CreateWindowW(L"STATIC", TR(L"悬浮窗背景"),
-            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 10, 326, 90, 20, hwnd, (HMENU)1021, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 10, 354, 90, 20, hwnd, (HMENU)1021, nullptr, nullptr);
         HWND hEffCombo = CreateWindowW(L"COMBOBOX", L"",
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-            100, 324, 190, 120, hwnd, (HMENU)1022, nullptr, nullptr);
+            100, 352, 190, 120, hwnd, (HMENU)1022, nullptr, nullptr);
         OptionsFillEffectCombo(hEffCombo,
             OptionsClampEffectForOS(
                 CProcessNetPlugin::Instance().m_detail.GetPopupEffect()));
@@ -2098,10 +2121,10 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         // ±1 是 trackbar 原生行为（TBM_SETLINESIZE 默认 1）；右侧值显示
         // （1025）同步刷新）
         CreateWindowW(L"STATIC", TR(L"悬浮窗透明度（10-100，10 最透 100 最实，不透明模式除外）"),
-            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 10, 354, 260, 20, hwnd, (HMENU)1023, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 10, 382, 260, 20, hwnd, (HMENU)1023, nullptr, nullptr);
         HWND hOpacityTrack = CreateWindowW(TRACKBAR_CLASSW, L"",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ,
-            100, 350, 160, 30, hwnd, (HMENU)1024, GetModuleHandleW(NULL), nullptr);
+            100, 378, 160, 30, hwnd, (HMENU)1024, GetModuleHandleW(NULL), nullptr);
         SendMessageW(hOpacityTrack, TBM_SETRANGE, TRUE, MAKELPARAM(10, 100));
         for (int tic = 20; tic <= 90; tic += 10)
             SendMessageW(hOpacityTrack, TBM_SETTIC, 0, tic);   // 每 10 一刻度（AUTOTICKS 会 91 个太密）
@@ -2110,20 +2133,20 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         wchar_t opacity_buf[16];
         swprintf_s(opacity_buf, L"%d", opacity_cur);
         CreateWindowW(L"STATIC", opacity_buf,
-            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 268, 352, 34, 20, hwnd, (HMENU)1025, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 268, 380, 34, 20, hwnd, (HMENU)1025, nullptr, nullptr);
         // 亚克力模式下该行禁用（浓度固定为系统默认）
         OptionsUpdateOpacityEnabled(hwnd,
             CProcessNetPlugin::Instance().m_detail.GetPopupEffect());
 
         HWND hHostTooltip = CreateWindowW(L"BUTTON", TR(L"在浮窗中显示 TrafficMonitor 鼠标提示"),
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-            10, 380, 610, 22, hwnd, (HMENU)1026, nullptr, nullptr);
+            10, 408, 610, 22, hwnd, (HMENU)1026, nullptr, nullptr);
         if (CProcessNetPlugin::Instance().m_detail.GetShowHostTooltip())
             SendMessageW(hHostTooltip, BM_SETCHECK, BST_CHECKED, 0);
 
         // OK button
         CreateWindowW(L"BUTTON", L"OK",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 380, 416, 75, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 380, 444, 75, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
         // Cancel button
         CreateWindowW(L"BUTTON", L"Cancel",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 465, 416, 75, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
@@ -2155,6 +2178,14 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             // Debug-log checkbox
             bool dbg_logs = (SendMessageW(GetDlgItem(hwnd, 1006), BM_GETCHECK, 0, 0) == BST_CHECKED);
             plugin.m_detail.SetDebugLogs(dbg_logs);
+
+            // Crash-dump checkbox (issue #20): WER registration is added/removed
+            // right here, no restart needed
+            bool crash_dump = (SendMessageW(GetDlgItem(hwnd, 1026), BM_GETCHECK, 0, 0) == BST_CHECKED);
+            if (crash_dump != plugin.m_detail.GetCrashDump()) {
+                plugin.m_detail.SetCrashDump(crash_dump);
+                ApplyCrashDump(crash_dump, hwnd);
+            }
 
             // Show/hide Up/Down items master switch (issue #9)
             bool show_speed = (SendMessageW(GetDlgItem(hwnd, 1013), BM_GETCHECK, 0, 0) == BST_CHECKED);
@@ -2329,7 +2360,7 @@ ITMPlugin::OptionReturn CProcessNetPlugin::ShowOptionsDialog(void* hParent) {
         L"ProcessNetMonitorOptionsDlg",
         TR(L"\x63D2\x4EF6\x8BBE\x7F6E"),
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        0, 0, 650, 516,
+        0, 0, 650, 544,
         (HWND)hParent, nullptr, GetModuleHandleW(NULL), nullptr
     );
     
