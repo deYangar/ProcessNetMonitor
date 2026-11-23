@@ -79,9 +79,10 @@ inline void FormatBytes(uint64_t bytes, wchar_t* buf, int n) {
 // settings.json "crash_dump" 开关控制）。root / key_path 可注入：生产环境
 // 传 HKLM + PNM_WerLocalDumpsKey()，自动化验证传 HKCU 临时键，不碰真实登记。
 // 登记与移除固定走 64 位注册表视图（KEY_WOW64_64KEY）：WER 只读 64 位视图，
-// 崩溃的哪怕是 32 位进程也一样（2026-11-24 实测：32 位进程崩溃时系统派的是
-// SysWOW64\WerFault.exe，但 WOW6432Node 视图里的登记不生效，转储退回
-// %LOCALAPPDATA%\CrashDumps；同一份登记写到 64 位视图才落进 DumpFolder）。
+// 崩溃的哪怕是 32 位进程也一样（2026-11-24 在 Windows 11 build 26300 上实测，
+// 更老的系统没测：32 位进程崩溃时系统派的是 SysWOW64\WerFault.exe，但
+// WOW6432Node 视图里的登记不生效，转储退回 %LOCALAPPDATA%\CrashDumps；
+// 同一份登记写到 64 位视图才落进 DumpFolder）。
 // 此前两边都不带标志，x86 版的登记一直落在 WOW6432Node 视图，等于没登记。
 // 32 位 Windows 上这个标志被系统忽略，行为不变。
 // ============================================================
