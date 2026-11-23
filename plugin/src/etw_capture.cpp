@@ -300,10 +300,11 @@ void EtwCapture::Stop() {
         if (h != INVALID_PROCESSTRACE_HANDLE) CloseTrace(h);
     }
     if (m_thread.joinable()) {
-        for (int i = 0; i < 30 && m_running; i++) Sleep(100);
-        if (m_thread.joinable()) {
-            try { m_thread.join(); } catch (...) { m_thread.detach(); }
-        }
+        // 直接 join，不再先轮询等 m_running 翻 false。进程退出路径下（ExitProcess，Win8+）
+        // 其它线程已先被杀，没人会把 m_running 置 false，轮询只能干等满 30×100ms；而随后的
+        // join 对已结束的线程本来就是立即返回——这 3 秒是纯浪费（issue #20）。线程还活着时
+        // （显式停止，或 Win7 的进程退出）join 自己会等到它退出，会话已在上面停掉。
+        try { m_thread.join(); } catch (...) { m_thread.detach(); }
     }
     m_running = false;
 }
