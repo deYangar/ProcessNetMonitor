@@ -35,43 +35,10 @@ static LRESULT CALLBACK DetailStaticWndProc(HWND hwnd, UINT msg, WPARAM wp, LPAR
 
 static ULONGLONG WallClockMs() { return (ULONGLONG)time(NULL) * 1000; }
 
-// Local midnight (00:00:00) of (today + day_offset) as a UTC Unix-ms timestamp.
-// day_offset: 0 = today, -1 = yesterday, -2 = day before yesterday, ...
-// WallClockMs() stores UTC Unix-ms; history tabs are aligned to the user's
-// local calendar day (issue #9: "24h" rolls across two calendar days, which
-// nobody reads naturally).
-static ULONGLONG LocalDayStartUnixMs(int day_offset) {
-    time_t now = time(NULL);
-    struct tm local_tm;
-    localtime_s(&local_tm, &now);
-    local_tm.tm_hour = 0;
-    local_tm.tm_min = 0;
-    local_tm.tm_sec = 0;
-    // mktime 把 tm 字段当本地时间 → 返回本地午夜的 UTC 时间戳。
-    // （以前误用 _mkgmtime：字段被当 UTC，结果偏移了时区，
-    //   凌晨时段“今日”区间倒置，永远查不到数据）
-    time_t midnight = mktime(&local_tm);
-    return (ULONGLONG)(midnight + (time_t)day_offset * 86400) * 1000ULL;
-}
-
-// 任意 wall-clock 毫秒所在自然日的本地 00:00（UTC 毫秒）
-static ULONGLONG LocalDayStartOf(ULONGLONG wall_ms) {
-    time_t t = (time_t)(wall_ms / 1000);
-    struct tm local_tm;
-    localtime_s(&local_tm, &t);
-    local_tm.tm_hour = 0;
-    local_tm.tm_min = 0;
-    local_tm.tm_sec = 0;
-    time_t midnight = mktime(&local_tm);
-    return (ULONGLONG)midnight * 1000ULL;
-}
-
 CDetailWindow::CDetailWindow() {
     s_instance = this;
     m_dark_mode = IsDarkMode();
     m_dark_mode_tick = GetTickCount64();
-    m_session_start_tick = GetTickCount64();
-    m_history_start_tick = WallClockMs();
     m_last_save_tick = GetTickCount64();  // prevent immediate overwrite on first UpdateData
 }
 
@@ -708,91 +675,15 @@ void CDetailWindow::ClearHistory() {
         m_hourly_tick = 0;
         m_hourly_dirty = true;
     }
-    m_history.clear();
     m_history_exe_paths.clear();
     m_rows.clear();
     m_hist_total_recv = 0;
     m_hist_total_sent = 0;
-    m_history_start_tick = WallClockMs();
     m_history_dirty = true;
 
     SaveHistory();
 
     if (m_visible) InvalidateRect(m_hwnd, NULL, FALSE);
-}
-
-void CDetailWindow::CompressHistory() {
-    const ULONGLONG now = WallClockMs();
-    using History = pnm::HourlyHistory;
-    const ULONGLONG today = History::DayStart(now);
-    for (auto& [name, h] : m_history) {
-        // raw → min: downsample to 1 entry per minute
-        // SUM deltas within each window (not last cumulative)
-        ULONGLONG min_cutoff = now - 120000;
-        while (!h.raw.empty() && h.raw.front().tick < min_cutoff) {
-            ULONGLONG win_end = h.raw.front().tick + 60000;
-            HistorySnapshot acc = { 0, 0, 0, false };
-            while (!h.raw.empty() && h.raw.front().tick < win_end && h.raw.front().tick < min_cutoff) {
-                acc.tick = h.raw.front().tick;
-                acc.cum_recv += h.raw.front().cum_recv;
-                acc.cum_sent += h.raw.front().cum_sent;
-                h.raw.pop_front();
-            }
-            h.min.push_back(acc);
-        }
-        while ((int)h.min.size() > MAX_MIN) h.min.pop_front();
-
-        // min → hour: SUM deltas within 1-hour windows
-        ULONGLONG hour_cutoff = now - 7200000;
-        while (!h.min.empty() && h.min.front().tick < hour_cutoff) {
-            ULONGLONG win_end = h.min.front().tick + 3600000;
-            HistorySnapshot acc = { 0, 0, 0, false };
-            while (!h.min.empty() && h.min.front().tick < win_end && h.min.front().tick < hour_cutoff) {
-                acc.tick = h.min.front().tick;
-                acc.cum_recv += h.min.front().cum_recv;
-                acc.cum_sent += h.min.front().cum_sent;
-                h.min.pop_front();
-            }
-            h.hour.push_back(acc);
-        }
-        while ((int)h.hour.size() > MAX_HOUR) h.hour.pop_front();
-
-        // hour → day: SUM deltas within 1-day windows
-        // SUM deltas within natural days (local midnight aligned)
-        ULONGLONG day_cutoff = now - 172800000;
-        while (!h.hour.empty() && h.hour.front().tick < day_cutoff) {
-            ULONGLONG day_start = LocalDayStartOf(h.hour.front().tick);
-            ULONGLONG win_end = day_start + 86400000;
-            HistorySnapshot acc = { day_start, 0, 0, false };
-            while (!h.hour.empty() && h.hour.front().tick < win_end && h.hour.front().tick < day_cutoff) {
-                acc.cum_recv += h.hour.front().cum_recv;
-                acc.cum_sent += h.hour.front().cum_sent;
-                h.hour.pop_front();
-            }
-            h.day.push_back(acc);
-        }
-        while ((int)h.day.size() > MAX_DAY) h.day.pop_front();
-    }
-}
-
-void CDetailWindow::GetMergedSnapshots(const ProcessHistory& h,
-    std::vector<const HistorySnapshot*>& out, ULONGLONG start_ms, ULONGLONG end_ms) const {
-    // Binary search: deques are sorted by tick; collect entries in
-    // [start_ms, end_ms). Each tier (day/hour/min/raw) covers a disjoint
-    // time span after compression, so the same instant is never counted
-    // twice.
-    auto collect = [&](const std::deque<HistorySnapshot>& dq) {
-        auto it = std::lower_bound(dq.begin(), dq.end(), start_ms,
-            [](const HistorySnapshot& s, ULONGLONG c) { return s.tick < c; });
-        for (; it != dq.end(); ++it) {
-            if (it->tick >= end_ms) break;
-            out.push_back(&(*it));
-        }
-    };
-    collect(h.day);
-    collect(h.hour);
-    collect(h.min);
-    collect(h.raw);
 }
 
 void CDetailWindow::BuildHistoryRows() {
@@ -898,28 +789,6 @@ void CDetailWindow::BuildHistoryRows() {
 // Persistence
 // ============================================================
 
-static void WriteDQ(FILE* f, const std::deque<CDetailWindow::HistorySnapshot>& dq) {
-    uint32_t n = (uint32_t)dq.size(); fwrite(&n, 4, 1, f);
-    for (auto& s : dq) {
-        fwrite(&s.tick, sizeof(ULONGLONG), 1, f);
-        fwrite(&s.cum_recv, sizeof(uint64_t), 1, f);
-        fwrite(&s.cum_sent, sizeof(uint64_t), 1, f);
-    }
-}
-static bool ReadDQ(FILE* f, std::deque<CDetailWindow::HistorySnapshot>& dq, int max_n, ULONGLONG max_age, ULONGLONG now) {
-    uint32_t n; if (fread(&n, 4, 1, f) != 1 || n > (uint32_t)max_n + 100) return false;
-    for (uint32_t i = 0; i < n; i++) {
-        CDetailWindow::HistorySnapshot s;
-        s.loaded = true;  // data from disk (old session)
-        if (fread(&s.tick, sizeof(ULONGLONG), 1, f) != 1) return false;
-        if (fread(&s.cum_recv, sizeof(uint64_t), 1, f) != 1) return false;
-        if (fread(&s.cum_sent, sizeof(uint64_t), 1, f) != 1) return false;
-        if (max_age > 0 && now > s.tick && now - s.tick > max_age) continue;
-        dq.push_back(s);
-    }
-    return true;
-}
-
 void CDetailWindow::SaveHistory() {
     if (m_config_dir.empty()) { OutputDebugStringW(L"[PNM] SaveHistory: config_dir empty!"); return; }
     CreateDirectoryW(m_config_dir.c_str(), NULL);
@@ -964,211 +833,10 @@ void CDetailWindow::SaveHourlyHistory() {
     }
 }
 
-bool CDetailWindow::MigrateLegacyHistoryToHourly() {
-    if (m_config_dir.empty() || !m_hourly_writable || m_hourly.legacyMerged) return false;
-    const auto migration_now = WallClockMs();
-    const auto oldest = pnm::HourlyHistory::Oldest(migration_now);
-
-    struct LegacyValue {
-        int tier = 99;
-        uint64_t down = 0;
-        uint64_t up = 0;
-    };
-    std::map<std::tuple<std::u16string, ULONGLONG, bool>, LegacyValue> values;
-    auto add_queue = [&](const ProcessHistory& history,
-                         const std::deque<HistorySnapshot>& queue, int tier) {
-        for (const auto& snapshot : queue) {
-            const bool is_daily = tier == 3;
-            const auto bucket = is_daily ? pnm::HourlyHistory::DayStart(snapshot.tick) : snapshot.tick;
-            // A daily aggregate covers its entire local day. Keep it when any
-            // part of that day overlaps the retained range.
-            if (is_daily ? bucket > migration_now || bucket + pnm::HourlyHistory::Day <= oldest
-                         : snapshot.tick < oldest || snapshot.tick > migration_now) continue;
-            const std::u16string name(history.name.begin(), history.name.end());
-            auto key = std::make_tuple(name, snapshot.tick, is_daily);
-            auto found = values.find(key);
-            const auto down = snapshot.cum_recv;
-            const auto up = snapshot.cum_sent;
-            if (found == values.end()) {
-                values.emplace(std::move(key), LegacyValue{ tier, down, up });
-            } else if (tier < found->second.tier) {
-                found->second = LegacyValue{ tier, down, up };
-            } else if (tier == 3) {
-                found->second.down = pnm::HourlyHistory::SaturatingAdd(found->second.down, down);
-                found->second.up = pnm::HourlyHistory::SaturatingAdd(found->second.up, up);
-            }
-        }
-    };
-    for (const auto& [name, history] : m_history) {
-        add_queue(history, history.raw, 0);
-        add_queue(history, history.min, 1);
-        add_queue(history, history.hour, 2);
-        add_queue(history, history.day, 3);
-    }
-    auto merged = m_hourly;
-    std::map<std::tuple<std::u16string, ULONGLONG, bool>, LegacyValue> by_bucket;
-    for (const auto& [key, value] : values) {
-        const auto& [name, tick, is_daily] = key;
-        const auto day_start = pnm::HourlyHistory::DayStart(tick);
-        const auto bucket_tick = is_daily ? day_start
-            : day_start + (tick - day_start) / pnm::HourlyHistory::Hour * pnm::HourlyHistory::Hour;
-        const auto bucket_key = std::make_tuple(name, bucket_tick, is_daily);
-        auto [it, inserted] = by_bucket.emplace(bucket_key, LegacyValue{ value.tier, value.down, value.up });
-        if (!inserted) {
-            it->second.down = pnm::HourlyHistory::SaturatingAdd(it->second.down, value.down);
-            it->second.up = pnm::HourlyHistory::SaturatingAdd(it->second.up, value.up);
-        }
-    }
-    for (const auto& [key, value] : by_bucket) {
-        const auto& [name, tick, is_daily] = key;
-        const auto& table = is_daily ? m_hourly.daily : m_hourly.buckets;
-        const auto existing = table.find(tick);
-        if (existing != table.end() && existing->second.count(name)) continue;
-        if (value.down || value.up) {
-            const bool inserted = is_daily ? merged.SetDayTotal(tick, name, value.down, value.up)
-                                           : merged.SetBucketTotal(tick, name, value.down, value.up);
-            if (!inserted) {
-            OutputDebugStringW(L"[PNM] Legacy migration exceeds database limits.\n");
-            return false;
-            }
-        }
-    }
-    merged.legacyMerged = true;
-    m_hourly = std::move(merged);
-    m_hourly.Prune(WallClockMs());
-    m_hourly_dirty = true;
-    SaveHourlyHistory();
-    return !m_hourly_dirty;
-}
-
-void CDetailWindow::RebuildHistoryFromHourly() {
-    m_history.clear();
-    ULONGLONG earliest = ULLONG_MAX;
-    for (const auto& [hour, apps] : m_hourly.buckets) {
-        const auto history_tick = hour;
-        earliest = min(earliest, history_tick);
-        for (const auto& [name16, usage] : apps) {
-            std::wstring name(name16.begin(), name16.end());
-            auto& history = m_history[name];
-            history.name = name;
-            HistorySnapshot snapshot = { history_tick, usage.down, usage.up, true };
-            history.hour.push_back(snapshot);
-        }
-    }
-    for (const auto& [day, apps] : m_hourly.daily) {
-        earliest = min(earliest, day);
-        for (const auto& [name16, usage] : apps) {
-            std::wstring name(name16.begin(), name16.end());
-            auto& history = m_history[name];
-            history.name = name;
-            history.day.push_back({ day, usage.down, usage.up, true });
-        }
-    }
-    if (earliest != ULLONG_MAX) m_history_start_tick = earliest;
-    m_history_dirty = true;
-}
-
 void CDetailWindow::LoadHistory() {
-    if (m_config_dir.empty()) { OutputDebugStringW(L"[PNM] LoadHistory: config_dir empty!"); return; }
+    // Only PNH1 is loaded; leave the previous release's file untouched.
     LoadHourlyHistory();
-
-    RebuildHistoryFromHourly();
-    // Do not import the legacy history.dat. It is retained as a backup only.
-    if (!m_hourly_writable) return;
-    return;
-    /*
-    wchar_t path[MAX_PATH];
-    swprintf_s(path, MAX_PATH, L"%s\\history.dat", m_config_dir.c_str());
-    FILE* f = _wfopen(path, L"rb");
-    if (!f) { OutputDebugStringW(L"[PNM] LoadHistory: file not found"); return; }
-    uint32_t magic, version, count;
-    if (fread(&magic, 4, 1, f) != 1 || magic != 0x504E4D48) { fclose(f); return; }
-    if (fread(&version, 4, 1, f) != 1 || version < 1 || version > 4) { fclose(f); return; }
-    if (fread(&count, 4, 1, f) != 1 || count > pnm::HourlyHistory::MaxRows) { fclose(f); return; }
-    ULONGLONG max_age = MS_PER_YEAR;
-    // Version 2 stored GetTickCount64() ticks (uptime); version 3 stores wall-clock ms.
-    // Convert old ticks to wall-clock using the offset at load time.
-    ULONGLONG uptime_now = GetTickCount64();
-    ULONGLONG wall_now = WallClockMs();
-    bool needs_tick_convert = (version < 3);   // uptime ticks → wall-clock
-    bool needs_delta_convert = (version < 4);  // cumulative → delta
-    ULONGLONG readq_now = needs_tick_convert ? uptime_now : wall_now;
-    uint32_t i = 0;
-    for (; i < count; i++) {
-        uint32_t nl; if (fread(&nl, 4, 1, f) != 1 || nl > 512) break;
-        std::wstring name(nl, L'\0'); if (fread(&name[0], sizeof(wchar_t), nl, f) != nl) break;
-        uint32_t pl; if (fread(&pl, 4, 1, f) != 1 || pl > MAX_PATH) break;
-        std::wstring exe_path(pl, L'\0'); if (fread(&exe_path[0], sizeof(wchar_t), pl, f) != pl) break;
-        auto& hist = m_history[name]; hist.name = name; hist.exe_path = exe_path;
-        if (version >= 2) {
-            if (!ReadDQ(f, hist.raw, MAX_RAW, max_age, readq_now)) break;
-            if (!ReadDQ(f, hist.min, MAX_MIN, max_age, readq_now)) break;
-            if (!ReadDQ(f, hist.hour, MAX_HOUR, max_age, readq_now)) break;
-            if (!ReadDQ(f, hist.day, MAX_DAY, max_age, readq_now)) break;
-        } else {
-            if (!ReadDQ(f, hist.raw, MAX_RAW, max_age, readq_now)) break;
-        }
-        // Convert old uptime ticks to wall-clock time
-        if (needs_tick_convert) {
-            auto convert = [&](std::deque<HistorySnapshot>& dq) {
-                for (auto& s : dq) {
-                    if (s.tick <= uptime_now)
-                        s.tick = wall_now - (uptime_now - s.tick);
-                    else
-                        s.tick = wall_now;
-                }
-            };
-            convert(hist.raw);
-            convert(hist.min);
-            convert(hist.hour);
-            convert(hist.day);
-        }
-        // Convert cumulative values to deltas (version < 4)
-        if (needs_delta_convert) {
-            auto to_delta = [](std::deque<HistorySnapshot>& dq) {
-                if (dq.size() < 2) return;
-                for (size_t i = dq.size() - 1; i > 0; i--) {
-                    uint64_t dr = (dq[i].cum_recv >= dq[i-1].cum_recv) ? (dq[i].cum_recv - dq[i-1].cum_recv) : dq[i].cum_recv;
-                    uint64_t ds = (dq[i].cum_sent >= dq[i-1].cum_sent) ? (dq[i].cum_sent - dq[i-1].cum_sent) : dq[i].cum_sent;
-                    dq[i].cum_recv = dr;
-                    dq[i].cum_sent = ds;
-                }
-                // First entry: treat as delta from 0
-                // (keep as-is, it's the first snapshot's cum which is reasonable as delta)
-            };
-            to_delta(hist.raw);
-            to_delta(hist.min);
-            to_delta(hist.hour);
-            to_delta(hist.day);
-        }
-    }
-    const bool complete = i == count && fgetc(f) == EOF && !ferror(f);
-    fclose(f);
-    if (!complete) {
-        m_history.clear();
-        OutputDebugStringW(L"[PNM] Legacy history is incomplete; migration skipped.\n");
-        return;
-    }
-
-    // Adjust m_history_start_tick to earliest surviving data (wall-clock ms)
-    ULONGLONG earliest = ULLONG_MAX;
-    for (auto& [name, h] : m_history) {
-        if (!h.min.empty() && h.min.front().tick < earliest) earliest = h.min.front().tick;
-        if (!h.hour.empty() && h.hour.front().tick < earliest) earliest = h.hour.front().tick;
-        if (!h.day.empty() && h.day.front().tick < earliest) earliest = h.day.front().tick;
-    }
-    if (earliest < m_history_start_tick && earliest != ULLONG_MAX) {
-        m_history_start_tick = earliest;
-    }
-    for (const auto& [name, history] : m_history) {
-        if (!history.exe_path.empty()) m_history_exe_paths[name] = history.exe_path;
-    }
-    MigrateLegacyHistoryToHourly();
-    RebuildHistoryFromHourly();
-    wchar_t dbg[128];
-    swprintf_s(dbg, 128, L"[PNM] LoadHistory: loaded %u processes, earliest=%llu", (unsigned)m_history.size(), earliest);
-    OutputDebugStringW(dbg);
-    */
+    m_history_dirty = true;
 }
 
 // ============================================================

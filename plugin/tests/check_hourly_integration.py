@@ -9,6 +9,8 @@ def method(signature):
 
 
 assert 'legacyMerged' not in method('LoadHistory()')
+assert 'MigrateLegacyHistoryToHourly' not in source
+assert 'history.dat"' not in source  # no old-file open/write/delete path
 
 for name in ('RebuildRows()', 'ResortRows()', 'SortByColumn(', 'HitTestRow(',
              'OnLButtonDblClk(', 'OnRButtonDown(', 'DrawTableHeader('):

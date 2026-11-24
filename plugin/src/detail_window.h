@@ -96,22 +96,6 @@ public:
     // History time range (natural-day aligned, local midnight)
     enum TimeRange { TR_TODAY = 0, TR_YESTERDAY, TR_3D, TR_7D, TR_30D };
 
-    // History data types (public for persistence helpers)
-    struct HistorySnapshot {
-        ULONGLONG tick;
-        uint64_t cum_recv;
-        uint64_t cum_sent;
-        bool loaded = false;  // true = loaded from disk (old session)
-    };
-    struct ProcessHistory {
-        std::wstring name;
-        std::wstring exe_path;
-        std::deque<HistorySnapshot> raw;
-        std::deque<HistorySnapshot> min;
-        std::deque<HistorySnapshot> hour;
-        std::deque<HistorySnapshot> day;
-    };
-
 private:
     // Window
     static LRESULT CALLBACK StaticWndProc(HWND, UINT, WPARAM, LPARAM);
@@ -233,8 +217,6 @@ private:
         bool IsMultiProcess() const { return sub_processes.size() > 1; }
     };
 
-    void CompressHistory();
-    void GetMergedSnapshots(const ProcessHistory& h, std::vector<const HistorySnapshot*>& out, ULONGLONG start_ms, ULONGLONG end_ms) const;
     uint64_t m_hist_total_recv = 0;  // summary for current time range
     uint64_t m_hist_total_sent = 0;
 
@@ -259,32 +241,17 @@ private:
     // Cached raw stats for tab switching
     std::vector<ProcTraffic> m_cached_stats;
 
-    // History: process name -> history
-    std::unordered_map<std::wstring, ProcessHistory> m_history;
+    // History: executable paths observed this session
     std::unordered_map<std::wstring, std::wstring> m_history_exe_paths;
     // Last known cumulative bytes per process (for delta calculation in RecordHistory)
     struct CumBytes { uint64_t recv; uint64_t sent; };
-    std::unordered_map<std::wstring, CumBytes> m_last_cum;
     pnm::HourlyHistory m_hourly;
     std::unordered_map<std::wstring, CumBytes> m_hourly_previous;
     ULONGLONG m_hourly_tick = 0, m_hourly_wall = 0;
     bool m_hourly_etw = false;
     bool m_hourly_dirty = false, m_hourly_writable = false;
     void SaveHourlyHistory();
-    void RebuildHistoryFromHourly();
-    bool MigrateLegacyHistoryToHourly();
-    ULONGLONG m_session_start_tick = 0;  // GetTickCount64 when TM started
-    ULONGLONG m_history_start_tick = 0;  // wall-clock ms when plugin started
     ULONGLONG m_last_save_tick = 0;
-    // Tier limits & time constants
-    static const int MAX_RAW = 3600;      // ~1 hour at 1/sec
-    static const int MAX_MIN = 1440;      // ~24 hours at 1/min
-    static const int MAX_HOUR = 168;      // ~7 days at 1/hour
-    static const int MAX_DAY = 365;       // ~1 year at 1/day
-    static constexpr ULONGLONG MS_PER_HOUR  = 3600000ULL;
-    static constexpr ULONGLONG MS_PER_DAY   = 86400000ULL;
-    static constexpr ULONGLONG MS_PER_WEEK  = 604800000ULL;
-    static constexpr ULONGLONG MS_PER_YEAR  = 365ULL * 24 * 3600 * 1000;
 
     // Time range filter (history tab)
     TimeRange m_time_range = TR_TODAY;
