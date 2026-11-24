@@ -312,6 +312,10 @@ int CProcessNetItem::GetItemWidthEx(void* hDC) const {
 }
 
 void CProcessNetItem::DrawItem(void* hDC, int x, int y, int w, int h, bool dark_mode) {
+    // 「退出前先停」的安装入口之一：宿主重绘时在主线程调到这里。TM 1.86 的 DataRequired
+    // 来自监控线程，在那里装不上（子类化必须在窗口属主线程做），见 TryArmExitWatch。
+    if (!g_pnm_exit_watch_armed.load(std::memory_order_acquire) && !g_shutting_down)
+        CProcessNetPlugin::Instance().TryArmExitWatch();
     if (m_dir == DIR_TRANSPARENT) return;  // invisible area, draw nothing
     HDC hdc = (HDC)hDC;
 
@@ -974,28 +978,40 @@ void CProcessNetPlugin::StopRefreshTimer() {
 //
 // 安装时机：OnInitialize 在 TM 的 LoadPlugins 里就被调了，早于主窗创建
 // （TrafficMonitor.cpp 里 LoadPlugins 在 DoModal 之前），所以初始化时主窗
-// 还不存在。在 DataRequired 里懒装：TM 1.86 的 DataRequired 在主线程，
-// 装上即止；1.85.x 的 DataRequired 可能来自工作线程，那里找不到属主窗口，
-// 每秒最多再找一次。
+// 还不存在，只能懒装。两个入口：
+//   - DataRequired：TM 1.86 在监控线程里调它（TrafficMonitorDlg.cpp 的
+//     DoMonitorAcquisition，MonitorThreadCallback 里），不在主线程。在这里只能
+//     把主窗找出来记下，装不了
+//   - DrawItem：宿主重绘时在主线程调。子类化必须在这会儿做
+// 2026-11-24 第一版只在 DataRequired 里装、还要求它就在主线程上：验证程序里
+// 取数据和主窗在同一线程所以测过了，真 TM 上一次都没装上（退出后会话还在）。
 // ============================================================
 namespace {
 const wchar_t kTmMainClass[] = L"TrafficMonitor_r7XZaS4p";
 constexpr UINT_PTR kExitWatchSubclassId = 0x504E4D45;   // 'PNME'
-HWND g_tm_main_hwnd = nullptr;                   // 只在主线程读写
+HWND g_tm_main_hwnd = nullptr;                   // 已装上退出监听的主窗，只在主线程读写
+std::atomic<HWND> g_tm_main_candidate{ nullptr };   // 找到的 TM 主窗（任何线程读写）
 std::atomic<ULONGLONG> g_exit_watch_try_tick{ 0 };
 }
 std::atomic<bool> g_pnm_exit_watch_armed{ false };
 
+// 是不是本进程的 TM 主窗：同进程 + 类名匹配。句柄值会被系统回收再分配给别的窗口，
+// 所以每次用之前都重新认一遍，不凭记下来的句柄直接装。
+static bool IsTmMainWindow(HWND h) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(h, &pid);
+    if (pid != GetCurrentProcessId()) return false;
+    wchar_t cls[64] = {};
+    GetClassNameW(h, cls, 64);
+    return wcscmp(cls, kTmMainClass) == 0;
+}
+
+// 同进程、类名匹配的顶层窗口（不限线程）
 static HWND FindTmMainWindow() {
-    struct Ctx { DWORD pid; DWORD tid; HWND found; } ctx{ GetCurrentProcessId(), GetCurrentThreadId(), nullptr };
+    struct Ctx { HWND found; } ctx{ nullptr };
     EnumWindows([](HWND h, LPARAM lp) -> BOOL {
-        auto* c = reinterpret_cast<Ctx*>(lp);
-        DWORD pid = 0;
-        if (GetWindowThreadProcessId(h, &pid) != c->tid || pid != c->pid) return TRUE;
-        wchar_t cls[64] = {};
-        GetClassNameW(h, cls, 64);
-        if (wcscmp(cls, kTmMainClass) != 0) return TRUE;
-        c->found = h;
+        if (!IsTmMainWindow(h)) return TRUE;
+        reinterpret_cast<Ctx*>(lp)->found = h;
         return FALSE;
     }, reinterpret_cast<LPARAM>(&ctx));
     return ctx.found;
@@ -1015,11 +1031,18 @@ static LRESULT CALLBACK ExitWatchProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
 }
 
 void CProcessNetPlugin::TryArmExitWatch() {
-    ULONGLONG now = GetTickCount64();
-    if (now - g_exit_watch_try_tick.load() < 1000) return;   // 没装上时每秒最多找一次
-    g_exit_watch_try_tick.store(now);
-    HWND tm = FindTmMainWindow();   // 只会返回本线程的窗口，所以子类化是在属主线程做的
-    if (!tm) return;
+    // 任何线程都可以调（DataRequired、DrawItem 两个入口），但子类化必须在窗口属主线程做：
+    // 不在属主线程就只把主窗记下来，等属主线程的入口来装。
+    HWND tm = g_tm_main_candidate.load();
+    if (!tm || !IsTmMainWindow(tm)) {
+        ULONGLONG now = GetTickCount64();
+        if (now - g_exit_watch_try_tick.load() < 1000) return;   // 没找到时每秒最多找一次
+        g_exit_watch_try_tick.store(now);
+        tm = FindTmMainWindow();
+        if (!tm) return;
+        g_tm_main_candidate.store(tm);
+    }
+    if (GetWindowThreadProcessId(tm, nullptr) != GetCurrentThreadId()) return;
     if (!SetWindowSubclass(tm, ExitWatchProc, kExitWatchSubclassId, 0)) return;
     g_tm_main_hwnd = tm;
     g_pnm_exit_watch_armed = true;
