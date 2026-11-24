@@ -106,6 +106,7 @@ private:
         TRACEHANDLE consumer;   // OpenTraceW handle (INVALID... on failure)
         bool own;               // we created the session
         TRACEHANDLE session;    // StartTraceW handle when own
+        bool system_logger;     // true = L1 自建会话 PnmNetTrace；false = L2 NT Kernel Logger
     };
     SessionResult TryStartSession(bool system_logger);
     static void WINAPI Callback(PEVENT_RECORD rec);
@@ -143,6 +144,7 @@ private:
     std::atomic<TRACEHANDLE> m_cur_consumer{INVALID_PROCESSTRACE_HANDLE};
     std::atomic<bool> m_own_session{false};
     TRACEHANDLE m_own_session_handle = 0;
+    std::atomic<bool> m_own_syslogger{false};   // 当前自建会话是哪一层（退出路径要区分）
 
     std::mutex m_mutex;                       // protects m_cum + shape cache
     std::map<ShapeKey, ShapeInfo> m_shapes;

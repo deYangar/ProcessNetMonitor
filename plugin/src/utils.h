@@ -6,6 +6,13 @@
 // DLL's HINSTANCE (captured in tooltip_popup.cpp DllMain)
 extern HINSTANCE s_dll_hinst;
 
+// 进程退出且其它线程已被系统结束。Win8 起的 ExitProcess 先结束其它线程、再按初始化的
+// 反序调 DllMain，走到我们的 DllMain 时，晚于本 DLL 初始化的模块都已卸载完。
+// FreeLibrary 卸载、Win7 的进程退出（先调 DllMain 再结束线程）都是 false。
+// 置位后退出路径的约定：不等待、不加锁、不调别的 DLL 的功能（只留落盘）。自建会话不停，
+// 留给下次启动接管；兜底的 NT Kernel Logger 是例外，见 EtwCapture::Stop()。
+extern bool g_pnm_exit_threads_dead;
+
 // Debug output directory: <dll dir>\ProcessNetMonitor\debug\ - sits next to
 // the plugin's config folder (history.dat / settings.json live in
 // <dll dir>\ProcessNetMonitor\) so everything plugin-related stays in one

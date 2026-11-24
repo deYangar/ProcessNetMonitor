@@ -9,6 +9,7 @@
 #endif
 #include "etw_capture.h"
 #include "utils.h"
+#include "tooltip_popup.h"   // g_shutting_down（Callback 入口短路）
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
@@ -287,6 +288,33 @@ bool EtwCapture::Start() {
 }
 
 void EtwCapture::Stop() {
+    if (g_pnm_exit_threads_dead) {
+        // 进程退出（Win8+）。消费线程已被系统结束，晚于本 DLL 初始化的系统模块都已卸载。
+        m_stop = true;
+        if (m_own_session.load() && m_own_session_handle) {
+            if (m_own_syslogger.load()) {
+                // L1：不停。ControlTraceW(STOP) 会让系统做一轮信息采集（显卡、网卡、磁盘、
+                // 服务……），采集要调的模块此刻都已卸载。issue #20：Windows 10 上走到「网卡」
+                // 那项时调进 dhcpcsvc6，它的堆句柄已被自己的卸载清零，每次托盘退出都崩一次。
+                // 会话留在内核里，由下次启动的 TryStartSession 按残留会话停掉重起。
+                LogLine(L"process exit: session '%s' left running, next start reclaims it",
+                        kSessionName);
+            } else {
+                // L2：NT Kernel Logger 是系统公用的名字，不能留。照旧停掉。
+                // 这里有和上面相同的风险，属于已知残余问题。
+                EVENT_TRACE_PROPERTIES sp;
+                memset(&sp, 0, sizeof(sp));
+                sp.Wnode.BufferSize = sizeof(EVENT_TRACE_PROPERTIES);
+                ControlTraceW(m_own_session_handle, nullptr, &sp, EVENT_TRACE_CONTROL_STOP);
+                LogLine(L"process exit: NT Kernel Logger stopped (CONTROL_STOP)");
+            }
+            m_own_session = false;       // 之后任何一次 Stop() 都不会再碰会话
+            m_own_session_handle = 0;
+        }
+        if (m_thread.joinable()) m_thread.detach();   // 线程已死：不等待，但必须解除关联
+        m_running = false;
+        return;
+    }
     if (!m_running && !m_thread.joinable()) return;
     m_stop = true;
 
@@ -300,10 +328,10 @@ void EtwCapture::Stop() {
         if (h != INVALID_PROCESSTRACE_HANDLE) CloseTrace(h);
     }
     if (m_thread.joinable()) {
-        // 直接 join，不再先轮询等 m_running 翻 false。进程退出路径下（ExitProcess，Win8+）
-        // 其它线程已先被杀，没人会把 m_running 置 false，轮询只能干等满 30×100ms；而随后的
-        // join 对已结束的线程本来就是立即返回——这 3 秒是纯浪费（issue #20）。线程还活着时
-        // （显式停止，或 Win7 的进程退出）join 自己会等到它退出，会话已在上面停掉。
+        // 直接 join，不再先轮询等 m_running 翻 false。走到这里线程一定活着（显式停止、
+        // FreeLibrary 卸载，或 Win7 的进程退出——先调 DllMain 再结束线程），join 自己会
+        // 等到它退出，会话已在上面停掉。Win8+ 的进程退出在函数开头就返回了，到不了这里
+        // （issue #20）。
         try { m_thread.join(); } catch (...) { m_thread.detach(); }
     }
     m_running = false;
@@ -328,7 +356,7 @@ void EtwCapture::GetConnState(wchar_t* out, size_t cap) const {
 }
 
 EtwCapture::SessionResult EtwCapture::TryStartSession(bool system_logger) {
-    SessionResult r{ INVALID_PROCESSTRACE_HANDLE, false, 0 };
+    SessionResult r{ INVALID_PROCESSTRACE_HANDLE, false, 0, false };
     const wchar_t* name = system_logger ? kSessionName : KERNEL_LOGGER_NAMEW;
 
     EVENT_TRACE_LOGFILEW lf;
@@ -403,6 +431,7 @@ EtwCapture::SessionResult EtwCapture::TryStartSession(bool system_logger) {
     r.consumer = consumer;
     r.own = true;
     r.session = session;
+    r.system_logger = system_logger;
     SetConnState(L"self-started");
     LogLine(L"StartTrace('%s', %s) OK (own session, maxbuf=%u)", name,
             system_logger ? L"system logger" : L"NT Kernel Logger",
@@ -417,7 +446,7 @@ void EtwCapture::ConsumerLoop() {
         // ---- Layer waterfall: L1 private system logger (Win8+) -> L2 NT
         // Kernel Logger (only if free) -> give up this round; legacy capture
         // covers data via HasData() upstream, whole waterfall retries in 5s.
-        SessionResult r{ INVALID_PROCESSTRACE_HANDLE, false, 0 };
+        SessionResult r{ INVALID_PROCESSTRACE_HANDLE, false, 0, false };
         DWORD build = 0;
         if (PNM_GetOSBuild(build) && build >= 9200) {   // Win8+
             r = TryStartSession(true);
@@ -432,6 +461,7 @@ void EtwCapture::ConsumerLoop() {
             continue;
         }
 
+        m_own_syslogger = r.system_logger;
         m_own_session = r.own;
         m_own_session_handle = r.session;   // Stop() unblocks via this
         m_cur_consumer = r.consumer;
@@ -456,7 +486,10 @@ void EtwCapture::ConsumerLoop() {
 }
 
 void EtwCapture::Callback(PEVENT_RECORD rec) {
-    if (s_self) s_self->OnEvent(rec);
+    // g_shutting_down 在 DllMain 第一行置位。退出路径把消费线程 detach 的前提是「线程已先被
+    // 系统结束」；这个前提在 Win10 19045 / Win11 26300 有转储实证，Win8/8.1 没有。万一某
+    // 个版本上线程多活一瞬，回调会去碰正在析构的 m_shapes / m_cum——置位后什么都不碰。
+    if (s_self && !g_shutting_down) s_self->OnEvent(rec);
 }
 
 EtwCapture::ShapeInfo& EtwCapture::ResolveShape(PEVENT_RECORD rec, const ShapeKey& key) {

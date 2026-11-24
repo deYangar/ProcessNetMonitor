@@ -22,6 +22,7 @@
 CTooltipPopup* CTooltipPopup::s_instance = nullptr;
 HINSTANCE s_dll_hinst = nullptr;
 volatile bool g_shutting_down = false;
+bool g_pnm_exit_threads_dead = false;
 
 void SafeDestroyWindow(HWND hwnd) {
     if (!hwnd) return;
@@ -275,7 +276,7 @@ void CTooltipPopup::AnchorJudgeThrottled(const RECT& rc, ULONGLONG min_interval_
 }
 
 // Capture DLL instance handle for window class registration
-BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         s_dll_hinst = (HINSTANCE)hModule;
     } else if (reason == DLL_PROCESS_DETACH) {
@@ -284,11 +285,18 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
         // synchronous callbacks (third-party IME hooks can crash the host,
         // issue #7).
         g_shutting_down = true;
+        // reserved != NULL = 进程正在退出（FreeLibrary 卸载时为 NULL）。Win8 起的 ExitProcess
+        // 先结束其它线程、再按初始化的反序调 DllMain：走到这里时工作线程已死，晚于本 DLL
+        // 初始化的系统模块也已卸载完。此后不等待、不加锁、不调别的 DLL 的功能，只留落盘
+        // （ETW 会话怎么处理见 EtwCapture::Stop()）。
+        // Win7 是先调 DllMain 再结束线程，线程还活着，维持原来的干净收尾。
+        DWORD build = 0;
+        g_pnm_exit_threads_dead = (reserved != nullptr) && PNM_GetOSBuild(build) && build >= 9200;
         // Save history on DLL unload (destructor may not run)
         if (CDetailWindow::s_instance) {
             CDetailWindow::s_instance->SaveHistory(true);
         }
-        // Stop ETW capture cleanly
+        // Stop ETW capture. 进程退出时只解除线程关联、不停会话，见 EtwCapture::Stop()
         CProcessNetPlugin::Instance().StopEtwCapture();
         // Stop the signature verification worker (file IO must not outlive us)
         SignatureCache::Instance().Shutdown();
