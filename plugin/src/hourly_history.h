@@ -146,6 +146,12 @@ public:
         return changed;
     }
     bool Add(Number tick, const std::u16string& name, Number down, Number up, bool day = false) {
+        if (!down && !up) return false;
+        return Insert(tick, name, down, up, day);
+    }
+
+private:
+    bool Insert(Number tick, const std::u16string& name, Number down, Number up, bool day) {
         if (tick > MaxTick || name.empty() || name.size() > 512) return false;
         if (day && tick < Day - Offset) return false;
         if (tick < Day - Offset) return false;
@@ -170,6 +176,7 @@ public:
         ++rows_;
         return true;
     }
+public:
     bool Write(std::ostream& out) const {
         out.write("PNH1", 4);
         Put(out, 482, 4);
@@ -216,7 +223,7 @@ public:
             const auto& table = kind ? candidate.daily : candidate.buckets;
             const auto bucket = table.find(hour);
             if (!in || (bucket != table.end() && bucket->second.count(name)) ||
-                !candidate.Add(hour, name, down, up, kind == 1)) return false;
+                !candidate.Insert(hour, name, down, up, kind == 1)) return false;
         }
         if (version == 481) {
             const auto flags = Get(in, 1);
