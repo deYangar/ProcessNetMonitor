@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <istream>
 #include <map>
+#include <memory>
 #include <ostream>
 #include <string>
 #include <utility>
@@ -21,8 +22,9 @@ public:
     static constexpr Number MaxFile = 32ULL * 1024 * 1024;
     struct Usage { Number down = 0, up = 0; };
     using Apps = std::map<std::u16string, Usage>;
-    std::map<Number, Apps> buckets;
-    std::map<Number, Apps> daily;
+    using Table = std::map<Number, std::shared_ptr<const Apps>>;
+    Table buckets;
+    Table daily;
     bool legacyMerged = false;
 
     static Number DayStart(Number tick) {
@@ -43,7 +45,7 @@ public:
     Apps Summarize(Number start, Number end) const {
         Apps totals;
         for (auto it = daily.lower_bound(start); it != daily.end() && it->first < end; ++it) {
-            for (const auto& [name, usage] : it->second) {
+            for (const auto& [name, usage] : *it->second) {
                 auto& total = totals[name];
                 total.down = SaturatingAdd(total.down, usage.down);
                 total.up = SaturatingAdd(total.up, usage.up);
@@ -52,8 +54,8 @@ public:
         for (auto it = buckets.lower_bound(start); it != buckets.end() && it->first < end; ++it) {
             const auto day = DayStart(it->first);
             const auto daily_it = daily.find(day);
-            for (const auto& [name, usage] : it->second) {
-                if (daily_it != daily.end() && daily_it->second.count(name)) continue;
+            for (const auto& [name, usage] : *it->second) {
+                if (daily_it != daily.end() && daily_it->second->count(name)) continue;
                 auto& total = totals[name];
                 total.down = SaturatingAdd(total.down, usage.down);
                 total.up = SaturatingAdd(total.up, usage.up);
@@ -72,7 +74,7 @@ public:
     void Set(Number tick, const std::u16string& name, Number down, Number up) {
         if (tick > MaxTick || name.empty() || name.size() > 512 || down > MaxBytes || up > MaxBytes) return;
         const Number hour = DayStart(tick) + ((tick - DayStart(tick)) / Hour) * Hour;
-        auto& apps = buckets[hour];
+        auto& apps = Mutable(buckets[hour]);
         const auto it = apps.find(name);
         if (it == apps.end()) {
             const auto rowBytes = 27 + 2 * name.size();
@@ -88,7 +90,7 @@ public:
         if (tick > MaxTick || name.empty() || name.size() > 512 || down > MaxBytes || up > MaxBytes ||
             tick < Day - LegacyDayOffset) return false;
         const Number hour = DayStart(tick) + ((tick - DayStart(tick)) / Hour) * Hour;
-        auto& apps = buckets[hour];
+        auto& apps = Mutable(buckets[hour]);
         auto it = apps.find(name);
         if (it == apps.end()) {
             const auto rowBytes = 27 + 2 * name.size();
@@ -106,7 +108,7 @@ public:
         if (tick > MaxTick || tick < Day - LegacyDayOffset || name.empty() || name.size() > 512 ||
             down > MaxBytes || up > MaxBytes) return false;
         const Number day = DayStart(tick);
-        auto& apps = daily[day];
+        auto& apps = Mutable(daily[day]);
         auto it = apps.find(name);
         if (it == apps.end()) {
             const auto rowBytes = 27 + 2 * name.size();
@@ -125,8 +127,8 @@ public:
             const auto end = table->lower_bound(Oldest(now));
             changed |= end != table->begin();
             for (auto it = table->begin(); it != end; ++it) {
-                rows_ -= it->second.size();
-                for (const auto& app : it->second) bytes_ -= 27 + 2 * app.first.size();
+                rows_ -= it->second->size();
+                for (const auto& app : *it->second) bytes_ -= 27 + 2 * app.first.size();
             }
             table->erase(table->begin(), end);
         }
@@ -138,6 +140,11 @@ public:
     }
 
 private:
+    static Apps& Mutable(std::shared_ptr<const Apps>& apps) {
+        if (!apps) apps = std::make_shared<Apps>();
+        else if (!apps.unique()) apps = std::make_shared<Apps>(*apps);
+        return *std::const_pointer_cast<Apps>(apps);
+    }
     bool Insert(Number tick, const std::u16string& name, Number down, Number up, bool day) {
         if (tick > MaxTick || name.empty() || name.size() > 512) return false;
         if (day && tick < Day - LegacyDayOffset) return false;
@@ -145,37 +152,44 @@ private:
         auto& table = day ? daily : buckets;
         auto found = table.find(hour);
         if (found != table.end()) {
-            auto app = found->second.find(name);
-            if (app != found->second.end()) {
-                auto& value = app->second;
+            auto app = found->second->find(name);
+            if (app != found->second->end()) {
+                const auto value = app->second;
                 if (down > MaxBytes - value.down || up > MaxBytes - value.up) return false;
-                value.down += down;
-                value.up += up;
+                Mutable(found->second).at(name) = {value.down + down, value.up + up};
                 return down || up;
             }
         }
         const auto rowBytes = 27 + 2 * name.size();
         if (rows_ >= MaxRows || bytes_ + rowBytes > MaxFile || down > MaxBytes || up > MaxBytes) return false;
-        table[hour].emplace(name, Usage{down, up});
+        Mutable(table[hour]).emplace(name, Usage{down, up});
         bytes_ += rowBytes;
         ++rows_;
         return true;
     }
 public:
     bool Write(std::ostream& out) const {
+        char row[27 + 2 * 512];
+        auto cursor = row;
+        auto put = [&](Number value, unsigned bytes) {
+            for (unsigned i = 0; i < bytes; ++i) *cursor++ = static_cast<char>(value >> (8 * i));
+        };
         out.write("PNH1", 4);
-        Put(out, 482, 4);
-        Put(out, rows_, 4);
-        Put(out, legacyMerged ? 1 : 0, 1);
+        put(482, 4);
+        put(rows_, 4);
+        put(legacyMerged ? 1 : 0, 1);
+        out.write(row, cursor - row);
         for (const auto* table : {&buckets, &daily}) {
             for (const auto& [hour, apps] : *table) {
-                for (const auto& [name, usage] : apps) {
-                    Put(out, table == &daily, 1);
-                    Put(out, hour, 8);
-                    Put(out, usage.down, 8);
-                    Put(out, usage.up, 8);
-                    Put(out, name.size(), 2);
-                    for (auto unit : name) Put(out, unit, 2);
+                for (const auto& [name, usage] : *apps) {
+                    cursor = row;
+                    put(table == &daily, 1);
+                    put(hour, 8);
+                    put(usage.down, 8);
+                    put(usage.up, 8);
+                    put(name.size(), 2);
+                    for (auto unit : name) put(unit, 2);
+                    if (!out.write(row, cursor - row)) return false;
                 }
             }
         }
@@ -205,7 +219,7 @@ public:
             for (Number j = 0; j < units; ++j) name.push_back(static_cast<char16_t>(Get(in, 2)));
             const auto& table = kind ? candidate.daily : candidate.buckets;
             const auto bucket = table.find(hour);
-            if (!in || (bucket != table.end() && bucket->second.count(name)) ||
+            if (!in || (bucket != table.end() && bucket->second->count(name)) ||
                 !candidate.Insert(hour, name, down, up, kind == 1)) return false;
         }
         if (version == 481) {
@@ -221,9 +235,6 @@ public:
 private:
     std::size_t rows_ = 0;
     Number bytes_ = 13;
-    static void Put(std::ostream& out, Number value, unsigned bytes) {
-        for (unsigned i = 0; i < bytes; ++i) out.put(static_cast<char>((value >> (i * 8)) & 255));
-    }
     static Number Get(std::istream& in, unsigned bytes) {
         Number value = 0;
         for (unsigned i = 0; i < bytes; ++i) {

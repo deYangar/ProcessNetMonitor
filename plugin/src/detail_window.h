@@ -10,6 +10,7 @@
 #include "capture.h"
 #include "i18n.h"
 #include "hourly_history.h"
+#include "history_save.h"
 
 // Huorong-style detail window with sortable table, tabs, history, context menu
 class CDetailWindow {
@@ -45,7 +46,7 @@ public:
     LRESULT HandleMessage(UINT msg, WPARAM wp, LPARAM lp);
 
     // Persistence (called from plugin_main)
-    void SaveHistory();
+    void SaveHistory(bool flush = false);
     void LoadHistory();
     void LoadHourlyHistory();
     void SetConfigDir(const std::wstring& dir) { m_config_dir = dir; }
@@ -250,7 +251,7 @@ private:
     ULONGLONG m_hourly_tick = 0, m_hourly_wall = 0;
     bool m_hourly_etw = false;
     bool m_hourly_dirty = false, m_hourly_writable = false;
-    void SaveHourlyHistory();
+    pnm::HistorySave m_history_save;
     ULONGLONG m_last_save_tick = 0;
 
     // Time range filter (history tab)

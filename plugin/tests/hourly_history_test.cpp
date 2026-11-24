@@ -18,7 +18,7 @@ static void ClearThenRestartTwice() {
         History loaded;
         assert(loaded.Read(disk));
         assert(loaded.legacyMerged);
-        const auto& apps = loaded.buckets.begin()->second;
+        const auto& apps = *loaded.buckets.begin()->second;
         assert(!apps.count(u"deleted"));
         assert(apps.at(u"new").down == 70 && apps.at(u"new").up == 20);
         history = std::move(loaded);
@@ -32,7 +32,7 @@ static void ChartTotals() {
     assert(history.Add(day, u"two", 3, 10));
     assert(history.Add(day + History::Hour, u"one", 20, 7));
     const auto all = History::TotalUsage(history.SummarizeDay(day));
-    const auto selected = History::TotalUsage(history.buckets.at(day));
+    const auto selected = History::TotalUsage(*history.buckets.at(day));
     assert(all.down == 34 && all.up == 19);
     assert(selected.down == 14 && selected.up == 12);
 }
@@ -49,7 +49,7 @@ static void IdleSamplesDoNotUseCapacity() {
     assert(history.buckets.empty());
     assert(history.Add(day, u"down", 30, 0));
     assert(history.Add(day, u"up", 0, 40));
-    auto total = History::TotalUsage(history.buckets.at(day));
+    auto total = History::TotalUsage(*history.buckets.at(day));
     assert(total.down == 30 && total.up == 40);
 
     History old;
@@ -60,7 +60,7 @@ static void IdleSamplesDoNotUseCapacity() {
     bytes.at(13 + 1 + 8) = 0; // v482 row's download count, little endian
     std::stringstream input(bytes);
     assert(old.Read(input));
-    assert(old.buckets.at(day).at(u"idle").down == 0);
+    assert(old.buckets.at(day)->at(u"idle").down == 0);
 }
 
 static pnm::HistoryCalendar Zone(const wchar_t* key) {
@@ -96,7 +96,7 @@ static void LocalDaysAndPnh1() {
     assert(original.Write(disk));
     History loaded;
     assert(loaded.Read(disk));
-    assert(loaded.buckets.at(autumn_hours.at(2)).at(u"hour").up == 7);
+    assert(loaded.buckets.at(autumn_hours.at(2))->at(u"hour").up == 7);
     const auto legacy_tick = spring - History::LegacyDayOffset;
     const auto west_date = west.Date(legacy_tick);
     assert(loaded.Summarize(west.Start(west_date), west.Start(west_date + History::Day)).at(u"daily").down == 24);

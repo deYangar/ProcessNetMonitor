@@ -286,7 +286,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
         g_shutting_down = true;
         // Save history on DLL unload (destructor may not run)
         if (CDetailWindow::s_instance) {
-            CDetailWindow::s_instance->SaveHistory();
+            CDetailWindow::s_instance->SaveHistory(true);
         }
         // Stop ETW capture cleanly
         CProcessNetPlugin::Instance().StopEtwCapture();

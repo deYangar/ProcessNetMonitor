@@ -46,7 +46,7 @@ CDetailWindow::CDetailWindow() {
 CDetailWindow::~CDetailWindow() {
     OutputDebugStringW(L"[PNM] ~CDetailWindow: calling SaveHistory");
     SaveSettings();
-    SaveHistory();
+    if (!g_shutting_down) SaveHistory(true);
     OutputDebugStringW(L"[PNM] ~CDetailWindow: SaveHistory done");
     if (m_hwnd) {
         if (g_shutting_down) {
@@ -682,7 +682,7 @@ void CDetailWindow::ClearHistory() {
     m_hist_total_sent = 0;
     m_history_dirty = true;
 
-    SaveHistory();
+    SaveHistory(true);
 
     if (m_visible) InvalidateRect(m_hwnd, NULL, FALSE);
 }
@@ -792,10 +792,20 @@ void CDetailWindow::BuildHistoryRows() {
 // Persistence
 // ============================================================
 
-void CDetailWindow::SaveHistory() {
-    if (m_config_dir.empty()) { OutputDebugStringW(L"[PNM] SaveHistory: config_dir empty!"); return; }
-    CreateDirectoryW(m_config_dir.c_str(), NULL);
-    SaveHourlyHistory();
+void CDetailWindow::SaveHistory(bool flush) {
+    if (m_config_dir.empty() || !m_hourly_writable) return;
+    const auto status = m_history_save.Status();
+    if (!m_hourly_dirty && status != pnm::HistorySave::Failed &&
+        !(flush && status == pnm::HistorySave::Pending)) return;
+    const auto path = std::filesystem::path(m_config_dir) / L"history-hourly-v1.dat";
+    if (flush) {
+        const bool saved = g_shutting_down ? m_history_save.FlushAtDetach(path, m_hourly)
+                                           : m_history_save.Flush(path, m_hourly);
+        m_hourly_dirty = !saved;
+        if (!saved) OutputDebugStringW(L"[PNM] Hourly history flush failed.\n");
+    } else if (m_history_save.Queue(path, m_hourly)) {
+        m_hourly_dirty = false;
+    }
 }
 
 void CDetailWindow::LoadHourlyHistory() {
@@ -817,23 +827,6 @@ void CDetailWindow::LoadHourlyHistory() {
     }
     m_hourly_writable = false;
     OutputDebugStringW(L"[PNM] Hourly history unavailable; original file retained.\n");
-}
-
-void CDetailWindow::SaveHourlyHistory() {
-    if (!m_hourly_writable || !m_hourly_dirty) return;
-    const auto dir = std::filesystem::path(m_config_dir);
-    const auto path = dir / L"history-hourly-v1.dat";
-    const auto temp = dir / (L"history-hourly-v1." + std::to_wstring(GetCurrentProcessId()) + L".tmp");
-    std::ofstream output(temp, std::ios::binary | std::ios::trunc);
-    const bool written = m_hourly.Write(output);
-    output.close();
-    if (written && output && MoveFileExW(temp.c_str(), path.c_str(),
-                                         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        m_hourly_dirty = false;
-    } else {
-        DeleteFileW(temp.c_str());
-        OutputDebugStringW(L"[PNM] Hourly history save failed; will retry.\n");
-    }
 }
 
 void CDetailWindow::LoadHistory() {
@@ -1651,8 +1644,11 @@ LRESULT CDetailWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSELEAVE: OnMouseLeave(); return 0;
     case WM_MOUSEWHEEL: OnMouseWheel(GET_WHEEL_DELTA_WPARAM(wp)); return 0;
     case WM_VSCROLL: OnVScroll(LOWORD(wp)); return 0;
+    case WM_ENDSESSION:
+        if (wp) SaveHistory(true);
+        break;
     case WM_DESTROY:
-        SaveHistory();
+        SaveHistory(true);
         break;
     case WM_ERASEBKGND: return 1;
     case WM_DPICHANGED: {
@@ -2338,8 +2334,8 @@ void CDetailWindow::DrawHourlyChart(HDC hdc, int w, int y, int client_h) {
         const auto bucket = m_hourly.buckets.find(tick);
         if (bucket == m_hourly.buckets.end()) return apps;
         const auto daily = m_hourly.daily.find(History::DayStart(tick));
-        for (const auto& [name, usage] : bucket->second)
-            if (daily == m_hourly.daily.end() || !daily->second.count(name)) apps.emplace(name, usage);
+        for (const auto& [name, usage] : *bucket->second)
+            if (daily == m_hourly.daily.end() || !daily->second->count(name)) apps.emplace(name, usage);
         return apps;
     };
     uint64_t max_total = 0;
@@ -2544,11 +2540,11 @@ void CDetailWindow::DrawHourlyChart(HDC hdc, int w, int y, int client_h) {
         if (h < 0 || h >= hour_count) return u;
         const auto tick = m_chart_hours[h];
         const auto daily = m_hourly.daily.find(History::DayStart(tick));
-        if (daily != m_hourly.daily.end() && daily->second.count(name)) return u;
+        if (daily != m_hourly.daily.end() && daily->second->count(name)) return u;
         const auto bucket_it = m_hourly.buckets.find(tick);
         if (bucket_it == m_hourly.buckets.end()) return u;
-        const auto app_it = bucket_it->second.find(name);
-        if (app_it != bucket_it->second.end()) u = app_it->second;
+        const auto app_it = bucket_it->second->find(name);
+        if (app_it != bucket_it->second->end()) u = app_it->second;
         return u;
     };
 
