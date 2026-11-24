@@ -252,6 +252,8 @@ private:
     bool m_hourly_etw = false;
     bool m_hourly_dirty = false, m_hourly_writable = false;
     pnm::HistorySave m_history_save;
+    const wchar_t* m_history_notice = nullptr;
+    void ShowHistoryNotice();
     ULONGLONG m_last_save_tick = 0;
 
     // Time range filter (history tab)

@@ -1,5 +1,6 @@
 #include "detail_window.h"
 #include "history_calendar.h"
+#include "history_load.h"
 #include "plugin_main.h"
 #include "utils.h"
 #include "signature.h"
@@ -608,6 +609,14 @@ void CDetailWindow::Show(HWND parent_wnd) {
     ShowWindow(m_hwnd, SW_SHOWNOACTIVATE);
     m_visible = true;
     InvalidateRect(m_hwnd, NULL, FALSE);
+    ShowHistoryNotice();
+}
+
+void CDetailWindow::ShowHistoryNotice() {
+    if (!m_visible || !m_history_notice) return;
+    const auto message = m_history_notice;
+    m_history_notice = nullptr;
+    MessageBoxW(m_hwnd, TR(message), TR(L"历史流量"), MB_OK | MB_ICONWARNING);
 }
 
 void CDetailWindow::Hide() {
@@ -668,6 +677,13 @@ void CDetailWindow::RecordHistory(const std::vector<ProcTraffic>& stats, bool us
 }
 
 void CDetailWindow::ClearHistory() {
+    if (!m_hourly_writable) {
+        LoadHourlyHistory();
+        if (!m_hourly_writable) {
+            ShowHistoryNotice();
+            return;
+        }
+    }
     if (m_hourly_writable) {
         m_hourly = {};
         // The original history.dat remains on disk after clearing.
@@ -683,6 +699,8 @@ void CDetailWindow::ClearHistory() {
     m_history_dirty = true;
 
     SaveHistory(true);
+    if (m_hourly_dirty) m_history_notice = L"无法保存小时历史，将重试。";
+    ShowHistoryNotice();
 
     if (m_visible) InvalidateRect(m_hwnd, NULL, FALSE);
 }
@@ -811,22 +829,18 @@ void CDetailWindow::SaveHistory(bool flush) {
 void CDetailWindow::LoadHourlyHistory() {
     if (m_config_dir.empty()) return;
     const auto path = std::filesystem::path(m_config_dir) / L"history-hourly-v1.dat";
-    std::error_code error;
-    const auto size = std::filesystem::file_size(path, error);
-    if (error == std::errc::no_such_file_or_directory) {
-        m_hourly_writable = true;
-        return;
+    using pnm::HistoryLoad;
+    const auto result = pnm::LoadHistoryFile(path, m_hourly);
+    m_history_notice = nullptr;
+    m_hourly_writable = result != HistoryLoad::Blocked;
+    if (result == HistoryLoad::Loaded) m_hourly_dirty = m_hourly.Prune(WallClockMs());
+    if (result == HistoryLoad::Recovered) {
+        m_history_notice = L"无法读取小时历史。原文件已备份，将重新记录。";
+        m_hourly_dirty = true;
+        SaveHistory(true);
+    } else if (result == HistoryLoad::Blocked) {
+        m_history_notice = L"无法读取或备份小时历史。原文件未改动，记录已暂停。";
     }
-    if (!error && size <= pnm::HourlyHistory::MaxFile) {
-        std::ifstream input(path, std::ios::binary);
-        if (m_hourly.Read(input)) {
-            m_hourly_writable = true;
-            m_hourly_dirty = m_hourly.Prune(WallClockMs());
-            return;
-        }
-    }
-    m_hourly_writable = false;
-    OutputDebugStringW(L"[PNM] Hourly history unavailable; original file retained.\n");
 }
 
 void CDetailWindow::LoadHistory() {

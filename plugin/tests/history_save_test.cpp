@@ -7,6 +7,7 @@
 #include <iostream>
 #ifndef PNM_BASELINE
 #include "history_save.h"
+#include "history_load.h"
 #endif
 
 using History = pnm::HourlyHistory;
@@ -30,6 +31,45 @@ static History Load(const fs::path& path) {
     History loaded;
     assert(loaded.Read(input));
     return loaded;
+}
+
+static void TestRecovery(const fs::path& dir) {
+    using pnm::HistoryLoad;
+    for (const auto& bytes : {std::string("PNH1"), std::string("corrupt data"),
+                             std::string("PNH1\xff\0\0\0\0\0\0\0", 12)}) {
+        const auto path = dir / L"recover.dat";
+        const auto legacy = dir / L"history.dat";
+        auto read = [](const fs::path& file) {
+            std::ifstream stream(file, std::ios::binary);
+            return std::string(std::istreambuf_iterator<char>(stream), {});
+        };
+        History history;
+        assert(pnm::LoadHistoryFile(path, history) == HistoryLoad::Missing);
+        std::ofstream(legacy, std::ios::binary) << "legacy sentinel";
+        std::ofstream(path, std::ios::binary).write(bytes.data(), bytes.size());
+        const auto lock = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        assert(lock != INVALID_HANDLE_VALUE);
+        assert(pnm::LoadHistoryFile(path, history) == HistoryLoad::Blocked);
+        assert(read(path) == bytes);
+        CloseHandle(lock);
+        assert(pnm::LoadHistoryFile(path, history) == HistoryLoad::Recovered);
+        bool backedUp = false;
+        for (const auto& entry : fs::directory_iterator(dir))
+            if (entry.path().filename().wstring().find(L"recover.dat.bak.") == 0 && read(entry.path()) == bytes)
+                backedUp = true;
+        assert(backedUp && !fs::exists(path));
+        pnm::HistorySave save;
+        assert(save.Flush(path, history));
+        assert(pnm::LoadHistoryFile(path, history) == HistoryLoad::Loaded);
+        history = {};
+        assert(save.Flush(path, history));
+        assert(history.Add(1800000000000ULL, u"fresh", 2, 9));
+        assert(save.Flush(path, history));
+        assert(Load(path).buckets.begin()->second->at(u"fresh").up == 9);
+        assert(read(legacy) == "legacy sentinel");
+        fs::remove(path);
+    }
 }
 #endif
 
@@ -92,5 +132,6 @@ int wmain(int argc, wchar_t** argv) {
         assert(restored.legacyMerged && restored.buckets.size() == 1);
         assert(restored.buckets.begin()->second->at(u"fresh").up == 8);
     }
+    TestRecovery(dir);
 #endif
 }
