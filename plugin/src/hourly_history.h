@@ -142,7 +142,8 @@ public:
 private:
     static Apps& Mutable(std::shared_ptr<const Apps>& apps) {
         if (!apps) apps = std::make_shared<Apps>();
-        else if (!apps.unique()) apps = std::make_shared<Apps>(*apps);
+        // use_count()==1 等价于已废弃的 unique()（STL4016），C++17 下零警告写法
+        else if (apps.use_count() != 1) apps = std::make_shared<Apps>(*apps);
         return *std::const_pointer_cast<Apps>(apps);
     }
     bool Insert(Number tick, const std::u16string& name, Number down, Number up, bool day) {
