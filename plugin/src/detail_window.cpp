@@ -1072,15 +1072,6 @@ void CDetailWindow::LoadHistory() {
     if (m_config_dir.empty()) { OutputDebugStringW(L"[PNM] LoadHistory: config_dir empty!"); return; }
     LoadHourlyHistory();
 
-    // Legacy history is intentionally excluded from the new UI.  A previous
-    // build may already have copied it into PNH1; discard that one-time merged
-    // database so the user starts with a clean current-session history.
-    if (m_hourly_writable && m_hourly.legacyMerged) {
-        m_hourly = {};
-        m_hourly_writable = true;
-        m_hourly_dirty = true;
-        SaveHourlyHistory();
-    }
     RebuildHistoryFromHourly();
     // Do not import the legacy history.dat. It is retained as a backup only.
     if (!m_hourly_writable) return;
