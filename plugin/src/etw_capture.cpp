@@ -273,12 +273,27 @@ static uint32_t IntypeSize2(uint16_t intype) {
     }
 }
 
-EtwCapture::~EtwCapture() { Stop(); }
+EtwCapture::~EtwCapture() {
+    Stop();
+    if (m_wake) { CloseHandle(m_wake); m_wake = nullptr; }
+}
+
+void EtwCapture::WaitRetry(DWORD ms) {
+    if (m_wake) WaitForSingleObject(m_wake, ms);
+    else Sleep(ms);
+}
+
+void EtwCapture::LogStoppedEarly(ULONGLONG elapsed_ms) {
+    LogLine(L"TM is closing: ETW session stopped before exit (%llu ms)", elapsed_ms);
+}
 
 bool EtwCapture::Start() {
     if (m_running) return true;
     s_self = this;
     m_stop = false;
+    // 每次 Start 新建一个未置位的事件（而不是 ResetEvent 旧的）：不为这个多一个导入表条目
+    if (m_wake) CloseHandle(m_wake);
+    m_wake = CreateEventW(nullptr, TRUE, FALSE, nullptr);   // 手动复位；失败则 WaitRetry 退回 Sleep
     m_last_event_tick.store(0);
     m_ev_total = 0; m_ev_net = 0; m_ev_filt_addr = 0; m_ev_kept = 0;
     SetConnState(L"starting");
@@ -290,24 +305,22 @@ bool EtwCapture::Start() {
 void EtwCapture::Stop() {
     if (g_pnm_exit_threads_dead) {
         // 进程退出（Win8+）。消费线程已被系统结束，晚于本 DLL 初始化的系统模块都已卸载。
+        // 这里一个会话都不停：Win8+ 的退出路径上不出现 ControlTraceW(STOP)，issue #20 的崩溃
+        // 链就无从走起。ControlTraceW(STOP) 会让系统做一轮信息采集（显卡、网卡、磁盘、
+        // 服务……），采集要调的模块此刻都已卸载；Windows 10 上走到「网卡」那项时调进
+        // dhcpcsvc6，它的堆句柄已被自己的卸载清零，每次托盘退出都崩一次。
+        // 正常的手动退出走的是「退出前先停」（plugin_main.cpp 的 ExitWatchProc），到不了这里。
+        // 走到这里 = 没赶上（TM 主窗没找到、没走主窗关闭消息就退了）。会话留着，两害相权：
+        //   崩 / 留一个会话，取后者。
+        //   自建会话 PnmNetTrace：下次启动的 TryStartSession 按残留会话停掉重起。
+        //   兜底的 NT Kernel Logger：名字是系统公用的，会占到重启。ConsumerLoop 只在
+        //   「退出前先停」已装好时才启用它，所以这种情况只可能是装好了却没触发。
         m_stop = true;
         if (m_own_session.load() && m_own_session_handle) {
-            if (m_own_syslogger.load()) {
-                // L1：不停。ControlTraceW(STOP) 会让系统做一轮信息采集（显卡、网卡、磁盘、
-                // 服务……），采集要调的模块此刻都已卸载。issue #20：Windows 10 上走到「网卡」
-                // 那项时调进 dhcpcsvc6，它的堆句柄已被自己的卸载清零，每次托盘退出都崩一次。
-                // 会话留在内核里，由下次启动的 TryStartSession 按残留会话停掉重起。
-                LogLine(L"process exit: session '%s' left running, next start reclaims it",
-                        kSessionName);
-            } else {
-                // L2：NT Kernel Logger 是系统公用的名字，不能留。照旧停掉。
-                // 这里有和上面相同的风险，属于已知残余问题。
-                EVENT_TRACE_PROPERTIES sp;
-                memset(&sp, 0, sizeof(sp));
-                sp.Wnode.BufferSize = sizeof(EVENT_TRACE_PROPERTIES);
-                ControlTraceW(m_own_session_handle, nullptr, &sp, EVENT_TRACE_CONTROL_STOP);
-                LogLine(L"process exit: NT Kernel Logger stopped (CONTROL_STOP)");
-            }
+            LogLine(L"process exit without early stop: session '%s' left running (%s)",
+                    m_own_syslogger.load() ? kSessionName : KERNEL_LOGGER_NAMEW,
+                    m_own_syslogger.load() ? L"next start reclaims it"
+                                            : L"NT Kernel Logger stays until reboot");
             m_own_session = false;       // 之后任何一次 Stop() 都不会再碰会话
             m_own_session_handle = 0;
         }
@@ -317,6 +330,7 @@ void EtwCapture::Stop() {
     }
     if (!m_running && !m_thread.joinable()) return;
     m_stop = true;
+    if (m_wake) SetEvent(m_wake);   // 消费线程若停在重试等待里，立即醒来看到 m_stop
 
     EVENT_TRACE_PROPERTIES sp;
     memset(&sp, 0, sizeof(sp));
@@ -448,16 +462,21 @@ void EtwCapture::ConsumerLoop() {
         // covers data via HasData() upstream, whole waterfall retries in 5s.
         SessionResult r{ INVALID_PROCESSTRACE_HANDLE, false, 0, false };
         DWORD build = 0;
-        if (PNM_GetOSBuild(build) && build >= 9200) {   // Win8+
+        bool win8_plus = PNM_GetOSBuild(build) && build >= 9200;
+        if (win8_plus) {
             r = TryStartSession(true);
         }
-        if (r.consumer == INVALID_PROCESSTRACE_HANDLE) {
+        // L2（NT Kernel Logger）：Win7 上是常态路径。Win8+ 上进程退出时我们不能停它
+        // （issue #20），留着又会占到重启，所以只在「退出前先停」已装好、退出时能把它
+        // 干净停掉的前提下才启用。没装上就跳过它，由上游退回旧抓包。
+        if (r.consumer == INVALID_PROCESSTRACE_HANDLE &&
+            (!win8_plus || g_pnm_exit_watch_armed.load())) {
             r = TryStartSession(false);
         }
         if (r.consumer == INVALID_PROCESSTRACE_HANDLE) {
             SetConnState(L"failed");
             if (m_stop) break;
-            Sleep(5000);
+            WaitRetry(5000);
             continue;
         }
 
@@ -479,7 +498,7 @@ void EtwCapture::ConsumerLoop() {
         }
 
         if (m_stop) break;
-        Sleep(2000);
+        WaitRetry(2000);
     }
 
     m_running = false;

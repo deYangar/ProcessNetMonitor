@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdio>
+#include <atomic>
 #include <windows.h>
 #include <shellscalingapi.h>
 
@@ -12,6 +13,11 @@ extern HINSTANCE s_dll_hinst;
 // 置位后退出路径的约定：不等待、不加锁、不调别的 DLL 的功能（只留落盘）。自建会话不停，
 // 留给下次启动接管；兜底的 NT Kernel Logger 是例外，见 EtwCapture::Stop()。
 extern bool g_pnm_exit_threads_dead;
+
+// 「退出前先停」已装好：PNM 已经盯上 TM 主窗口的 WM_CLOSE，退出时能赶在 TM 收拾东西之前
+// 把 ETW 会话干净停掉。定义在 plugin_main.cpp。EtwCapture::ConsumerLoop 读它：Win8+ 上
+// 进程退出时我们不能停兜底的 NT Kernel Logger，所以只在它为真时才启用兜底。
+extern std::atomic<bool> g_pnm_exit_watch_armed;
 
 // Debug output directory: <dll dir>\ProcessNetMonitor\debug\ - sits next to
 // the plugin's config folder (history.dat / settings.json live in

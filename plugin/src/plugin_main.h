@@ -119,6 +119,18 @@ public:
     bool m_detail_created = false;
     void StopEtwCapture() { m_etw_cap.Stop(); }
 
+    // 退出前先停（issue #20 后续）：盯 TM 主窗口的 WM_CLOSE，赶在 TM 收拾东西之前把 ETW
+    // 会话干净停掉。实现和说明见 plugin_main.cpp 的 ExitWatchProc。
+    void StopEtwForExit();                              // 主窗 WM_CLOSE 时在主线程调用
+    void TryArmExitWatch();                             // 懒装：主线程入口每次调用，装上即止
+    void RemoveExitWatch();                             // 卸载前在窗口属主线程摘掉
+    static unsigned __stdcall EtwEarlyStopThread(void* param);
+    std::atomic<bool> m_etw_exit_stop_started{ false };
+    std::atomic<bool> m_etw_exit_stop_done{ false };
+    ULONGLONG m_etw_exit_stop_tick = 0;                 // 只在主线程写
+    static constexpr ULONGLONG kEtwExitStopMaxWaitMs = 2000;    // 主线程最多等多久
+    static constexpr ULONGLONG kEtwExitRestartDelayMs = 3000;   // 之后进程还活着就重新起会话
+
     // Cached stats for popup (updated each refresh cycle)
     std::vector<ProcTraffic> m_cached_stats;
     double m_cached_up = 0;

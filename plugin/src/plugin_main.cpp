@@ -4,6 +4,7 @@
 #include "i18n.h"
 #include "opacity_preview.h"
 #include <algorithm>
+#include <process.h>   // _beginthreadex（退出前先停：停会话放工作线程）
 #include <shellapi.h>
 #include <dbghelp.h>
 #include <commctrl.h>
@@ -549,6 +550,7 @@ void CProcessNetPlugin::DataRequired() {
     // (1.85.x MonitorThreadCallback), where the popup/detail windows would
     // be created without a message pump (data still works, popup does not).
     if (!m_inited) EnsureInitialized();
+    if (!g_pnm_exit_watch_armed.load() && !g_shutting_down) TryArmExitWatch();
 
     if (!m_started) {
         m_items[0].Init(CProcessNetItem::DIR_UPLOAD);
@@ -755,6 +757,15 @@ void CProcessNetPlugin::BuildTooltip(bool etw_active, const std::vector<ProcTraf
 // High-frequency refresh: runs on a TimerQueueTimer independent of TM's tick.
 void CProcessNetPlugin::RefreshTick() {
     if (!m_started) return;
+    // 「退出前先停」之后进程还活着：那次 WM_CLOSE 没有导致退出（或退出被取消），
+    // 把会话重新起来。放在最前面：抓包没起来（m_started 为 false）时 ETW 也可能被停过。
+    // g_shutting_down 之后不碰：已经在卸载收尾里。
+    if (m_etw_exit_stop_started.load() && m_etw_exit_stop_done.load() && !g_shutting_down &&
+        GetTickCount64() - m_etw_exit_stop_tick >= kEtwExitRestartDelayMs) {
+        m_etw_exit_stop_started = false;
+        m_etw_exit_stop_done = false;
+        m_etw_cap.Start();
+    }
     // Skip overlapping ticks: TimerQueueTimer fires the next callback even
     // when the previous tick is still inside GetStats (syscalls under load).
     bool expected = false;
@@ -941,6 +952,112 @@ void CProcessNetPlugin::StopRefreshTimer() {
     }
     m_refresh_timer_ok = false;
 }
+
+// ============================================================
+// 退出前先停（issue #20 后续，2026-11-24）
+//
+// issue #20 的崩溃：TM 退出时 PNM 在进程退出的 DllMain 里停 ETW 会话，
+// ControlTraceW(STOP) 触发的系统信息采集调进了已经先卸载的组件
+// （Win10 上是 dhcpcsvc6）。提交 be3a47e 让退出收尾不再停会话，代价是
+// 会话留到下次启动。
+//
+// 这里把「停会话」挪到退出开始之前。TM 的手动退出（托盘退出、主窗关闭、
+// 「已在运行」对话框的退出）最后都走主窗口的 WM_CLOSE。收到它的那一刻
+// 进程完好、系统组件都在、线程都活着——在这里停会话是干净的，不留会话。
+// 没赶上（主窗没找到、没走主窗关闭消息就退了）时，EtwCapture::Stop()
+// 的退出分支兜住：不停，不崩。
+//
+// 主窗口怎么找：类名写死在 TrafficMonitor 源码 stdafx.h 的 APP_CLASS_NAME
+// （TrafficMonitor.cpp 注册），TM 自己也用 FindWindow(APP_CLASS_NAME) 找
+// 上一实例。限定同进程、同线程，再装。将来的 TM 版本改了类名就装不上，
+// 退回「退出时不关、下次启动接管」。
+//
+// 安装时机：OnInitialize 在 TM 的 LoadPlugins 里就被调了，早于主窗创建
+// （TrafficMonitor.cpp 里 LoadPlugins 在 DoModal 之前），所以初始化时主窗
+// 还不存在。在 DataRequired 里懒装：TM 1.86 的 DataRequired 在主线程，
+// 装上即止；1.85.x 的 DataRequired 可能来自工作线程，那里找不到属主窗口，
+// 每秒最多再找一次。
+// ============================================================
+namespace {
+const wchar_t kTmMainClass[] = L"TrafficMonitor_r7XZaS4p";
+constexpr UINT_PTR kExitWatchSubclassId = 0x504E4D45;   // 'PNME'
+HWND g_tm_main_hwnd = nullptr;                   // 只在主线程读写
+std::atomic<ULONGLONG> g_exit_watch_try_tick{ 0 };
+}
+std::atomic<bool> g_pnm_exit_watch_armed{ false };
+
+static HWND FindTmMainWindow() {
+    struct Ctx { DWORD pid; DWORD tid; HWND found; } ctx{ GetCurrentProcessId(), GetCurrentThreadId(), nullptr };
+    EnumWindows([](HWND h, LPARAM lp) -> BOOL {
+        auto* c = reinterpret_cast<Ctx*>(lp);
+        DWORD pid = 0;
+        if (GetWindowThreadProcessId(h, &pid) != c->tid || pid != c->pid) return TRUE;
+        wchar_t cls[64] = {};
+        GetClassNameW(h, cls, 64);
+        if (wcscmp(cls, kTmMainClass) != 0) return TRUE;
+        c->found = h;
+        return FALSE;
+    }, reinterpret_cast<LPARAM>(&ctx));
+    return ctx.found;
+}
+
+// comctl32 子类，和锚窗跟随同一套框架：GWLP_WNDPROC 链头是通用控件库的中性
+// 过程，本方过程地址不被任何一方持有，摘除就是从表里删节点。
+static LRESULT CALLBACK ExitWatchProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                                      UINT_PTR, DWORD_PTR) {
+    if (msg == WM_CLOSE) {
+        CProcessNetPlugin::Instance().StopEtwForExit();
+    } else if (msg == WM_NCDESTROY) {
+        // 窗口销毁：comctl32 随窗口清理子类表，这里只清状态
+        g_tm_main_hwnd = nullptr;
+    }
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
+void CProcessNetPlugin::TryArmExitWatch() {
+    ULONGLONG now = GetTickCount64();
+    if (now - g_exit_watch_try_tick.load() < 1000) return;   // 没装上时每秒最多找一次
+    g_exit_watch_try_tick.store(now);
+    HWND tm = FindTmMainWindow();   // 只会返回本线程的窗口，所以子类化是在属主线程做的
+    if (!tm) return;
+    if (!SetWindowSubclass(tm, ExitWatchProc, kExitWatchSubclassId, 0)) return;
+    g_tm_main_hwnd = tm;
+    g_pnm_exit_watch_armed = true;
+}
+
+void CProcessNetPlugin::RemoveExitWatch() {
+    HWND tm = g_tm_main_hwnd;
+    g_tm_main_hwnd = nullptr;
+    // 从通用控件库的子类表摘本节点；表空自动还原原过程
+    if (tm && IsWindow(tm)) RemoveWindowSubclass(tm, ExitWatchProc, kExitWatchSubclassId);
+}
+
+void CProcessNetPlugin::StopEtwForExit() {
+    if (m_etw_exit_stop_started.exchange(true)) return;
+    m_etw_exit_stop_tick = GetTickCount64();
+    if (g_shutting_down) return;   // 已经在卸载收尾里，交给 Stop()
+    ULONGLONG t0 = GetTickCount64();
+    // 停会话放工作线程：ControlTraceW(STOP) 会让系统做一轮信息采集，耗时不确定。
+    // 主线程（此刻在 TM 的 WM_CLOSE 处理里）最多等 2 秒；等不到就照常退出，之后
+    // DllMain 的退出分支接管——自建会话留给下次启动，不崩。
+    HANDLE h = (HANDLE)_beginthreadex(nullptr, 0, EtwEarlyStopThread, this, 0, nullptr);
+    if (!h) {
+        m_etw_cap.Stop();
+        m_etw_exit_stop_done = true;
+        return;
+    }
+    bool finished = WaitForSingleObject(h, (DWORD)kEtwExitStopMaxWaitMs) == WAIT_OBJECT_0;
+    CloseHandle(h);
+    if (finished) m_etw_cap.LogStoppedEarly(GetTickCount64() - t0);
+}
+
+unsigned __stdcall CProcessNetPlugin::EtwEarlyStopThread(void* param) {
+    auto* self = static_cast<CProcessNetPlugin*>(param);
+    self->m_etw_cap.Stop();
+    self->m_etw_exit_stop_done = true;
+    return 0;
+}
+
 const wchar_t* CProcessNetPlugin::GetInfo(PluginInfoIndex i) {
     switch (i) {
     case TMI_NAME: return L"ProcessNetMonitor";
@@ -1102,6 +1219,8 @@ void CProcessNetPlugin::InitOnce(const wchar_t* cfg_base) {
 
 CProcessNetPlugin::~CProcessNetPlugin() {
     StopRefreshTimer();
+    // 进程正在退出（Win8+）时不摘：主窗要么已经销毁，要么随进程一起没，不必碰通用控件库。
+    if (!g_pnm_exit_threads_dead) RemoveExitWatch();
     if (m_lock_inited) {
         DeleteCriticalSection(&m_data_lock);
         m_lock_inited = false;

@@ -47,6 +47,9 @@ public:
     // conn_count is left 0 (merge with PacketCapture data upstream).
     std::vector<ProcTraffic> GetStats(double interval_sec);
 
+    // 调试日志：记一行「TM 要退出了，会话已在退出前停掉」及其耗时（V6 靠这一行验证）
+    void LogStoppedEarly(ULONGLONG elapsed_ms);
+
     // Debug-log master switch (default OFF, user setting in settings.json /
     // detail-window context menu). Controls etw_capture.log / capture.log
     // generation. Independent of this switch: crash.log is always on, and
@@ -120,6 +123,10 @@ private:
     std::atomic<bool> m_stop{false};
     std::atomic<ULONGLONG> m_last_event_tick{0};   // set on every kept event
     std::thread m_thread;
+    // 手动复位事件。ConsumerLoop 的重试等待等的是它而不是 Sleep：Stop() 置位就能立即唤醒，
+    // 否则会话没起来时（消费线程停在 5 秒重试里）停会话要干等最长 5 秒。
+    HANDLE m_wake = nullptr;
+    void WaitRetry(DWORD ms);
 
     // diagnostics counters (guarded by m_mutex)
     uint64_t m_ev_total = 0;       // all events reaching OnEvent with data
