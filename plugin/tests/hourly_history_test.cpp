@@ -24,6 +24,19 @@ static void ClearThenRestartTwice() {
     }
 }
 
+static void ChartTotals() {
+    const auto day = History::DayStart(1800000000000ULL);
+    History history;
+    assert(history.Add(day, u"one", 11, 2));
+    assert(history.Add(day, u"two", 3, 10));
+    assert(history.Add(day + History::Hour, u"one", 20, 7));
+    const auto all = History::TotalUsage(history.SummarizeDay(day));
+    const auto selected = History::TotalUsage(history.buckets.at(day));
+    assert(all.down == 34 && all.up == 19);
+    assert(selected.down == 14 && selected.up == 12);
+}
+
 int main() {
     ClearThenRestartTwice();
+    ChartTotals();
 }

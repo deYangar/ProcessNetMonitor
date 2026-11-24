@@ -2802,17 +2802,7 @@ void CDetailWindow::DrawHourlyChart(HDC hdc, int w, int y, int client_h) {
     } else {
         day_apps = m_hourly.SummarizeDay(target_day);
     }
-    uint64_t day_down = 0, day_up = 0;
-    for (const auto& [name, usage] : day_apps) {
-        day_down = pnm::HourlyHistory::SaturatingAdd(day_down, usage.down);
-        day_up = pnm::HourlyHistory::SaturatingAdd(day_up, usage.up);
-    }
-    if (m_chart_selected_hour < 0) {
-        for (const auto& bar : bars) {
-            day_down = pnm::HourlyHistory::SaturatingAdd(day_down, bar.down);
-            day_up = pnm::HourlyHistory::SaturatingAdd(day_up, bar.up);
-        }
-    }
+    const auto [day_down, day_up] = pnm::HourlyHistory::TotalUsage(day_apps);
     wchar_t summary[128];
     wchar_t down_text[32], up_text[32];
     FormatBytes(day_down, down_text, 32); FormatBytes(day_up, up_text, 32);

@@ -31,6 +31,14 @@ public:
     static Number SaturatingAdd(Number a, Number b) {
         return b > MaxBytes - a ? MaxBytes : a + b;
     }
+    static Usage TotalUsage(const Apps& apps) {
+        Usage total;
+        for (const auto& [name, usage] : apps) {
+            total.down = SaturatingAdd(total.down, usage.down);
+            total.up = SaturatingAdd(total.up, usage.up);
+        }
+        return total;
+    }
     Apps Summarize(Number start, Number end) const {
         Apps totals;
         std::map<Number, std::map<std::u16string, Usage>> daily_by_day;
