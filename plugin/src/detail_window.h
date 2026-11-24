@@ -438,7 +438,9 @@ private:
     RECT m_rcTRButtons[5] = {};  // time range buttons
     RECT m_rcClearBtn = {};       // clear history button
     RECT m_rcTableHeader = {};
-    ULONGLONG m_chart_day_start = 0;  // selected UTC+8 natural day, Unix ms
+    ULONGLONG m_chart_date = 0;  // civil date key; zero follows today
+    std::vector<pnm::HourlyHistory::Number> m_chart_hours;
+    int HitTestChartHour(int x, int y) const;
     int m_chart_hover_hour = -1;
     int m_chart_selected_hour = -1;
     int m_chart_table_scroll = 0;

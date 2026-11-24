@@ -1,4 +1,5 @@
 #include "hourly_history.h"
+#include "history_calendar.h"
 #include <cassert>
 #include <sstream>
 
@@ -62,8 +63,48 @@ static void IdleSamplesDoNotUseCapacity() {
     assert(old.buckets.at(day).at(u"idle").down == 0);
 }
 
+static pnm::HistoryCalendar Zone(const wchar_t* key) {
+    DYNAMIC_TIME_ZONE_INFORMATION zone{};
+    for (DWORD i = 0; EnumDynamicTimeZoneInformation(i, &zone) == ERROR_SUCCESS; ++i)
+        if (wcscmp(zone.TimeZoneKeyName, key) == 0) return pnm::HistoryCalendar(zone);
+    assert(false && "Windows time zone not installed");
+    std::abort();
+}
+
+static void LocalDaysAndPnh1() {
+    using Calendar = pnm::HistoryCalendar;
+    const auto spring = Calendar::AsUnix(SYSTEMTIME{2026, 3, 0, 8});
+    const auto autumn = Calendar::AsUnix(SYSTEMTIME{2026, 11, 0, 1});
+    const auto west = Zone(L"Pacific Standard Time");
+    const auto spring_hours = west.Hours(spring);
+    const auto autumn_hours = west.Hours(autumn);
+    assert(spring_hours.size() == 23 && autumn_hours.size() == 25);
+    assert(west.Local(spring_hours.at(2)).wHour == 3);
+    assert(west.Local(autumn_hours.at(1)).wHour == 1 && west.Local(autumn_hours.at(2)).wHour == 1);
+    assert(autumn_hours.at(2) - autumn_hours.at(1) == History::Hour);
+    const auto east = Zone(L"China Standard Time");
+    assert(east.Start(spring) == spring - 8 * History::Hour);
+    const auto india = Zone(L"India Standard Time");
+    const auto india_hours = india.Hours(spring);
+    assert(india_hours.size() == 24 && india.Local(india_hours.front()).wMinute == 30);
+    assert(india.Date(india_hours.front() - History::Hour) == spring - History::Day);
+
+    History original;
+    assert(original.SetDayTotal(spring - History::LegacyDayOffset, u"daily", 24, 12));
+    assert(original.Add(autumn_hours.at(2), u"hour", 5, 7));
+    std::stringstream disk;
+    assert(original.Write(disk));
+    History loaded;
+    assert(loaded.Read(disk));
+    assert(loaded.buckets.at(autumn_hours.at(2)).at(u"hour").up == 7);
+    const auto legacy_tick = spring - History::LegacyDayOffset;
+    const auto west_date = west.Date(legacy_tick);
+    assert(loaded.Summarize(west.Start(west_date), west.Start(west_date + History::Day)).at(u"daily").down == 24);
+}
+
 int main() {
     ClearThenRestartTwice();
     ChartTotals();
     IdleSamplesDoNotUseCapacity();
+    LocalDaysAndPnh1();
 }

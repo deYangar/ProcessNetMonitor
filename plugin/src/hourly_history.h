@@ -12,7 +12,9 @@ public:
     using Number = std::uint64_t;
     static constexpr Number Hour = 3600000;
     static constexpr Number Day = 24 * Hour;
-    static constexpr Number Offset = 8 * Hour;
+    // PNH1 v482 daily rows were aligned to UTC+8; hourly rows have always
+    // used UTC Unix milliseconds at UTC hour boundaries.
+    static constexpr Number LegacyDayOffset = 8 * Hour;
     static constexpr Number MaxTick = 253402271999999ULL;
     static constexpr Number MaxBytes = 9007199254740991ULL;
     static constexpr unsigned MaxRows = 250000;
@@ -24,9 +26,8 @@ public:
     bool legacyMerged = false;
 
     static Number DayStart(Number tick) {
-        if (tick < Day - Offset) return 0;
-        const Number local_day = (tick + Offset) / Day * Day;
-        return local_day - Offset;
+        if (tick < Day - LegacyDayOffset) return 0;
+        return (tick + LegacyDayOffset) / Day * Day - LegacyDayOffset;
     }
     static Number SaturatingAdd(Number a, Number b) {
         return b > MaxBytes - a ? MaxBytes : a + b;
@@ -41,10 +42,7 @@ public:
     }
     Apps Summarize(Number start, Number end) const {
         Apps totals;
-        std::map<Number, std::map<std::u16string, Usage>> daily_by_day;
         for (auto it = daily.lower_bound(start); it != daily.end() && it->first < end; ++it) {
-            if (it->first < start || it->first > MaxTick - Day || it->first + Day > end) continue;
-            daily_by_day.emplace(it->first, it->second);
             for (const auto& [name, usage] : it->second) {
                 auto& total = totals[name];
                 total.down = SaturatingAdd(total.down, usage.down);
@@ -53,9 +51,9 @@ public:
         }
         for (auto it = buckets.lower_bound(start); it != buckets.end() && it->first < end; ++it) {
             const auto day = DayStart(it->first);
-            const auto daily_it = daily_by_day.find(day);
+            const auto daily_it = daily.find(day);
             for (const auto& [name, usage] : it->second) {
-                if (daily_it != daily_by_day.end() && daily_it->second.count(name)) continue;
+                if (daily_it != daily.end() && daily_it->second.count(name)) continue;
                 auto& total = totals[name];
                 total.down = SaturatingAdd(total.down, usage.down);
                 total.up = SaturatingAdd(total.up, usage.up);
@@ -64,23 +62,12 @@ public:
         return totals;
     }
     Apps SummarizeDay(Number dayStart) const {
-        Apps totals;
-        if (dayStart > MaxTick - Day) return totals;
-        const auto daily_it = daily.find(dayStart);
-        if (daily_it != daily.end()) return daily_it->second;
-        for (auto it = buckets.lower_bound(dayStart); it != buckets.end() && it->first < dayStart + Day; ++it) {
-            for (const auto& [name, usage] : it->second) {
-                auto& total = totals[name];
-                total.down = SaturatingAdd(total.down, usage.down);
-                total.up = SaturatingAdd(total.up, usage.up);
-            }
-        }
-        return totals;
+        return Summarize(dayStart, dayStart + Day);
     }
 
     static Number Oldest(Number now) {
-        const Number shifted = (now + Offset) / Day * Day;
-        return shifted >= 29 * Day + Offset ? shifted - 29 * Day - Offset : 0;
+        // Keep enough UTC buckets for the last 30 civil dates, including DST.
+        return now >= 31 * Day ? now / Hour * Hour - 31 * Day : 0;
     }
     void Set(Number tick, const std::u16string& name, Number down, Number up) {
         if (tick > MaxTick || name.empty() || name.size() > 512 || down > MaxBytes || up > MaxBytes) return;
@@ -99,7 +86,7 @@ public:
     }
     bool SetBucketTotal(Number tick, const std::u16string& name, Number down, Number up) {
         if (tick > MaxTick || name.empty() || name.size() > 512 || down > MaxBytes || up > MaxBytes ||
-            tick < Day - Offset) return false;
+            tick < Day - LegacyDayOffset) return false;
         const Number hour = DayStart(tick) + ((tick - DayStart(tick)) / Hour) * Hour;
         auto& apps = buckets[hour];
         auto it = apps.find(name);
@@ -116,7 +103,7 @@ public:
         return true;
     }
     bool SetDayTotal(Number tick, const std::u16string& name, Number down, Number up) {
-        if (tick > MaxTick || tick < Day - Offset || name.empty() || name.size() > 512 ||
+        if (tick > MaxTick || tick < Day - LegacyDayOffset || name.empty() || name.size() > 512 ||
             down > MaxBytes || up > MaxBytes) return false;
         const Number day = DayStart(tick);
         auto& apps = daily[day];
@@ -153,10 +140,8 @@ public:
 private:
     bool Insert(Number tick, const std::u16string& name, Number down, Number up, bool day) {
         if (tick > MaxTick || name.empty() || name.size() > 512) return false;
-        if (day && tick < Day - Offset) return false;
-        if (tick < Day - Offset) return false;
-        const Number hour = day ? DayStart(tick)
-                                : DayStart(tick) + (tick - DayStart(tick)) / Hour * Hour;
+        if (day && tick < Day - LegacyDayOffset) return false;
+        const Number hour = day ? DayStart(tick) : tick / Hour * Hour;
         auto& table = day ? daily : buckets;
         auto found = table.find(hour);
         if (found != table.end()) {
@@ -214,10 +199,8 @@ public:
             const auto kind = version == 482 ? Get(in, 1) : 0;
             const auto hour = Get(in, 8), down = Get(in, 8), up = Get(in, 8);
             const auto units = Get(in, 2);
-            const Number day = DayStart(hour);
-            const Number expected_hour = day + (hour - day) / Hour * Hour;
-            if (!in || kind > 1 || hour > MaxTick || hour != expected_hour || down > MaxBytes || up > MaxBytes || !units || units > 512 ||
-                (kind == 1 && (hour + Offset) % Day)) return false;
+            if (!in || kind > 1 || hour > MaxTick || hour % Hour || down > MaxBytes || up > MaxBytes || !units || units > 512 ||
+                (kind == 1 && (hour + LegacyDayOffset) % Day)) return false;
             std::u16string name;
             for (Number j = 0; j < units; ++j) name.push_back(static_cast<char16_t>(Get(in, 2)));
             const auto& table = kind ? candidate.daily : candidate.buckets;

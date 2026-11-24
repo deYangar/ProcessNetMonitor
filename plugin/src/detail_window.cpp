@@ -1,4 +1,5 @@
 #include "detail_window.h"
+#include "history_calendar.h"
 #include "plugin_main.h"
 #include "utils.h"
 #include "signature.h"
@@ -698,7 +699,9 @@ void CDetailWindow::BuildHistoryRows() {
 
     ULONGLONG now = WallClockMs();
     using History = pnm::HourlyHistory;
-    const ULONGLONG today = History::DayStart(now);
+    const pnm::HistoryCalendar calendar;
+    const auto date = calendar.Date(now);
+    const auto today = calendar.Start(date);
     // Natural-day ranges, aligned to local midnight (00:00:00) - issue #9:
     //   今日    = today 00:00 .. now
     //   昨日    = yesterday 00:00 .. today 00:00 (exclusive)
@@ -713,20 +716,20 @@ void CDetailWindow::BuildHistoryRows() {
         span_sec = (double)(now - start_ms) / 1000.0;
         break;
     case TR_YESTERDAY:
-        start_ms = today - History::Day;
+        start_ms = calendar.Start(date - History::Day);
         end_ms = today;
-        span_sec = 86400.0;               // a full calendar day
+        span_sec = (today - start_ms) / 1000.0;
         break;
     case TR_3D:
-        start_ms = today - 2 * History::Day;
+        start_ms = calendar.Start(date - 2 * History::Day);
         span_sec = (double)(now - start_ms) / 1000.0;
         break;
     case TR_7D:
-        start_ms = today - 6 * History::Day;
+        start_ms = calendar.Start(date - 6 * History::Day);
         span_sec = (double)(now - start_ms) / 1000.0;
         break;
     case TR_30D:
-        start_ms = History::Oldest(now);
+        start_ms = calendar.Start(date - 29 * History::Day);
         span_sec = (double)(now - start_ms) / 1000.0;
         break;
     }
@@ -1864,26 +1867,23 @@ void CDetailWindow::OnLButtonDown(int x, int y) {
             return;
         }
         if (PtInRect(&m_rcChartPrev, { x, y })) {
-            if (m_chart_day_start >= pnm::HourlyHistory::Day)
-                m_chart_day_start -= pnm::HourlyHistory::Day;
+            const auto date = m_chart_date ? m_chart_date : pnm::HistoryCalendar().Date(WallClockMs());
+            if (date > pnm::HourlyHistory::Day) m_chart_date = date - pnm::HourlyHistory::Day;
             m_chart_selected_hour = -1;
             InvalidateRect(m_hwnd, NULL, FALSE);
             return;
         }
         if (PtInRect(&m_rcChartToday, { x, y })) {
-            const auto now = WallClockMs();
-            m_chart_day_start = ((now + pnm::HourlyHistory::Offset) / pnm::HourlyHistory::Day)
-                * pnm::HourlyHistory::Day - pnm::HourlyHistory::Offset;
+            m_chart_date = 0;
             m_chart_selected_hour = -1;
             InvalidateRect(m_hwnd, NULL, FALSE);
             return;
         }
         if (PtInRect(&m_rcChartNext, { x, y })) {
-            const auto now = WallClockMs();
-            const auto today = ((now + pnm::HourlyHistory::Offset) / pnm::HourlyHistory::Day)
-                * pnm::HourlyHistory::Day - pnm::HourlyHistory::Offset;
-            if (m_chart_day_start + pnm::HourlyHistory::Day <= today)
-                m_chart_day_start += pnm::HourlyHistory::Day;
+            const auto today = pnm::HistoryCalendar().Date(WallClockMs());
+            if (m_chart_date && m_chart_date + pnm::HourlyHistory::Day < today)
+                m_chart_date += pnm::HourlyHistory::Day;
+            else m_chart_date = 0;
             m_chart_selected_hour = -1;
             InvalidateRect(m_hwnd, NULL, FALSE);
             return;
@@ -1912,17 +1912,7 @@ void CDetailWindow::OnLButtonDown(int x, int y) {
             }
             return;
         }
-        int clicked_hour = -1;
-        if (x >= m_rcChartPlot.left && x < m_rcChartPlot.right &&
-            y >= m_rcChartPlot.top && y <= m_rcChartPlot.bottom && m_chart_bar_w > 0) {
-            const int slot = m_chart_bar_w + m_chart_bar_gap;
-            const int hour = (x - m_rcChartPlot.left) / slot;
-            const auto bucket = pnm::HourlyHistory::DayStart(m_chart_day_start) +
-                static_cast<uint64_t>(max(0, hour)) * pnm::HourlyHistory::Hour;
-            if (hour >= 0 && hour < 24 && (x - m_rcChartPlot.left) % slot < m_chart_bar_w &&
-                m_hourly.buckets.find(bucket) != m_hourly.buckets.end())
-                clicked_hour = hour;
-        }
+        const int clicked_hour = HitTestChartHour(x, y);
         if (clicked_hour >= 0) {
             m_chart_selected_hour = clicked_hour == m_chart_selected_hour ? -1 : clicked_hour;
             m_chart_table_scroll = 0;
@@ -2055,6 +2045,15 @@ void CDetailWindow::OnRButtonDown(int x, int y) {
     }
 }
 
+int CDetailWindow::HitTestChartHour(int x, int y) const {
+    if (!PtInRect(&m_rcChartPlot, {x, y}) || m_chart_bar_w <= 0) return -1;
+    const int dx = x - m_rcChartPlot.left;
+    const int slot = m_chart_bar_w + m_chart_bar_gap;
+    const int index = dx / slot;
+    return index < (int)m_chart_hours.size() && dx % slot < m_chart_bar_w &&
+        m_hourly.buckets.count(m_chart_hours[index]) ? index : -1;
+}
+
 void CDetailWindow::OnMouseMove(int x, int y) {
     // Handle scrollbar dragging
     if (m_dragging_scrollbar) {
@@ -2108,18 +2107,7 @@ void CDetailWindow::OnMouseMove(int x, int y) {
     if (m_active_tab == 2) {
         RECT client;
         GetClientRect(m_hwnd, &client);
-        m_chart_hover_hour = -1;
-        if (x >= m_rcChartPlot.left && x < m_rcChartPlot.right &&
-            y >= m_rcChartPlot.top && y <= m_rcChartPlot.bottom && m_chart_bar_w > 0) {
-            const int slot = m_chart_bar_w + m_chart_bar_gap;
-            const int hour = (x - m_rcChartPlot.left) / slot;
-            const int within = (x - m_rcChartPlot.left) % slot;
-            const auto bucket = pnm::HourlyHistory::DayStart(m_chart_day_start) +
-                static_cast<uint64_t>(max(0, hour)) * pnm::HourlyHistory::Hour;
-            if (hour >= 0 && hour < 24 && within < m_chart_bar_w &&
-                m_hourly.buckets.find(bucket) != m_hourly.buckets.end())
-                m_chart_hover_hour = hour;
-        }
+        m_chart_hover_hour = HitTestChartHour(x, y);
         m_chart_mouse_x = x;
         m_chart_mouse_y = y;
         m_chart_hover_row = -1;
@@ -2327,35 +2315,52 @@ void CDetailWindow::DrawHourlyChart(HDC hdc, int w, int y, int client_h) {
     DeleteObject(bg);
 
     const auto now = WallClockMs();
-    const auto today = pnm::HourlyHistory::DayStart(now);
-    if (!m_chart_day_start) m_chart_day_start = today;
-    const auto day_start = m_chart_day_start;
-    const auto target_day = pnm::HourlyHistory::DayStart(day_start);
-    const auto day_bucket = m_hourly.daily.find(target_day);
-    const bool aggregate_day = day_bucket != m_hourly.daily.end();
-    struct Bar { uint64_t down = 0, up = 0; } bars[24];
+    using History = pnm::HourlyHistory;
+    const pnm::HistoryCalendar calendar;
+    const auto date = m_chart_date ? m_chart_date : calendar.Date(now);
+    const auto start = calendar.Start(date);
+    const auto end = calendar.Start(date + History::Day);
+    const auto day_bucket = m_hourly.daily.lower_bound(start);
+    const bool aggregate_day = day_bucket != m_hourly.daily.end() && day_bucket->first < end;
+    auto hours = calendar.Hours(date);
+    if (m_chart_hours != hours) {
+        m_chart_hover_hour = m_chart_selected_hour = -1;
+        m_chart_hours = std::move(hours);
+    }
+    const int hour_count = (int)m_chart_hours.size();
+    std::vector<History::Usage> bars(hour_count);
+    std::vector<std::wstring> labels(hour_count);
+    std::vector<SYSTEMTIME> local_hours;
+    for (const auto tick : m_chart_hours) local_hours.push_back(calendar.Local(tick));
+    auto hour_apps = [&](int index) {
+        History::Apps apps;
+        const auto tick = m_chart_hours[index];
+        const auto bucket = m_hourly.buckets.find(tick);
+        if (bucket == m_hourly.buckets.end()) return apps;
+        const auto daily = m_hourly.daily.find(History::DayStart(tick));
+        for (const auto& [name, usage] : bucket->second)
+            if (daily == m_hourly.daily.end() || !daily->second.count(name)) apps.emplace(name, usage);
+        return apps;
+    };
     uint64_t max_total = 0;
-    for (int i = 0; i < 24; ++i) {
-        if (aggregate_day) continue;
-        const auto bucket = target_day + static_cast<uint64_t>(i) * pnm::HourlyHistory::Hour;
-        auto it = m_hourly.buckets.find(bucket);
-        if (it == m_hourly.buckets.end()) continue;
-        for (const auto& [name, usage] : it->second) {
-            bars[i].down = pnm::HourlyHistory::SaturatingAdd(bars[i].down, usage.down);
-            bars[i].up = pnm::HourlyHistory::SaturatingAdd(bars[i].up, usage.up);
-        }
+    for (int i = 0; i < hour_count; ++i) {
+        const auto& local = local_hours[i];
+        const auto offset = (int64_t( pnm::HistoryCalendar::AsUnix(local)) - int64_t(m_chart_hours[i])) / 60000;
+        const auto magnitude = int(offset < 0 ? -offset : offset);
+        wchar_t label[40];
+        swprintf_s(label, L"%02d:%02d (UTC%c%02d:%02d)", local.wHour, local.wMinute,
+                   offset < 0 ? L'-' : L'+', magnitude / 60, magnitude % 60);
+        labels[i] = label;
+        bars[i] = History::TotalUsage(hour_apps(i));
         max_total = max(max_total, pnm::HourlyHistory::SaturatingAdd(bars[i].down, bars[i].up));
     }
 
     HFONT old_font = (HFONT)SelectObject(hdc, m_font_row);
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, GetSecondaryTextColor());
-    tm local_tm = {};
-    time_t day_seconds = static_cast<time_t>((day_start + pnm::HourlyHistory::Offset) / 1000);
-    gmtime_s(&local_tm, &day_seconds);
+    const auto local_date = pnm::HistoryCalendar::AsUtc(date);
     wchar_t date_text[64];
-    swprintf_s(date_text, L"%04d-%02d-%02d", local_tm.tm_year + 1900,
-               local_tm.tm_mon + 1, local_tm.tm_mday);
+    swprintf_s(date_text, L"%04d-%02d-%02d", local_date.wYear, local_date.wMonth, local_date.wDay);
     RECT title = { area.left, area.top + 4, max(area.left + 40, area.right - 190), area.top + 30 };
     DrawTextW(hdc, date_text, -1, &title, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
@@ -2417,7 +2422,7 @@ void CDetailWindow::DrawHourlyChart(HDC hdc, int w, int y, int client_h) {
     const int chart_h = max(1, chart_bottom - chart_top);
     const int chart_w = max(1, chart_right - chart_left);
     const int gap = max(1, min(4, (int)(4 * m_dpi_scale)));
-    const int bar_w = max(4, (chart_w - gap * 23) / 24);
+    const int bar_w = max(1, (chart_w - gap * (hour_count - 1)) / max(1, hour_count));
     m_chart_bar_w = bar_w;
     m_chart_bar_gap = gap;
 
@@ -2450,7 +2455,7 @@ void CDetailWindow::DrawHourlyChart(HDC hdc, int w, int y, int client_h) {
     }
     HBRUSH down_brush = CreateSolidBrush(GetAccentColor(false));
     HBRUSH up_brush = CreateSolidBrush(GetAccentColor(true));
-    for (int i = 0; i < 24; ++i) {
+    for (int i = 0; i < hour_count; ++i) {
         const int x = chart_left + i * (bar_w + gap);
         const uint64_t total = pnm::HourlyHistory::SaturatingAdd(bars[i].down, bars[i].up);
         // Clamp to the plot so a bar can never rise above the top tick or past the right axis.
@@ -2461,7 +2466,7 @@ void CDetailWindow::DrawHourlyChart(HDC hdc, int w, int y, int client_h) {
         RECT up_rc = { x, chart_bottom - total_h, bx2, chart_bottom - down_h };
         if (down_h) FillRect(hdc, &down_rc, down_brush);
         if (total_h - down_h) FillRect(hdc, &up_rc, up_brush);
-        wchar_t hour[8]; swprintf_s(hour, L"%02d", i);
+        wchar_t hour[8]; swprintf_s(hour, L"%02d", local_hours[i].wHour);
         RECT label = { x - 2, chart_bottom + 4, x + bar_w + 2, area.bottom };
         DrawTextW(hdc, hour, -1, &label, DT_CENTER | DT_SINGLELINE | DT_TOP);
     }
@@ -2477,22 +2482,15 @@ void CDetailWindow::DrawHourlyChart(HDC hdc, int w, int y, int client_h) {
                   DT_CENTER | DT_SINGLELINE | DT_VCENTER);
     }
     pnm::HourlyHistory::Apps day_apps;
-    if (m_chart_selected_hour >= 0 && m_chart_selected_hour < 24 && !aggregate_day) {
-        const auto bucket = target_day + static_cast<uint64_t>(m_chart_selected_hour) * pnm::HourlyHistory::Hour;
-        const auto it = m_hourly.buckets.find(bucket);
-        if (it != m_hourly.buckets.end()) day_apps = it->second;
-    } else if (aggregate_day) {
-        day_apps = day_bucket->second;
-    } else {
-        day_apps = m_hourly.SummarizeDay(target_day);
-    }
+    const bool selected = m_chart_selected_hour >= 0 && m_chart_selected_hour < hour_count;
+    day_apps = selected ? hour_apps(m_chart_selected_hour) : m_hourly.Summarize(start, end);
     const auto [day_down, day_up] = pnm::HourlyHistory::TotalUsage(day_apps);
-    wchar_t summary[128];
+    wchar_t summary[256];
     wchar_t down_text[32], up_text[32];
     FormatBytes(day_down, down_text, 32); FormatBytes(day_up, up_text, 32);
-    if (m_chart_selected_hour >= 0 && m_chart_selected_hour < 24) {
-        swprintf_s(summary, L"%s %02d:00-%02d:00  %s: %s    %s: %s", date_text,
-                   m_chart_selected_hour, (m_chart_selected_hour + 1) % 24,
+    if (selected) {
+        swprintf_s(summary, L"%s %s  %s: %s    %s: %s", date_text,
+                   labels[m_chart_selected_hour].c_str(),
                    TR(L"下载"), down_text, TR(L"上传"), up_text);
     } else {
     swprintf_s(summary, L"%s  %s: %s    %s: %s", date_text, TR(L"下载"), down_text,
@@ -2543,8 +2541,11 @@ void CDetailWindow::DrawHourlyChart(HDC hdc, int w, int y, int client_h) {
     // Hour usage of one program on the selected day (empty for old daily-only dates).
     auto hour_usage = [&](const std::u16string& name, int h) {
         pnm::HourlyHistory::Usage u{};
-        if (aggregate_day || h < 0 || h > 23) return u;
-        const auto bucket_it = m_hourly.buckets.find(target_day + static_cast<uint64_t>(h) * pnm::HourlyHistory::Hour);
+        if (h < 0 || h >= hour_count) return u;
+        const auto tick = m_chart_hours[h];
+        const auto daily = m_hourly.daily.find(History::DayStart(tick));
+        if (daily != m_hourly.daily.end() && daily->second.count(name)) return u;
+        const auto bucket_it = m_hourly.buckets.find(tick);
         if (bucket_it == m_hourly.buckets.end()) return u;
         const auto app_it = bucket_it->second.find(name);
         if (app_it != bucket_it->second.end()) u = app_it->second;
@@ -2558,7 +2559,8 @@ void CDetailWindow::DrawHourlyChart(HDC hdc, int w, int y, int client_h) {
         vrows.push_back({ ai, -1 });
         if (!m_chart_expanded.count(entries[ai].name)) continue;
         bool any = false;
-        for (int h = 0; h < 24 && !aggregate_day; ++h) {
+        for (int h = selected ? m_chart_selected_hour : 0;
+             h < (selected ? m_chart_selected_hour + 1 : hour_count); ++h) {
             const auto u = hour_usage(entries[ai].name, h);
             if (u.down == 0 && u.up == 0) continue;
             vrows.push_back({ ai, h });
@@ -2585,9 +2587,8 @@ void CDetailWindow::DrawHourlyChart(HDC hdc, int w, int y, int client_h) {
     HFONT hOldTableFont = (HFONT)SelectObject(hdc, m_font_header);
     SetBkMode(hdc, TRANSPARENT);
     wchar_t name_header[128];
-    if (m_chart_selected_hour >= 0 && m_chart_selected_hour < 24) {
-        swprintf_s(name_header, L"%s (%02d:00-%02d:00)", TR(L"程序名"),
-                   m_chart_selected_hour, (m_chart_selected_hour + 1) % 24);
+    if (selected) {
+        swprintf_s(name_header, L"%s (%s)", TR(L"程序名"), labels[m_chart_selected_hour].c_str());
     } else {
         wcscpy_s(name_header, TR(L"程序名"));
     }
@@ -2644,11 +2645,9 @@ void CDetailWindow::DrawHourlyChart(HDC hdc, int w, int y, int client_h) {
             DrawTextW(hdc, name.c_str(), -1, &name_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
             draw_values(e.usage);
         } else if (vr.hour >= 0) {
-            wchar_t label[32];
-            swprintf_s(label, L"%02d:00-%02d:00", vr.hour, (vr.hour + 1) % 24);
             RECT label_rc = { tbl_left + pad + indent, row_y, down_x - 6, row_y + row_h };
             SetTextColor(hdc, GetSecondaryTextColor());
-            DrawTextW(hdc, label, -1, &label_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+            DrawTextW(hdc, labels[vr.hour].c_str(), -1, &label_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
             draw_values(hour_usage(e.name, vr.hour));
         } else {
             RECT note_rc = { tbl_left + pad + indent, row_y, tbl_right - sb_w - pad, row_y + row_h };
@@ -2685,7 +2684,7 @@ void CDetailWindow::DrawHourlyChart(HDC hdc, int w, int y, int client_h) {
         m_chart_thumb_h = 0;
     }
 
-        if (m_chart_hover_hour >= 0 && m_chart_hover_hour < 24) {
+        if (m_chart_hover_hour >= 0 && m_chart_hover_hour < hour_count) {
             const int i = m_chart_hover_hour;
         const uint64_t total = pnm::HourlyHistory::SaturatingAdd(bars[i].down, bars[i].up);
         wchar_t down_value[32], up_value[32], total_value[32], tooltip[192];
@@ -2693,12 +2692,12 @@ void CDetailWindow::DrawHourlyChart(HDC hdc, int w, int y, int client_h) {
         FormatBytes(bars[i].up, up_value, 32);
         FormatBytes(total, total_value, 32);
         if (m_chart_selected_hour == i) {
-            swprintf_s(tooltip, L"%02d:00-%02d:00\n%s: %s\n%s: %s\n%s: %s\n%s",
-                       i, (i + 1) % 24, TR(L"下载"), down_value, TR(L"上传"), up_value,
+            swprintf_s(tooltip, L"%s\n%s: %s\n%s: %s\n%s: %s\n%s",
+                       labels[i].c_str(), TR(L"下载"), down_value, TR(L"上传"), up_value,
                        TR(L"合计"), total_value, TR(L"已筛选此小时"));
         } else {
-            swprintf_s(tooltip, L"%02d:00-%02d:00\n%s: %s\n%s: %s\n%s: %s",
-                       i, (i + 1) % 24, TR(L"下载"), down_value, TR(L"上传"), up_value,
+            swprintf_s(tooltip, L"%s\n%s: %s\n%s: %s\n%s: %s",
+                       labels[i].c_str(), TR(L"下载"), down_value, TR(L"上传"), up_value,
                        TR(L"合计"), total_value);
         }
         // Scale the tooltip width with DPI so the value lines are not wrapped.
