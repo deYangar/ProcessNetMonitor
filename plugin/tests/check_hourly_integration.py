@@ -9,3 +9,13 @@ def method(signature):
 
 
 assert 'legacyMerged' not in method('LoadHistory()')
+
+for name in ('RebuildRows()', 'ResortRows()', 'SortByColumn(', 'HitTestRow(',
+             'OnLButtonDblClk(', 'OnRButtonDown(', 'DrawTableHeader('):
+    assert 'm_active_tab == 2' in method(name).split('return', 1)[0], name
+
+menu = method('ShowContextMenu(')
+assert 'm_active_tab == 2' in menu.split('TrackPopupMenu', 1)[0]
+dispatch = menu.split('TrackPopupMenu', 1)[1]
+assert 'm_active_tab == 2' in dispatch.split('switch (cmd)', 1)[0]
+assert dispatch.index('MB_DEFBUTTON2') < dispatch.index('== IDYES') < dispatch.index('TerminateProcess')

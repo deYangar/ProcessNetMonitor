@@ -1203,6 +1203,10 @@ void CDetailWindow::UpdateData(const std::vector<ProcTraffic>& stats, double tot
 }
 
 void CDetailWindow::RebuildRows() {
+    if (m_active_tab == 2) {
+        if (m_visible) InvalidateRect(m_hwnd, NULL, FALSE);
+        return;
+    }
     auto& stats = m_cached_stats;
 
     if (m_active_tab == 1) {
@@ -1368,6 +1372,7 @@ int CDetailWindow::GetVisibleRows(int client_h) const {
 // ============================================================
 
 void CDetailWindow::ResortRows() {
+    if (m_active_tab == 2) return;
     bool is_hist = (m_active_tab == 1);
     int sc = m_sort_col[m_active_tab];
     bool sa = m_sort_asc[m_active_tab];
@@ -1405,6 +1410,7 @@ void CDetailWindow::ResortRows() {
 }
 
 void CDetailWindow::SortByColumn(int col) {
+    if (m_active_tab == 2) return;
     if (m_sort_col[m_active_tab] == col) {
         m_sort_asc[m_active_tab] = !m_sort_asc[m_active_tab];
     } else {
@@ -1715,6 +1721,7 @@ void CDetailWindow::SetDebugLogs(bool on) {
 // ============================================================
 
 int CDetailWindow::HitTestRow(int y) const {
+    if (m_active_tab == 2) return -1;
     int table_top = GetTableAreaTop();
     if (y < table_top) return -1;
     int cur_y = table_top - m_scroll_pos;
@@ -1840,6 +1847,7 @@ int CDetailWindow::GetScrollMax() const {
 // ============================================================
 
 void CDetailWindow::ShowContextMenu(int row, int x, int y) {
+    if (m_active_tab == 2) return;
     if (row < 0 || row >= (int)m_rows.size()) return;
     auto& r = m_rows[row];
 
@@ -1852,7 +1860,8 @@ void CDetailWindow::ShowContextMenu(int row, int x, int y) {
     AppendMenuW(hMenu, MF_STRING, 1, TR(L"\u5B9A\u4F4D\u6587\u4EF6"));
     AppendMenuW(hMenu, MF_STRING, 2, TR(L"\u6587\u4EF6\u5C5E\u6027"));
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hMenu, MF_STRING, 3, TR(L"\u7ED3\u675F\u8FDB\u7A0B"));
+    if (m_active_tab == 0 && m_context_menu_pid)
+        AppendMenuW(hMenu, MF_STRING, 3, TR(L"\u7ED3\u675F\u8FDB\u7A0B"));
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     // Debug-log master switch (default OFF; crash diagnostics stay ON)
     AppendMenuW(hMenu, MF_STRING, 100,
@@ -1867,6 +1876,7 @@ void CDetailWindow::ShowContextMenu(int row, int x, int y) {
     std::wstring path = m_context_menu_path;
     m_context_menu_open = false;
 
+    if (m_active_tab == 2) return;
     switch (cmd) {
     case 1: // \u5B9A\u4F4D\u6587\u4EF6
         if (!path.empty()) {
@@ -1886,10 +1896,14 @@ void CDetailWindow::ShowContextMenu(int row, int x, int y) {
         }
         break;
     case 3: // \u7ED3\u675F\u8FDB\u7A0B
-        if (pid > 0) {
+        if (m_active_tab == 0 && pid > 0) {
             HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
             if (hProc) {
-                TerminateProcess(hProc, 1);
+                wchar_t prompt[256];
+                swprintf_s(prompt, TR(L"确定要结束进程 PID %lu 吗？"), pid);
+                if (MessageBoxW(m_hwnd, prompt, TR(L"\u7ED3\u675F\u8FDB\u7A0B"),
+                                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES && m_active_tab == 0)
+                    TerminateProcess(hProc, 1);
                 CloseHandle(hProc);
             }
         }
@@ -2358,11 +2372,13 @@ void CDetailWindow::OnLButtonUp(int x, int y) {
 }
 
 void CDetailWindow::OnLButtonDblClk(int x, int y) {
+    if (m_active_tab == 2) return;
     int row = HitTestRow(y);
     if (row >= 0) ToggleExpand(row);
 }
 
 void CDetailWindow::OnRButtonDown(int x, int y) {
+    if (m_active_tab == 2) return;
     int row = HitTestRow(y);
     if (row >= 0) {
         POINT pt = { x, y };
@@ -3200,6 +3216,7 @@ void CDetailWindow::DrawSpeedSummary(HDC hdc, int w, int y) {
 }
 
 void CDetailWindow::DrawTableHeader(HDC hdc, int w, int y) {
+    if (m_active_tab == 2) return;
     m_rcTableHeader = { PADDING, y, w - PADDING, y + TABLE_HEADER_H };
 
     HBRUSH hBrush = CreateSolidBrush(GetHeaderBgColor());
