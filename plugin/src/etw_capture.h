@@ -49,6 +49,8 @@ public:
 
     // 调试日志：记一行「TM 要退出了，会话已在退出前停掉」及其耗时（V6 靠这一行验证）
     void LogStoppedEarly(ULONGLONG elapsed_ms);
+    // 调试日志：退出前先停的诊断行（装上了、收到关闭消息、超时）
+    void LogNote(const wchar_t* msg) { LogLine(L"%s", msg); }
 
     // Debug-log master switch (default OFF, user setting in settings.json /
     // detail-window context menu). Controls etw_capture.log / capture.log

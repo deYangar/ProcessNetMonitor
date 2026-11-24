@@ -122,8 +122,8 @@ public:
     // 退出前先停（issue #20 后续）：盯 TM 主窗口的 WM_CLOSE，赶在 TM 收拾东西之前把 ETW
     // 会话干净停掉。实现和说明见 plugin_main.cpp 的 ExitWatchProc。
     void StopEtwForExit();                              // 主窗 WM_CLOSE 时在主线程调用
-    void TryArmExitWatch();                             // 懒装：主线程入口每次调用，装上即止
-    void RemoveExitWatch();                             // 卸载前在窗口属主线程摘掉
+    void TryArmExitWatch();                             // 在主线程上试装（本插件隐形窗口的每秒定时器调）
+    void RemoveExitWatch();                             // 卸载前摘掉监听、销毁隐形窗口
     static unsigned __stdcall EtwEarlyStopThread(void* param);
     std::atomic<bool> m_etw_exit_stop_started{ false };
     std::atomic<bool> m_etw_exit_stop_done{ false };

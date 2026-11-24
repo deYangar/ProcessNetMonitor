@@ -312,10 +312,6 @@ int CProcessNetItem::GetItemWidthEx(void* hDC) const {
 }
 
 void CProcessNetItem::DrawItem(void* hDC, int x, int y, int w, int h, bool dark_mode) {
-    // 「退出前先停」的安装入口之一：宿主重绘时在主线程调到这里。TM 1.86 的 DataRequired
-    // 来自监控线程，在那里装不上（子类化必须在窗口属主线程做），见 TryArmExitWatch。
-    if (!g_pnm_exit_watch_armed.load(std::memory_order_acquire) && !g_shutting_down)
-        CProcessNetPlugin::Instance().TryArmExitWatch();
     if (m_dir == DIR_TRANSPARENT) return;  // invisible area, draw nothing
     HDC hdc = (HDC)hDC;
 
@@ -554,7 +550,6 @@ void CProcessNetPlugin::DataRequired() {
     // (1.85.x MonitorThreadCallback), where the popup/detail windows would
     // be created without a message pump (data still works, popup does not).
     if (!m_inited) EnsureInitialized();
-    if (!g_pnm_exit_watch_armed.load() && !g_shutting_down) TryArmExitWatch();
 
     if (!m_started) {
         m_items[0].Init(CProcessNetItem::DIR_UPLOAD);
@@ -973,25 +968,27 @@ void CProcessNetPlugin::StopRefreshTimer() {
 //
 // 主窗口怎么找：类名写死在 TrafficMonitor 源码 stdafx.h 的 APP_CLASS_NAME
 // （TrafficMonitor.cpp 注册），TM 自己也用 FindWindow(APP_CLASS_NAME) 找
-// 上一实例。限定同进程、同线程，再装。将来的 TM 版本改了类名就装不上，
+// 上一实例。限定同进程，再装。将来的 TM 版本改了类名就装不上，
 // 退回「退出时不关、下次启动接管」。
 //
-// 安装时机：OnInitialize 在 TM 的 LoadPlugins 里就被调了，早于主窗创建
-// （TrafficMonitor.cpp 里 LoadPlugins 在 DoModal 之前），所以初始化时主窗
-// 还不存在，只能懒装。两个入口：
-//   - DataRequired：TM 1.86 在监控线程里调它（TrafficMonitorDlg.cpp 的
-//     DoMonitorAcquisition，MonitorThreadCallback 里），不在主线程。在这里只能
-//     把主窗找出来记下，装不了
-//   - DrawItem：宿主重绘时在主线程调。子类化必须在这会儿做
-// 2026-11-24 第一版只在 DataRequired 里装、还要求它就在主线程上：验证程序里
-// 取数据和主窗在同一线程所以测过了，真 TM 上一次都没装上（退出后会话还在）。
+// 安装时机（2026-11-24 改了三版，后两版都是真机上才暴露的）：
+//   子类化必须在窗口属主线程做，而 OnInitialize 在 TM 的 LoadPlugins 里就
+//   被调了，早于主窗创建（TrafficMonitor.cpp 里 LoadPlugins 在 DoModal 之前）。
+//   - 第一版在 DataRequired 里装：TM 1.86 在监控线程里调它
+//     （TrafficMonitorDlg.cpp 的 DoMonitorAcquisition），不在主线程，装不上
+//   - 第二版改在 DrawItem 里装（重绘在主线程）：用户不显示本插件的项目时
+//     它永远不被调
+//   - 现在：初始化时（此刻就在主线程）建一个本插件自己的隐形窗口，挂 1 秒
+//     定时器。每秒在主线程上试装，装上就停定时器。不依赖显示内容，也不
+//     依赖哪个线程取数据。
 // ============================================================
 namespace {
 const wchar_t kTmMainClass[] = L"TrafficMonitor_r7XZaS4p";
 constexpr UINT_PTR kExitWatchSubclassId = 0x504E4D45;   // 'PNME'
-HWND g_tm_main_hwnd = nullptr;                   // 已装上退出监听的主窗，只在主线程读写
-std::atomic<HWND> g_tm_main_candidate{ nullptr };   // 找到的 TM 主窗（任何线程读写）
-std::atomic<ULONGLONG> g_exit_watch_try_tick{ 0 };
+constexpr UINT_PTR kExitWatchTimerId = 1;
+HWND g_tm_main_hwnd = nullptr;        // 已装上退出监听的 TM 主窗（只在主线程读写）
+HWND g_tm_main_candidate = nullptr;   // 找到的 TM 主窗，省得每秒枚举（只在主线程读写）
+HWND g_exit_watch_hwnd = nullptr;     // 本插件的隐形窗口（只在主线程读写）
 }
 std::atomic<bool> g_pnm_exit_watch_armed{ false };
 
@@ -1024,35 +1021,65 @@ static LRESULT CALLBACK ExitWatchProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
     if (msg == WM_CLOSE) {
         CProcessNetPlugin::Instance().StopEtwForExit();
     } else if (msg == WM_NCDESTROY) {
-        // 窗口销毁：comctl32 随窗口清理子类表，这里只清状态
+        // 窗口销毁：comctl32 随窗口清理子类表，这里只清状态。TM 不重建主窗；真出现了
+        // 新的主窗，让定时器重新开始找。
         g_tm_main_hwnd = nullptr;
+        g_tm_main_candidate = nullptr;
+        g_pnm_exit_watch_armed = false;
+        if (g_exit_watch_hwnd) SetTimer(g_exit_watch_hwnd, kExitWatchTimerId, 1000, nullptr);
     }
     return DefSubclassProc(hwnd, msg, wp, lp);
 }
 
+// 本插件隐形窗口的过程：每秒在主线程上试装，装上就停定时器。
+static LRESULT CALLBACK ExitWatchTimerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_TIMER && wp == kExitWatchTimerId) {
+        CProcessNetPlugin::Instance().TryArmExitWatch();
+        if (g_pnm_exit_watch_armed.load()) KillTimer(hwnd, kExitWatchTimerId);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+// 在初始化所在的线程上建隐形窗口（message-only：EnumWindows 扫不到）。
+static void CreateExitWatchWindow(HINSTANCE hInst) {
+    wchar_t cls[64];
+    swprintf_s(cls, 64, L"PNMExitWatch_%p", hInst);
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = ExitWatchTimerProc;
+    wc.hInstance = hInst;
+    wc.lpszClassName = cls;
+    RegisterClassExW(&wc);
+    g_exit_watch_hwnd = CreateWindowExW(0, cls, L"", WS_OVERLAPPED,
+                                        0, 0, 0, 0, HWND_MESSAGE, nullptr, hInst, nullptr);
+    if (g_exit_watch_hwnd) SetTimer(g_exit_watch_hwnd, kExitWatchTimerId, 1000, nullptr);
+}
+
 void CProcessNetPlugin::TryArmExitWatch() {
-    // 任何线程都可以调（DataRequired、DrawItem 两个入口），但子类化必须在窗口属主线程做：
-    // 不在属主线程就只把主窗记下来，等属主线程的入口来装。
-    HWND tm = g_tm_main_candidate.load();
+    // 只在 TM 主线程上被调（本插件隐形窗口的每秒定时器，或显式卸载前）。
+    HWND tm = g_tm_main_candidate;
     if (!tm || !IsTmMainWindow(tm)) {
-        ULONGLONG now = GetTickCount64();
-        if (now - g_exit_watch_try_tick.load() < 1000) return;   // 没找到时每秒最多找一次
-        g_exit_watch_try_tick.store(now);
         tm = FindTmMainWindow();
         if (!tm) return;
-        g_tm_main_candidate.store(tm);
+        g_tm_main_candidate = tm;
     }
-    if (GetWindowThreadProcessId(tm, nullptr) != GetCurrentThreadId()) return;
+    if (GetWindowThreadProcessId(tm, nullptr) != GetCurrentThreadId()) return;   // 不在属主线程：装不了
     if (!SetWindowSubclass(tm, ExitWatchProc, kExitWatchSubclassId, 0)) return;
     g_tm_main_hwnd = tm;
     g_pnm_exit_watch_armed = true;
+    m_etw_cap.LogNote(L"exit watch armed on TM main window (WM_CLOSE stops the ETW session before exit)");
 }
 
 void CProcessNetPlugin::RemoveExitWatch() {
+    // 从通用控件库的子类表摘本节点；表空自动还原原过程
     HWND tm = g_tm_main_hwnd;
     g_tm_main_hwnd = nullptr;
-    // 从通用控件库的子类表摘本节点；表空自动还原原过程
     if (tm && IsWindow(tm)) RemoveWindowSubclass(tm, ExitWatchProc, kExitWatchSubclassId);
+    if (g_exit_watch_hwnd) {
+        if (!g_shutting_down) SafeDestroyWindow(g_exit_watch_hwnd);
+        g_exit_watch_hwnd = nullptr;
+    }
 }
 
 void CProcessNetPlugin::StopEtwForExit() {
@@ -1060,6 +1087,7 @@ void CProcessNetPlugin::StopEtwForExit() {
     m_etw_exit_stop_tick = GetTickCount64();
     if (g_shutting_down) return;   // 已经在卸载收尾里，交给 Stop()
     ULONGLONG t0 = GetTickCount64();
+    m_etw_cap.LogNote(L"TM main window WM_CLOSE: stopping ETW session before exit");
     // 停会话放工作线程：ControlTraceW(STOP) 会让系统做一轮信息采集，耗时不确定。
     // 主线程（此刻在 TM 的 WM_CLOSE 处理里）最多等 2 秒；等不到就照常退出，之后
     // DllMain 的退出分支接管——自建会话留给下次启动，不崩。
@@ -1067,11 +1095,13 @@ void CProcessNetPlugin::StopEtwForExit() {
     if (!h) {
         m_etw_cap.Stop();
         m_etw_exit_stop_done = true;
+        m_etw_cap.LogStoppedEarly(GetTickCount64() - t0);
         return;
     }
     bool finished = WaitForSingleObject(h, (DWORD)kEtwExitStopMaxWaitMs) == WAIT_OBJECT_0;
     CloseHandle(h);
     if (finished) m_etw_cap.LogStoppedEarly(GetTickCount64() - t0);
+    else m_etw_cap.LogNote(L"ETW stop did not finish within 2000 ms; letting TM continue to exit");
 }
 
 unsigned __stdcall CProcessNetPlugin::EtwEarlyStopThread(void* param) {
@@ -1170,6 +1200,9 @@ void CProcessNetPlugin::InitOnce(const wchar_t* cfg_base) {
         cfg_dir = dll_dir + L"\\ProcessNetMonitor";
     }
     m_detail.SetConfigDir(cfg_dir.c_str());
+    // 「退出前先停」的安装窗口：此刻在宿主主线程上（OnInitialize / EI_CONFIG_DIR 都在
+    // LoadPlugins 里送达）。它每秒在主线程上试装一次对 TM 主窗的监听，见文件后部的说明。
+    CreateExitWatchWindow(hInst);
     m_etw_cap.Start();
 
     m_detail.LoadHistory();
