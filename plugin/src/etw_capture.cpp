@@ -332,11 +332,15 @@ void EtwCapture::Stop() {
     m_stop = true;
     if (m_wake) SetEvent(m_wake);   // 消费线程若停在重试等待里，立即醒来看到 m_stop
 
-    EVENT_TRACE_PROPERTIES sp;
-    memset(&sp, 0, sizeof(sp));
-    sp.Wnode.BufferSize = sizeof(EVENT_TRACE_PROPERTIES);
+    // 缓冲区要留出会话名的位置：裸的 sizeof(EVENT_TRACE_PROPERTIES) 在真机上得
+    // ERROR_MORE_DATA(234)——系统往调用方缓冲区回写会话名，停止本身已经生效。残留接管那处
+    // 2026-11-06 已按这个改过；这里原先在 DllMain 里、没人看返回码。现在手动退出每次都走
+    // 「退出前先停」的这条路，返回码要干净（实测 234 → 0）。64 个 wchar 足够放下两个会话名。
+    BYTE sbuf[sizeof(EVENT_TRACE_PROPERTIES) + 64 * sizeof(wchar_t)] = {};
+    auto* sp = reinterpret_cast<EVENT_TRACE_PROPERTIES*>(sbuf);
+    sp->Wnode.BufferSize = sizeof(sbuf);
     if (m_own_session && m_own_session_handle) {
-        ControlTraceW(m_own_session_handle, nullptr, &sp, EVENT_TRACE_CONTROL_STOP);
+        ControlTraceW(m_own_session_handle, nullptr, sp, EVENT_TRACE_CONTROL_STOP);
     } else {
         TRACEHANDLE h = m_cur_consumer.load();
         if (h != INVALID_PROCESSTRACE_HANDLE) CloseTrace(h);
