@@ -129,10 +129,42 @@ static void CustomDateRange() {
     assert(day.down == 7 && day.up == 10);
 }
 
+static void FullLibraryEvictsOldest() {
+    // 行数到上限后新数据必须还能写入：淘汰最旧的桶（B1 之前是静默拒绝新行，
+    // 形成周期性整段空白）。同时验证满库文件写盘读回原样复原——Read 重放不
+    // 触发淘汰。
+    History history;
+    constexpr auto base = 1800000000000ULL;
+    constexpr int per_hour = 200;
+    const auto name = [](int i) {
+        std::u16string s = u"proc-";
+        s += char16_t(u'a' + (i / 26) % 26);
+        s += char16_t(u'a' + i % 26);
+        return s;
+    };
+    for (int hour = 0; hour < (int)(History::MaxRows / per_hour); ++hour)
+        for (int i = 0; i < per_hour; ++i)
+            assert(history.Add(base + hour * History::Hour, name(i), 1, 0));
+    assert(history.buckets.size() == History::MaxRows / per_hour);
+    assert(history.Add(base + (int)(History::MaxRows / per_hour) * History::Hour, u"late-comer", 5, 6));
+    assert(!history.buckets.count(base));                              // 最旧的桶让位
+    assert(history.buckets.begin()->first == base + History::Hour);    // 且只让一个
+    const auto newest = base + (int)(History::MaxRows / per_hour) * History::Hour;
+    const auto& late = *history.buckets.at(newest);
+    assert(late.size() == 1 && late.at(u"late-comer").down == 5 && late.at(u"late-comer").up == 6);
+    std::stringstream disk;
+    assert(history.Write(disk));
+    History loaded;
+    assert(loaded.Read(disk));
+    assert(loaded.buckets.size() == history.buckets.size());
+    assert(loaded.buckets.count(newest));
+}
+
 int main() {
     ClearThenRestartTwice();
     ChartTotals();
     IdleSamplesDoNotUseCapacity();
     LocalDaysAndPnh1();
     CustomDateRange();
+    FullLibraryEvictsOldest();
 }

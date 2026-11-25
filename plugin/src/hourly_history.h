@@ -1,11 +1,13 @@
 #pragma once
 #include <cstdint>
+#include <cstring>
 #include <istream>
 #include <map>
 #include <memory>
 #include <ostream>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace pnm {
 class HourlyHistory {
@@ -102,7 +104,7 @@ public:
     }
     bool Add(Number tick, const std::u16string& name, Number down, Number up, bool day = false) {
         if (!down && !up) return false;
-        return Insert(tick, name, down, up, day);
+        return Insert(tick, name, down, up, day, true);
     }
 
 private:
@@ -112,7 +114,23 @@ private:
         else if (apps.use_count() != 1) apps = std::make_shared<Apps>(*apps);
         return *std::const_pointer_cast<Apps>(apps);
     }
-    bool Insert(Number tick, const std::u16string& name, Number down, Number up, bool day) {
+    // 行数/字节到上限后不再静默拒绝新行（review B1：满额丢新数据会形成周期性
+    // 整段空白且无提示）：逐个淘汰最旧的桶腾位，哪怕它还在 31 天窗口内——库保
+    // 持滑动窗口语义，新数据永远可写。仅运行期 Add 路径启用；Read 重放满库文件
+    // 必须原样复原，不淘汰。
+    void EvictOldestUntilFits(Number rowBytes) {
+        while (rows_ >= MaxRows || bytes_ + rowBytes > MaxFile) {
+            if (buckets.empty() && daily.empty()) return;
+            Table* victim = nullptr;
+            if (buckets.empty()) victim = &daily;
+            else if (daily.empty()) victim = &buckets;
+            else victim = buckets.begin()->first <= daily.begin()->first ? &buckets : &daily;
+            for (const auto& app : *victim->begin()->second) bytes_ -= 27 + 2 * app.first.size();
+            rows_ -= victim->begin()->second->size();
+            victim->erase(victim->begin());
+        }
+    }
+    bool Insert(Number tick, const std::u16string& name, Number down, Number up, bool day, bool evict = false) {
         if (tick > MaxTick || name.empty() || name.size() > 512) return false;
         if (day && tick < Day - LegacyDayOffset) return false;
         const Number hour = day ? DayStart(tick) : tick / Hour * Hour;
@@ -128,7 +146,9 @@ private:
             }
         }
         const auto rowBytes = 27 + 2 * name.size();
-        if (rows_ >= MaxRows || bytes_ + rowBytes > MaxFile || down > MaxBytes || up > MaxBytes) return false;
+        if (down > MaxBytes || up > MaxBytes) return false;
+        if (evict) EvictOldestUntilFits(rowBytes);
+        if (rows_ >= MaxRows || bytes_ + rowBytes > MaxFile) return false;
         Mutable(table[hour]).emplace(name, Usage{down, up});
         bytes_ += rowBytes;
         ++rows_;
@@ -162,55 +182,94 @@ public:
         }
         return static_cast<bool>(out);
     }
-    bool Read(std::istream& in) {
-        HourlyHistory candidate;
-        char magic[4]{};
-        in.read(magic, 4);
-        if (!in || std::string(magic, 4) != "PNH1") return false;
-        const auto version = Get(in, 4);
-        if (!in || (version != 480 && version != 481 && version != 482)) return false;
-        const auto count = Get(in, 4);
-        if (!in || count > MaxRows) return false;
-        if (version == 482) {
-            // Bit 0 once marked a cleared library and no longer has an effect;
-            // files that carry it must stay readable.
-            const auto flags = Get(in, 1);
-            if (!in || flags > 1) return false;
+    bool Read(std::istream& in) { return Read(in, nullptr); }
+    // newer_format 非 null 时接收「文件出自比本插件更新的版本」的判定：这不是
+    // 损坏（review B2），调用方不得把它当坏文件改名备份、清空重记。
+    bool Read(std::istream& in, bool* newer_format) {
+        std::vector<char> data;
+        // 整块读入再解析（review P1：逐字节 istream::get 在 32 MB 规模实测拖慢
+        // 宿主启动 0.6~1.1 s）。可定位的流按大小一次读入，其余退回分块读。
+        in.seekg(0, std::ios::end);
+        const auto end = in.tellg();
+        if (in.fail()) {
+            in.clear();
+            char chunk[1 << 16];
+            while (in) {
+                in.read(chunk, sizeof chunk);
+                data.insert(data.end(), chunk, chunk + in.gcount());
+            }
+            if (in.bad()) return false;
+        } else {
+            in.seekg(0, std::ios::beg);
+            data.resize(static_cast<std::size_t>(end));
+            if (end > 0) in.read(data.data(), end);
+            if (in.bad()) return false;
         }
-        for (Number i = 0; i < count; ++i) {
-            const auto kind = version == 482 ? Get(in, 1) : 0;
-            const auto hour = Get(in, 8), down = Get(in, 8), up = Get(in, 8);
-            const auto units = Get(in, 2);
-            if (!in || kind > 1 || hour > MaxTick || hour % Hour || down > MaxBytes || up > MaxBytes || !units || units > 512 ||
-                (kind == 1 && (hour + LegacyDayOffset) % Day)) return false;
-            std::u16string name;
-            for (Number j = 0; j < units; ++j) name.push_back(static_cast<char16_t>(Get(in, 2)));
-            const auto& table = kind ? candidate.daily : candidate.buckets;
-            const auto bucket = table.find(hour);
-            if (!in || (bucket != table.end() && bucket->second->count(name)) ||
-                !candidate.Insert(hour, name, down, up, kind == 1)) return false;
-        }
-        if (version == 481) {
-            const auto flags = Get(in, 1);
-            // The experimental aggregate flag did not encode per-row granularity.
-            if (!in || flags != 0) return false;
-        }
-        if (in.peek() != std::char_traits<char>::eof() || in.bad()) return false;
-        *this = std::move(candidate);
-        return true;
+        if (data.size() > MaxFile) return false;
+        return Parse(data.data(), data.size(), newer_format);
     }
 
 private:
     std::size_t rows_ = 0;
     Number bytes_ = 13;
-    static Number Get(std::istream& in, unsigned bytes) {
-        Number value = 0;
-        for (unsigned i = 0; i < bytes; ++i) {
-            const int byte = in.get();
-            if (byte == std::char_traits<char>::eof()) return 0;
-            value |= static_cast<Number>(byte) << (i * 8);
+    // 内存游标：替代原逐字节 istream::get，读越界置 failed（等价流的 eof/fail）
+    struct Cursor {
+        const char* p;
+        std::size_t left;
+        bool failed = false;
+        Number take(unsigned bytes) {
+            if (left < bytes) { failed = true; return 0; }
+            Number value = 0;
+            for (unsigned i = 0; i < bytes; ++i)
+                value |= static_cast<Number>(static_cast<unsigned char>(p[i])) << (8 * i);
+            p += bytes;
+            left -= bytes;
+            return value;
         }
-        return value;
+    };
+    bool Parse(const char* data, std::size_t size, bool* newer_format) {
+        HourlyHistory candidate;
+        Cursor cursor{data, size};
+        if (size < 4 || memcmp(data, "PNH1", 4) != 0) return false;
+        cursor.take(4);   // magic
+        const auto version = cursor.take(4);
+        if (cursor.failed) return false;
+        if (version != 480 && version != 481 && version != 482) {
+            // 范围内更大的合法版本号形状 = 文件由更新版本的插件写出；全 1 等随
+            // 机损坏值超出 16 位版本号形状，仍按损坏处理
+            if (newer_format && version > 482 && version <= 0xFFFF) *newer_format = true;
+            return false;
+        }
+        const auto count = cursor.take(4);
+        if (cursor.failed || count > MaxRows) return false;
+        if (version == 482) {
+            // Bit 0 once marked a cleared library and no longer has an effect;
+            // files that carry it must stay readable.
+            const auto flags = cursor.take(1);
+            if (cursor.failed || flags > 1) return false;
+        }
+        for (Number i = 0; i < count; ++i) {
+            const auto kind = version == 482 ? cursor.take(1) : 0;
+            const auto hour = cursor.take(8), down = cursor.take(8), up = cursor.take(8);
+            const auto units = cursor.take(2);
+            if (cursor.failed || kind > 1 || hour > MaxTick || hour % Hour || down > MaxBytes || up > MaxBytes || !units || units > 512 ||
+                (kind == 1 && (hour + LegacyDayOffset) % Day)) return false;
+            std::u16string name;
+            for (Number j = 0; j < units; ++j) name.push_back(static_cast<char16_t>(cursor.take(2)));
+            if (cursor.failed) return false;
+            const auto& table = kind ? candidate.daily : candidate.buckets;
+            const auto bucket = table.find(hour);
+            if ((bucket != table.end() && bucket->second->count(name)) ||
+                !candidate.Insert(hour, name, down, up, kind == 1)) return false;
+        }
+        if (version == 481) {
+            const auto flags = cursor.take(1);
+            // The experimental aggregate flag did not encode per-row granularity.
+            if (cursor.failed || flags != 0) return false;
+        }
+        if (cursor.left != 0) return false;   // 尾部多余字节
+        *this = std::move(candidate);
+        return true;
     }
 };
 }

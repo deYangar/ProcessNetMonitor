@@ -59,6 +59,19 @@ static void TestRecovery(const fs::path& dir) {
             if (entry.path().filename().wstring().find(L"recover.dat.bak.") == 0 && read(entry.path()) == bytes)
                 backedUp = true;
         assert(backedUp && !fs::exists(path));
+        {
+            // 文件由更新版本的插件写出（版本 483）：不是损坏——原文件必须原样
+            // 保留、不产生备份、报告 NewerVersion（review B2）
+            const auto newer_path = dir / L"newer.dat";
+            const std::string newer_bytes = std::string("PNH1\xe3\x01\0\0", 8) + std::string(20, '\0');
+            std::ofstream(newer_path, std::ios::binary).write(newer_bytes.data(), newer_bytes.size());
+            History fresh;
+            assert(pnm::LoadHistoryFile(newer_path, fresh) == HistoryLoad::NewerVersion);
+            assert(read(newer_path) == newer_bytes);
+            for (const auto& entry : fs::directory_iterator(dir))
+                assert(entry.path().filename().wstring().find(L"newer.dat.bak.") != 0);
+            fs::remove(newer_path);
+        }
         pnm::HistorySave save;
         assert(save.Flush(path, history));
         assert(pnm::LoadHistoryFile(path, history) == HistoryLoad::Loaded);
