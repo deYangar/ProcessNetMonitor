@@ -8,7 +8,7 @@ def method(signature):
     return source.split(f'CDetailWindow::{signature}', 1)[1].split('\n}', 1)[0]
 
 
-assert 'legacyMerged' not in method('LoadHistory()')
+assert 'legacyMerged' not in source  # retired flag: nothing may read or set it
 assert 'MigrateLegacyHistoryToHourly' not in source
 assert 'history.dat"' not in source  # no old-file open/write/delete path
 

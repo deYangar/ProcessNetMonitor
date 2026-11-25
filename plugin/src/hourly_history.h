@@ -25,7 +25,6 @@ public:
     using Table = std::map<Number, std::shared_ptr<const Apps>>;
     Table buckets;
     Table daily;
-    bool legacyMerged = false;
 
     static Number DayStart(Number tick) {
         if (tick < Day - LegacyDayOffset) return 0;
@@ -145,7 +144,7 @@ public:
         out.write("PNH1", 4);
         put(482, 4);
         put(rows_, 4);
-        put(legacyMerged ? 1 : 0, 1);
+        put(0, 1);  // reserved: bit 0 once marked a cleared library
         out.write(row, cursor - row);
         for (const auto* table : {&buckets, &daily}) {
             for (const auto& [hour, apps] : *table) {
@@ -173,9 +172,10 @@ public:
         const auto count = Get(in, 4);
         if (!in || count > MaxRows) return false;
         if (version == 482) {
+            // Bit 0 once marked a cleared library and no longer has an effect;
+            // files that carry it must stay readable.
             const auto flags = Get(in, 1);
             if (!in || flags > 1) return false;
-            candidate.legacyMerged = flags == 1;
         }
         for (Number i = 0; i < count; ++i) {
             const auto kind = version == 482 ? Get(in, 1) : 0;

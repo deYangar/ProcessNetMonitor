@@ -834,8 +834,6 @@ void CDetailWindow::ClearHistory() {
     }
     if (m_hourly_writable) {
         m_hourly = {};
-        // The original history.dat remains on disk after clearing.
-        m_hourly.legacyMerged = true;
         m_hourly_previous.clear();
         m_hourly_tick = 0;
         m_hourly_dirty = true;

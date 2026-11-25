@@ -10,14 +10,17 @@ static void ClearThenRestartTwice() {
     History history;
     assert(history.Add(tick, u"deleted", 10, 5));
     history = {};
-    history.legacyMerged = true;
     assert(history.Add(tick, u"new", 70, 20));
     for (int restart = 0; restart < 2; ++restart) {
         std::stringstream disk;
         assert(history.Write(disk));
+        auto bytes = disk.str();
+        // Files written by earlier builds carry the retired "cleared" flag in the v482 header.
+        if (restart == 0) bytes.at(12) = 1;
+        else assert(bytes.at(12) == 0);  // the flag is not carried forward
+        std::stringstream input(bytes);
         History loaded;
-        assert(loaded.Read(disk));
-        assert(loaded.legacyMerged);
+        assert(loaded.Read(input));
         const auto& apps = *loaded.buckets.begin()->second;
         assert(!apps.count(u"deleted"));
         assert(apps.at(u"new").down == 70 && apps.at(u"new").up == 20);

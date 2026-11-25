@@ -113,7 +113,6 @@ int wmain(int argc, wchar_t** argv) {
     assert(snapshot.buckets.begin()->second->at(u"synthetic-program-aa").down == 71);
     assert(save.Queue(path, history, false));
     History cleared;
-    cleared.legacyMerged = true;
     assert(save.Flush(path, cleared));
     Wait(save);
     assert(Load(path).buckets.empty());
@@ -129,7 +128,7 @@ int wmain(int argc, wchar_t** argv) {
     assert(Wait(save) == pnm::HistorySave::Saved);
     for (int restart = 0; restart < 2; ++restart) {
         const auto restored = Load(path);
-        assert(restored.legacyMerged && restored.buckets.size() == 1);
+        assert(restored.buckets.size() == 1);
         assert(restored.buckets.begin()->second->at(u"fresh").up == 8);
     }
     TestRecovery(dir);
