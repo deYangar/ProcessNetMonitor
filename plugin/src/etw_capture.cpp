@@ -303,6 +303,22 @@ bool EtwCapture::Start() {
 }
 
 void EtwCapture::Stop() {
+    // 并发串行化（review C1）：正常手动退出走「退出前先停」，停会话放工作线程、
+    // 主线程最多等 2 秒；等不到就放行退出，而那个线程还卡在下面的 ControlTraceW
+    // 和 join 里。此后 DllMain 的退出分支（StopEtwCapture）、析构、同步兜底分支
+    // 都会再次进本函数——先前是两个线程无锁地对同一个 std::thread 又 join 又
+    // detach。眼下靠两个没写进代码的外部前提才没出事（插件对象是 DLL 静态单例
+    // 不会被销毁；抓包线程持有 DLL 引用使退出时卸不掉 DLL），这里把它变成代码
+    // 内的硬约束：同一时刻只允许一个停止在跑，后进来者直接返回（幂等）。等待
+    // 是禁止的：退出分支在 DllMain 里持 loader lock，先到者的收尾线程退出时也要
+    // 拿 loader lock——等待即死锁。
+    bool expected = false;
+    if (!m_stopping.compare_exchange_strong(expected, true)) return;
+    StopCore();
+    m_stopping = false;
+}
+
+void EtwCapture::StopCore() {
     if (g_pnm_exit_threads_dead) {
         // 进程退出（Win8+）。消费线程已被系统结束，晚于本 DLL 初始化的系统模块都已卸载。
         // 这里一个会话都不停：Win8+ 的退出路径上不出现 ControlTraceW(STOP)，issue #20 的崩溃

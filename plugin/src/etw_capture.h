@@ -30,6 +30,9 @@ public:
 
     bool Start();
     void Stop();
+    // Stop 的实际收尾（原函数体）。Stop() 本身用 m_stopping 串行化后调它，
+    // 见 etw_capture.cpp 里的说明。
+    void StopCore();
     bool IsRunning() const { return m_running; }
     // "has live data": true only if we received events within the last 15s.
     // Once the ETW session drops, upstream falls back to legacy capture.
@@ -123,6 +126,12 @@ private:
 
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_stop{false};
+    // Stop() 一次性标志（review C1）：「退出前先停」超时放行后，工作线程可能
+    // 还卡在 StopCore 的 ControlTraceW/join 里，DllMain 退出分支/析构会再次调
+    // Stop()——两个线程对同一个 std::thread 并发 join/detach 是数据竞争。
+    // 后进来者直接返回；绝不能等待（退出分支在 DllMain 里持 loader lock，先到
+    // 者的收尾线程退出时也要拿 loader lock，等待即死锁）。
+    std::atomic<bool> m_stopping{false};
     std::atomic<ULONGLONG> m_last_event_tick{0};   // set on every kept event
     std::thread m_thread;
     // 手动复位事件。ConsumerLoop 的重试等待等的是它而不是 Sleep：Stop() 置位就能立即唤醒，

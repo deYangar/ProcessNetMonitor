@@ -243,6 +243,11 @@ static void ApplyCrashDump(bool enabled, HWND hint_parent) {
     wchar_t dbg[MAX_PATH] = L"";
     if (!PNM_GetDebugDir(dbg, MAX_PATH) || !dbg[0]) return;
     if (enabled) {
+        // 拼接前查余量（review C3）：PNM_GetDebugDir 允许 259 字符路径，目录深
+        // 到 250+ 字符时 wcscat_s 会溢出触发无效参数处理，进程启动即终止。
+        // 超深目录放弃登记，宁可没有 WER 转储也不能 fastfail。
+        const size_t len = wcsnlen_s(dbg, MAX_PATH);
+        if (len + 10 > MAX_PATH) return;   // "\\werdumps" 9 字符 + 结尾
         wchar_t wer_dir[MAX_PATH];
         wcscpy_s(wer_dir, dbg);
         wcscat_s(wer_dir, L"\\werdumps");
