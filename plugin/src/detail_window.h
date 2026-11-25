@@ -97,7 +97,7 @@ public:
 
 
     // History time range (natural-day aligned, local midnight)
-    enum TimeRange { TR_TODAY = 0, TR_YESTERDAY, TR_3D, TR_7D, TR_30D };
+    enum TimeRange { TR_TODAY = 0, TR_YESTERDAY, TR_3D, TR_7D, TR_30D, TR_CUSTOM };
 
 private:
     // Window
@@ -117,8 +117,8 @@ private:
     void DrawTitleBar(HDC hdc, int w);
     void DrawTabs(HDC hdc, int w, int y);
     void DrawTimeRangeButtons(HDC hdc, int w, int y);
-    void DrawSpeedSummary(HDC hdc, int w, int y);
-    void DrawHourlyChart(HDC hdc, int w, int y, int client_h);
+    int DrawSpeedSummary(HDC hdc, int w, int y);
+    void DrawHourlyChart(HDC hdc, int w, int y, int client_h, int speed_right);
     void DrawTableHeader(HDC hdc, int w, int y);
     void DrawTableRows(HDC hdc, int w, int y, int h);
     // 连接表格列宽自适应窗口 (协议/状态固定, 本地/远程/归属地按权重分配)
@@ -260,6 +260,12 @@ private:
 
     // Time range filter (history tab)
     TimeRange m_time_range = TR_TODAY;
+    ULONGLONG m_custom_first = 0, m_custom_last = 0;
+    ULONGLONG m_history_rows_date = 0;
+    std::pair<ULONGLONG, ULONGLONG> HistoryDates(ULONGLONG today) const;
+    void RefreshHistoryRange();
+    void SelectChartDate(ULONGLONG date, ULONGLONG today);
+    RECT m_rcCustomDates = {}, m_rcOpenChart = {}, m_rcChartDate = {}, m_rcChartAll = {};
 
     // Table state (per-tab sort)
     int m_sort_col[2] = { 3, 3 };     // default sort by download/total_down

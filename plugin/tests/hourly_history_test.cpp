@@ -102,9 +102,34 @@ static void LocalDaysAndPnh1() {
     assert(loaded.Summarize(west.Start(west_date), west.Start(west_date + History::Day)).at(u"daily").down == 24);
 }
 
+static void CustomDateRange() {
+    using Calendar = pnm::HistoryCalendar;
+    using Range = Calendar::DateRange;
+    const auto west = Zone(L"Pacific Standard Time");
+    const auto spring = Calendar::AsUnix(SYSTEMTIME{2026, 3, 0, 8});
+    const auto today = spring + 2 * Calendar::Day;
+    const auto now = west.Start(today) + 6 * Calendar::Hour;
+    assert((Range{spring, today}.Valid(today)));
+    assert((Range{Calendar::OldestDate(today), today}.Valid(today)));
+    assert((!Range{Calendar::OldestDate(today) - Calendar::Day, today}.Valid(today)));
+    assert((!Range{today, spring}.Valid(today)));
+    assert((!Range{today, today + Calendar::Day}.Valid(today)));
+    const auto [first, stop] = west.Bounds({spring, spring}, now);
+    assert(stop - first == 23 * Calendar::Hour);
+    const auto [rangeStart, rangeEnd] = west.Bounds({spring, today}, now);
+    assert(rangeStart == first && rangeEnd == now + 1);
+    History history;
+    assert(history.Add(first, u"browser", 2, 3));
+    assert(history.Add(stop - Calendar::Hour, u"browser", 5, 7));
+    assert(history.Add(stop, u"browser", 11, 13));
+    const auto day = history.Summarize(first, stop).at(u"browser");
+    assert(day.down == 7 && day.up == 10);
+}
+
 int main() {
     ClearThenRestartTwice();
     ChartTotals();
     IdleSamplesDoNotUseCapacity();
     LocalDaysAndPnh1();
+    CustomDateRange();
 }

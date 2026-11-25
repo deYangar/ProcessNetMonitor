@@ -8,6 +8,7 @@
 #include <shellapi.h>
 #include <shobjidl.h>
 #include <dwmapi.h>
+#include <commctrl.h>
 #include <algorithm>
 #include <cmath>
 #include <set>
@@ -36,6 +37,124 @@ static LRESULT CALLBACK DetailStaticWndProc(HWND hwnd, UINT msg, WPARAM wp, LPAR
 // ============================================================
 
 static ULONGLONG WallClockMs() { return (ULONGLONG)time(NULL) * 1000; }
+
+namespace {
+using Calendar = pnm::HistoryCalendar;
+
+std::wstring DateText(Calendar::Number date) {
+    const auto d = Calendar::AsUtc(date);
+    wchar_t text[16];
+    swprintf_s(text, L"%04u-%02u-%02u", unsigned(d.wYear), unsigned(d.wMonth), unsigned(d.wDay));
+    return text;
+}
+
+struct DateDialog {
+    Calendar::DateRange range;
+    Calendar::Number today;
+    bool single;
+    HWND first = nullptr, last = nullptr;
+    HFONT font = nullptr;
+
+    static INT_PTR CALLBACK Proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
+        auto* dialog = reinterpret_cast<DateDialog*>(GetWindowLongPtrW(hwnd, DWLP_USER));
+        if (message == WM_INITDIALOG) {
+            dialog = reinterpret_cast<DateDialog*>(lp);
+            SetWindowLongPtrW(hwnd, DWLP_USER, lp);
+            SetWindowTextW(hwnd, dialog->single ? TR(L"图表日期") : TR(L"自定义日期"));
+            const auto font = dialog->font;
+            auto control = [&](const wchar_t* cls, const wchar_t* text, DWORD style,
+                               int id, int x, int y, int w, int h) {
+                RECT rc{x, y, x + w, y + h};
+                MapDialogRect(hwnd, &rc);
+                auto child = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | style,
+                    rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
+                    hwnd, reinterpret_cast<HMENU>(INT_PTR(id)), nullptr, nullptr);
+                SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(font), FALSE);
+                return child;
+            };
+            auto picker = [&](const wchar_t* label, int y, Calendar::Number date) {
+                control(L"STATIC", label, SS_CENTERIMAGE, -1, 10, y, 112, 20);
+                const auto child = control(DATETIMEPICK_CLASSW, nullptr, WS_TABSTOP | DTS_SHORTDATEFORMAT,
+                                           y + 100, 128, y, 112, 20);
+                SYSTEMTIME limits[] = {Calendar::AsUtc(Calendar::OldestDate(dialog->today)),
+                                       Calendar::AsUtc(dialog->today)};
+                auto value = Calendar::AsUtc(date);
+                SendMessageW(child, DTM_SETFORMATW, 0, reinterpret_cast<LPARAM>(L"yyyy-MM-dd"));
+                SendMessageW(child, DTM_SETMCFONT, reinterpret_cast<WPARAM>(font), FALSE);
+                DateTime_SetRange(child, GDTR_MIN | GDTR_MAX, limits);
+                DateTime_SetSystemtime(child, GDT_VALID, &value);
+                return child;
+            };
+            dialog->first = picker(dialog->single ? TR(L"图表日期") : TR(L"开始日期"), 12, dialog->range.first);
+            if (!dialog->single) dialog->last = picker(TR(L"结束日期（含当天）"), 38, dialog->range.last);
+            const int actionY = dialog->single ? 42 : 68;
+            control(L"BUTTON", TR(L"应用"), WS_TABSTOP | BS_DEFPUSHBUTTON, IDOK, 116, actionY, 58, 20);
+            control(L"BUTTON", TR(L"取消"), WS_TABSTOP, IDCANCEL, 182, actionY, 58, 20);
+            SendMessageW(hwnd, DM_SETDEFID, IDOK, 0);
+            if (!dialog->first || (!dialog->single && !dialog->last)) {
+                EndDialog(hwnd, IDCANCEL);
+                return TRUE;
+            }
+            SetFocus(dialog->first);
+            return FALSE;
+        }
+        if (message == WM_CLOSE || (message == WM_COMMAND && LOWORD(wp) == IDCANCEL)) {
+            EndDialog(hwnd, IDCANCEL);
+            return TRUE;
+        }
+        if (message == WM_COMMAND && LOWORD(wp) == IDOK && dialog) {
+            const auto read = [](HWND child) -> Calendar::Number {
+                SYSTEMTIME d{};
+                return DateTime_GetSystemtime(child, &d) == GDT_VALID ? Calendar::AsUnix(d) / Calendar::Day * Calendar::Day : 0;
+            };
+            const auto first = read(dialog->first);
+            Calendar::DateRange range{first, dialog->single ? first : read(dialog->last)};
+            if (!range.Valid(dialog->today)) {
+                MessageBoxW(hwnd, TR(L"开始日期不能晚于结束日期。"), TR(L"自定义日期"), MB_OK | MB_ICONWARNING);
+                return TRUE;
+            }
+            dialog->range = range;
+            EndDialog(hwnd, IDOK);
+            return TRUE;
+        }
+        return FALSE;
+    }
+
+    bool Show(HINSTANCE instance, HWND owner, HFONT bodyFont) {
+        INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_DATE_CLASSES};
+        if (!InitCommonControlsEx(&controls)) return false;
+        // A standard dialog template with all controls created in WM_INITDIALOG.
+        alignas(DWORD) const WORD layout[] = {
+            WORD(WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_CENTER),
+            WORD((WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_CENTER) >> 16),
+            0, 0, 0, 0, 0, 250, WORD(single ? 72 : 98), 0, 0, 0
+        };
+        // Keep a copy alive even if the owner recreates its fonts during the modal loop.
+        LOGFONTW description{};
+        if (bodyFont && GetObjectW(bodyFont, sizeof(description), &description))
+            font = CreateFontIndirectW(&description);
+        const auto result = DialogBoxIndirectParamW(instance, reinterpret_cast<const DLGTEMPLATE*>(layout), owner,
+                                                    Proc, reinterpret_cast<LPARAM>(this));
+        if (font) DeleteObject(font);
+        font = nullptr;
+        return result == IDOK;
+    }
+};
+
+void DrawDateButton(HDC hdc, RECT rect, const wchar_t* text, COLORREF fill, COLORREF border, COLORREF color) {
+    const auto brush = CreateSolidBrush(fill);
+    const auto pen = CreatePen(PS_SOLID, 1, border);
+    const auto oldBrush = SelectObject(hdc, brush);
+    const auto oldPen = SelectObject(hdc, pen);
+    RoundRect(hdc, rect.left, rect.top, rect.right, rect.bottom, 4, 4);
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(brush);
+    DeleteObject(pen);
+    SetTextColor(hdc, color);
+    DrawTextW(hdc, text, -1, &rect, DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+}
+}
 
 CDetailWindow::CDetailWindow() {
     s_instance = this;
@@ -734,6 +853,37 @@ void CDetailWindow::ClearHistory() {
     if (m_visible) InvalidateRect(m_hwnd, NULL, FALSE);
 }
 
+std::pair<ULONGLONG, ULONGLONG> CDetailWindow::HistoryDates(ULONGLONG today) const {
+    const auto day = Calendar::Day;
+    switch (m_time_range) {
+    case TR_YESTERDAY: return {today - day, today - day};
+    case TR_3D: return {today - 2 * day, today};
+    case TR_7D: return {today - 6 * day, today};
+    case TR_30D: return {Calendar::OldestDate(today), today};
+    case TR_CUSTOM: {
+        const auto oldest = Calendar::OldestDate(today);
+        return {max(oldest, min(today, m_custom_first)), max(oldest, min(today, m_custom_last))};
+    }
+    default: return {today, today};
+    }
+}
+
+void CDetailWindow::RefreshHistoryRange() {
+    m_scroll_pos = 0;
+    m_history_dirty = true;
+    RebuildRows();
+    InvalidateRect(m_hwnd, NULL, FALSE);
+}
+
+void CDetailWindow::SelectChartDate(ULONGLONG date, ULONGLONG today) {
+    m_chart_date = date == today ? 0 : date;
+    m_chart_hover_hour = m_chart_selected_hour = m_chart_hover_row = -1;
+    m_chart_table_scroll = 0;
+    m_chart_hours.clear();
+    m_chart_hits.clear();
+    InvalidateRect(m_hwnd, NULL, FALSE);
+}
+
 void CDetailWindow::BuildHistoryRows() {
     // Save expanded state before clearing
     std::set<std::wstring> expanded_names;
@@ -746,49 +896,18 @@ void CDetailWindow::BuildHistoryRows() {
 
     ULONGLONG now = WallClockMs();
     using History = pnm::HourlyHistory;
-    const pnm::HistoryCalendar calendar;
-    const auto date = calendar.Date(now);
-    const auto today = calendar.Start(date);
-    // Natural-day ranges, aligned to local midnight (00:00:00) - issue #9:
-    //   今日    = today 00:00 .. now
-    //   昨日    = yesterday 00:00 .. today 00:00 (exclusive)
-    //   近3天   = day-before-yesterday 00:00 .. now (3 calendar days)
-    //   近7天   = 6 days ago 00:00 .. now (7 calendar days)
-    //   近30天  = 29 days ago 00:00 .. now (30 calendar days)
-    ULONGLONG start_ms = 0, end_ms = now + 1;
-    double span_sec = 0;  // nominal span for average speed
-    switch (m_time_range) {
-    case TR_TODAY:
-        start_ms = today;
-        span_sec = (double)(now - start_ms) / 1000.0;
-        break;
-    case TR_YESTERDAY:
-        start_ms = calendar.Start(date - History::Day);
-        end_ms = today;
-        span_sec = (today - start_ms) / 1000.0;
-        break;
-    case TR_3D:
-        start_ms = calendar.Start(date - 2 * History::Day);
-        span_sec = (double)(now - start_ms) / 1000.0;
-        break;
-    case TR_7D:
-        start_ms = calendar.Start(date - 6 * History::Day);
-        span_sec = (double)(now - start_ms) / 1000.0;
-        break;
-    case TR_30D:
-        start_ms = calendar.Start(date - 29 * History::Day);
-        span_sec = (double)(now - start_ms) / 1000.0;
-        break;
-    }
-    if (span_sec < 1.0) span_sec = 1.0;
+    const Calendar calendar;
+    m_history_rows_date = calendar.Date(now);
+    const auto [first, last] = HistoryDates(m_history_rows_date);
+    const auto [start_ms, end_ms] = calendar.Bounds({first, last}, now);
+    const auto span_sec = end_ms > start_ms ? max(1.0, (end_ms - start_ms) / 1000.0) : 1.0;
 
     const auto totals = m_hourly.Summarize(start_ms, end_ms);
     for (const auto& [name16, usage] : totals) {
         const std::wstring name(name16.begin(), name16.end());
         const auto total_recv = usage.down, total_sent = usage.up;
 
-        // Average speed over the whole calendar range (e.g. yesterday is
-        // always /86400s), not just the span between first/last samples.
+        // Average speed over the actual elapsed time in the calendar range.
         double elapsed_sec = span_sec;
 
         m_hist_total_recv = History::SaturatingAdd(m_hist_total_recv, total_recv);
@@ -917,7 +1036,10 @@ void CDetailWindow::RebuildRows() {
     auto& stats = m_cached_stats;
 
     if (m_active_tab == 1) {
-        // History tab - only rebuild when new data arrives
+        if (Calendar().Date(WallClockMs()) != m_history_rows_date) {
+            m_history_dirty = true;
+            if (m_visible) InvalidateRect(m_hwnd, NULL, FALSE);
+        }
         if (!m_history_dirty) {
             if (m_visible) {
                 RECT rc;
@@ -1916,24 +2038,31 @@ void CDetailWindow::OnLButtonDown(int x, int y) {
             return;
         }
         if (PtInRect(&m_rcChartPrev, { x, y })) {
-            const auto date = m_chart_date ? m_chart_date : pnm::HistoryCalendar().Date(WallClockMs());
-            if (date > pnm::HourlyHistory::Day) m_chart_date = date - pnm::HourlyHistory::Day;
-            m_chart_selected_hour = -1;
-            InvalidateRect(m_hwnd, NULL, FALSE);
+            const auto today = Calendar().Date(WallClockMs());
+            const auto date = m_chart_date ? m_chart_date : today;
+            if (date > Calendar::OldestDate(today)) SelectChartDate(date - Calendar::Day, today);
+            return;
+        }
+        if (PtInRect(&m_rcChartDate, { x, y })) {
+            const auto today = Calendar().Date(WallClockMs());
+            const auto date = max(Calendar::OldestDate(today), min(today, m_chart_date ? m_chart_date : today));
+            DateDialog dialog{{date, date}, today, true};
+            if (dialog.Show(m_hinst, m_hwnd, m_font_row)) SelectChartDate(dialog.range.first, today);
             return;
         }
         if (PtInRect(&m_rcChartToday, { x, y })) {
-            m_chart_date = 0;
-            m_chart_selected_hour = -1;
-            InvalidateRect(m_hwnd, NULL, FALSE);
+            const auto today = Calendar().Date(WallClockMs());
+            SelectChartDate(today, today);
             return;
         }
         if (PtInRect(&m_rcChartNext, { x, y })) {
-            const auto today = pnm::HistoryCalendar().Date(WallClockMs());
-            if (m_chart_date && m_chart_date + pnm::HourlyHistory::Day < today)
-                m_chart_date += pnm::HourlyHistory::Day;
-            else m_chart_date = 0;
+            const auto today = Calendar().Date(WallClockMs());
+            if (m_chart_date && m_chart_date < today) SelectChartDate(m_chart_date + Calendar::Day, today);
+            return;
+        }
+        if (m_chart_selected_hour >= 0 && PtInRect(&m_rcChartAll, { x, y })) {
             m_chart_selected_hour = -1;
+            m_chart_table_scroll = 0;
             InvalidateRect(m_hwnd, NULL, FALSE);
             return;
         }
@@ -1976,13 +2105,29 @@ void CDetailWindow::OnLButtonDown(int x, int y) {
             if (PtInRect(&m_rcTRButtons[i], { x, y })) {
                 if (m_time_range != (TimeRange)i) {
                     m_time_range = (TimeRange)i;
-                    m_scroll_pos = 0;
-                    m_rows.clear();
-                    InvalidateRect(m_hwnd, NULL, FALSE);  // full redraw for time range change
-                    SetTimer(m_hwnd, TIMER_DEFER_REBUILD, 10, NULL);
+                    RefreshHistoryRange();
                 }
                 return;
             }
+        }
+        if (PtInRect(&m_rcCustomDates, { x, y })) {
+            const auto today = Calendar().Date(WallClockMs());
+            const auto [first, last] = HistoryDates(today);
+            DateDialog dialog{{first, last}, today, false};
+            if (dialog.Show(m_hinst, m_hwnd, m_font_row)) {
+                m_time_range = TR_CUSTOM;
+                m_custom_first = dialog.range.first;
+                m_custom_last = dialog.range.last;
+                RefreshHistoryRange();
+            }
+            return;
+        }
+        if (PtInRect(&m_rcOpenChart, { x, y })) {
+            const auto today = Calendar().Date(WallClockMs());
+            m_active_tab = 2;
+            m_rows.clear();
+            SelectChartDate(HistoryDates(today).second, today);
+            return;
         }
         // Clear history button
         if (PtInRect(&m_rcClearBtn, { x, y })) {
@@ -2357,7 +2502,7 @@ void CDetailWindow::DrawTabs(HDC hdc, int w, int y) {
     SelectObject(hdc, hOldFont);
 }
 
-void CDetailWindow::DrawHourlyChart(HDC hdc, int w, int y, int client_h) {
+void CDetailWindow::DrawHourlyChart(HDC hdc, int w, int y, int client_h, int speed_right) {
     RECT area = { PADDING, y, w - PADDING, client_h - PADDING };
     HBRUSH bg = CreateSolidBrush(GetBgColor());
     FillRect(hdc, &area, bg);
@@ -2366,7 +2511,10 @@ void CDetailWindow::DrawHourlyChart(HDC hdc, int w, int y, int client_h) {
     const auto now = WallClockMs();
     using History = pnm::HourlyHistory;
     const pnm::HistoryCalendar calendar;
-    const auto date = m_chart_date ? m_chart_date : calendar.Date(now);
+    const auto today = calendar.Date(now);
+    const auto oldest = Calendar::OldestDate(today);
+    const auto date = m_chart_date ? max(oldest, min(today, m_chart_date)) : today;
+    if (m_chart_date && m_chart_date != date) m_chart_date = date == today ? 0 : date;
     const auto start = calendar.Start(date);
     const auto end = calendar.Start(date + History::Day);
     const auto day_bucket = m_hourly.daily.lower_bound(start);
@@ -2410,41 +2558,34 @@ void CDetailWindow::DrawHourlyChart(HDC hdc, int w, int y, int client_h) {
     const auto local_date = pnm::HistoryCalendar::AsUtc(date);
     wchar_t date_text[64];
     swprintf_s(date_text, L"%04d-%02d-%02d", local_date.wYear, local_date.wMonth, local_date.wDay);
-    RECT title = { area.left, area.top + 4, max(area.left + 40, area.right - 190), area.top + 30 };
-    DrawTextW(hdc, date_text, -1, &title, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-
-    // Right-align the three navigation buttons inside the area; measure before drawing.
-    auto button_w = [&](const wchar_t* text) {
-        SIZE s = {};
-        GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &s);
-        return s.cx + 18;
-    };
-    // Keep a visible gap between buttons, scaled with DPI.
+    const auto date_button = std::wstring(date_text) + L" \u25BE";
+    const wchar_t* nav_labels[] = {TR(L"前一天"), date_button.c_str(), TR(L"后一天"), TR(L"今天")};
+    RECT* nav_buttons[] = {&m_rcChartPrev, &m_rcChartDate, &m_rcChartNext, &m_rcChartToday};
+    const bool nav_enabled[] = {date > oldest, true, date < today, true};
     const int nav_gap = max(6, (int)(10 * m_dpi_scale));
-    const int nav_total = button_w(TR(L"前一天")) + button_w(TR(L"今天")) + button_w(TR(L"后一天")) + nav_gap * 2;
-    const int nav_left = max(area.left, area.right - nav_total);
-    auto draw_button = [&](RECT* button, const wchar_t* text, int left) {
-        SIZE size = {};
-        GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &size);
-        *button = { left, area.top, left + size.cx + 18, area.top + size.cy + 10 };
-        HBRUSH brush = CreateSolidBrush(GetHeaderBgColor());
-        HPEN pen = CreatePen(PS_SOLID, 1, GetBorderColor());
-        HBRUSH old_brush = (HBRUSH)SelectObject(hdc, brush);
-        HPEN old_pen = (HPEN)SelectObject(hdc, pen);
-        RoundRect(hdc, button->left, button->top, button->right, button->bottom, 4, 4);
-        SelectObject(hdc, old_brush); SelectObject(hdc, old_pen);
-        DeleteObject(brush); DeleteObject(pen);
-        DrawTextW(hdc, text, -1, button, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
-    };
-    int button_x = nav_left;
-    draw_button(&m_rcChartPrev, TR(L"前一天"), button_x);
-    button_x = m_rcChartPrev.right + nav_gap;
-    draw_button(&m_rcChartToday, TR(L"今天"), button_x);
-    button_x = m_rcChartToday.right + nav_gap;
-    draw_button(&m_rcChartNext, TR(L"后一天"), button_x);
-    const int title_right = max(area.left + 20, nav_left - 8);
-    title.right = max(title.left, title_right);
-    DrawTextW(hdc, date_text, -1, &title, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+    SIZE nav_sizes[4]{};
+    int nav_width = 3 * nav_gap;
+    int nav_height = 0;
+    for (int i = 0; i < 4; ++i) {
+        GetTextExtentPoint32W(hdc, nav_labels[i], (int)wcslen(nav_labels[i]), &nav_sizes[i]);
+        nav_width += nav_sizes[i].cx + 18;
+        nav_height = max(nav_height, (int)nav_sizes[i].cy);
+    }
+    nav_height = min(SUMMARY_H, nav_height + max(4, (int)(6 * m_dpi_scale)));
+    int nav_left = area.right - nav_width;
+    const bool fits_summary = nav_left >= speed_right + nav_gap;
+    const int nav_top = fits_summary
+        ? area.top - (SUMMARY_H + nav_height) / 2
+        : area.top;
+    nav_left = max(area.left, nav_left);
+    for (int i = 0; i < 4; ++i) {
+        const int right = nav_left + nav_sizes[i].cx + 18;
+        *nav_buttons[i] = {nav_left, nav_top, right, nav_top + nav_height};
+        DrawDateButton(hdc, *nav_buttons[i], nav_labels[i], GetHeaderBgColor(), GetBorderColor(),
+                       nav_enabled[i] ? GetTextColor() : GetSecondaryTextColor());
+        nav_left = right + nav_gap;
+    }
+    const int nav_bottom = nav_top + nav_height;
 
     // Measure every Y-axis tick label so the widest one always fits left of the axis.
     int axis_text_w = 0;
@@ -2459,11 +2600,11 @@ void CDetailWindow::DrawHourlyChart(HDC hdc, int w, int y, int client_h) {
     const int scale_pad = max(48, axis_text_w + 14);
     const int chart_left = area.left + scale_pad;
     const int chart_right = max(chart_left + 24, area.right - 4);
-    // Start the plot below the navigation buttons with a clear gap, so bars and the top tick never touch them.
-    SIZE nav_text = {};
-    GetTextExtentPoint32W(hdc, TR(L"今天"), (int)wcslen(TR(L"今天")), &nav_text);
-    const int nav_bottom = area.top + nav_text.cy + 10;
-    const int chart_top = max(area.top + 44, nav_bottom + nav_gap * 2);
+    // Keep the highest bar and the top tick visibly below the date buttons.  When the
+    // buttons fit beside the speed summary, their bottom can extend into this area.
+    const int chart_toolbar_gap = max(12, (int)(10 * m_dpi_scale));
+    const int chart_top = max(area.top + (fits_summary ? 0 : nav_height) + (int)(16 * m_dpi_scale),
+                              nav_bottom + chart_toolbar_gap);
     // Reserve the lower part for the selected date's complete program table.
     const int detail_reserve = max(190, (int)(220 * m_dpi_scale));
     const int chart_bottom = max(chart_top + 24, area.bottom - detail_reserve);
@@ -2545,8 +2686,18 @@ void CDetailWindow::DrawHourlyChart(HDC hdc, int w, int y, int client_h) {
     swprintf_s(summary, L"%s  %s: %s    %s: %s", date_text, TR(L"下载"), down_text,
                TR(L"上传"), up_text);
     }
-    RECT summary_rc = { area.left, area.bottom - 24, area.right - 64, area.bottom };
-    DrawTextW(hdc, summary, -1, &summary_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    const int summary_top = area.bottom - max(24, (int)(24 * m_dpi_scale));
+    m_rcChartAll = {};
+    if (selected) {
+        const auto label = TR(L"查看全天");
+        SIZE size{};
+        GetTextExtentPoint32W(hdc, label, (int)wcslen(label), &size);
+        m_rcChartAll = {area.right - size.cx - 18, summary_top, area.right, area.bottom};
+        DrawDateButton(hdc, m_rcChartAll, label, GetHeaderBgColor(), GetBorderColor(), GetTextColor());
+    }
+    RECT summary_rc = { area.left, summary_top, selected ? m_rcChartAll.left - nav_gap : area.right, area.bottom };
+    SetTextColor(hdc, GetTextColor());
+    DrawTextW(hdc, summary, -1, &summary_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
 
     // The selected date controls the scope; every program is shown in one detail table.
     // Detail table: sortable header, hover highlight, and per-program expansion into hour rows.
@@ -2785,7 +2936,7 @@ void CDetailWindow::DrawHourlyChart(HDC hdc, int w, int y, int client_h) {
 void CDetailWindow::DrawTimeRangeButtons(HDC hdc, int w, int y) {
     if (m_active_tab != 1) return;
 
-    RECT rc = { 0, y, w, y + TIME_RANGE_H };
+    RECT rc = { 0, y, w, y + GetTimeRangeHeight() };
     HBRUSH hBrush = CreateSolidBrush(GetBgColor());
     FillRect(hdc, &rc, hBrush);
     DeleteObject(hBrush);
@@ -2826,12 +2977,16 @@ void CDetailWindow::DrawTimeRangeButtons(HDC hdc, int w, int y) {
         x += bw + 6;
     }
 
-    // Clear history button (right-aligned)
+    const int row_top = y + 3;
+    const int row_bottom = y + TIME_RANGE_H - 3;
+
+    // Keep the two history actions on the same row, with the destructive action
+    // at the far right and the end-date chart action immediately to its left.
     const wchar_t* clear_label = TR(L"\u6E05\u9664\u6570\u636E");
     SIZE clear_sz;
     GetTextExtentPoint32W(hdc, clear_label, (int)wcslen(clear_label), &clear_sz);
     int clear_bw = clear_sz.cx + 16;
-    m_rcClearBtn = { w - PADDING - clear_bw, y + 3, w - PADDING, y + TIME_RANGE_H - 3 };
+    m_rcClearBtn = { w - PADDING - clear_bw, row_top, w - PADDING, row_bottom };
 
     HBRUSH hClearBrush = CreateSolidBrush(RGB(220, 53, 69));
     HPEN hClearPen = CreatePen(PS_SOLID, 1, RGB(220, 53, 69));
@@ -2847,10 +3002,30 @@ void CDetailWindow::DrawTimeRangeButtons(HDC hdc, int w, int y) {
     SetTextColor(hdc, RGB(255, 255, 255));
     DrawTextW(hdc, clear_label, -1, &m_rcClearBtn, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
 
+    const auto jump = TR(L"查看结束日图表");
+    SIZE jump_size{};
+    GetTextExtentPoint32W(hdc, jump, (int)wcslen(jump), &jump_size);
+    const int action_gap = max(6, (int)(6 * m_dpi_scale));
+    const int jump_bw = jump_size.cx + 16;
+    m_rcOpenChart = {m_rcClearBtn.left - action_gap - jump_bw, row_top,
+                     m_rcClearBtn.left - action_gap, row_bottom};
+    const auto [first, last] = HistoryDates(Calendar().Date(WallClockMs()));
+    std::wstring range = DateText(first);
+    if (first != last) range += L" \u2013 " + DateText(last);
+    range = std::wstring(TR(L"自定义日期")) + L"  " + range + L" \u25BE";
+    SIZE range_size{};
+    GetTextExtentPoint32W(hdc, range.c_str(), (int)range.size(), &range_size);
+    const int date_right = min(x + range_size.cx + 16, m_rcOpenChart.left - action_gap);
+    m_rcCustomDates = {x, row_top, max(x, date_right), row_bottom};
+    DrawDateButton(hdc, m_rcCustomDates, range.c_str(),
+                   m_time_range == TR_CUSTOM ? GetAccentColor(false) : GetHeaderBgColor(), GetBorderColor(),
+                   m_time_range == TR_CUSTOM ? RGB(255, 255, 255) : GetTextColor());
+    DrawDateButton(hdc, m_rcOpenChart, jump, GetHeaderBgColor(), GetBorderColor(), GetTextColor());
+
     SelectObject(hdc, hOldFont);
 }
 
-void CDetailWindow::DrawSpeedSummary(HDC hdc, int w, int y) {
+int CDetailWindow::DrawSpeedSummary(HDC hdc, int w, int y) {
     RECT rc = { 0, y, w, y + SUMMARY_H };
     HBRUSH hBrush = CreateSolidBrush(GetBgColor());
     FillRect(hdc, &rc, hBrush);
@@ -2898,6 +3073,7 @@ void CDetailWindow::DrawSpeedSummary(HDC hdc, int w, int y) {
         SetTextColor(hdc, GetAccentColor(true));
         RECT rv2 = { x, y, x + vw2 + gap, y + SUMMARY_H };
         DrawTextW(hdc, sent_str, -1, &rv2, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        x += vw2 + gap;
     } else {
         // Real-time: show current speed
         wchar_t down_str[32], up_str[32];
@@ -2930,9 +3106,11 @@ void CDetailWindow::DrawSpeedSummary(HDC hdc, int w, int y) {
         SetTextColor(hdc, GetAccentColor(true));
         RECT rv2 = { x, y, x + vw2 + gap, y + SUMMARY_H };
         DrawTextW(hdc, u_full, -1, &rv2, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        x += vw2 + gap;
     }
 
     SelectObject(hdc, hOldFont);
+    return x;
 }
 
 void CDetailWindow::DrawTableHeader(HDC hdc, int w, int y) {
@@ -3424,11 +3602,11 @@ void CDetailWindow::OnPaint() {
     DrawTimeRangeButtons(memDC, w, y);
     y += GetTimeRangeHeight();
 
-    DrawSpeedSummary(memDC, w, y);
+    const int speed_right = DrawSpeedSummary(memDC, w, y);
     y += GetSummaryHeight();
 
     if (m_active_tab == 2) {
-        DrawHourlyChart(memDC, w, y, h);
+        DrawHourlyChart(memDC, w, y, h, speed_right);
     } else {
         DrawTableHeader(memDC, w, y);
         y += GetTableHeaderHeight();

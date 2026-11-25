@@ -32,6 +32,21 @@ public:
     // A civil date key is not an instant: it advances by one calendar day.
     Number Date(Number tick) const { return AsUnix(Local(tick)) / Day * Day; }
 
+    static Number OldestDate(Number today) { return today >= 29 * Day ? today - 29 * Day : 0; }
+
+    struct DateRange {
+        Number first, last;
+        bool Valid(Number today) const {
+            return first >= OldestDate(today) && first <= last && last <= today &&
+                   first % Day == 0 && last % Day == 0;
+        }
+    };
+
+    std::pair<Number, Number> Bounds(DateRange range, Number now) const {
+        const auto end = Start(range.last + Day);
+        return {Start(range.first), end < now + 1 ? end : now + 1};
+    }
+
     Number Start(Number date) const {
         if (date < Day) return 0;
         // Find the first UTC instant on this civil date (also works when
