@@ -71,39 +71,6 @@ public:
         // Keep enough UTC buckets for the last 30 civil dates, including DST.
         return now >= 31 * Day ? now / Hour * Hour - 31 * Day : 0;
     }
-    void Set(Number tick, const std::u16string& name, Number down, Number up) {
-        if (tick > MaxTick || name.empty() || name.size() > 512 || down > MaxBytes || up > MaxBytes) return;
-        const Number hour = DayStart(tick) + ((tick - DayStart(tick)) / Hour) * Hour;
-        auto& apps = Mutable(buckets[hour]);
-        const auto it = apps.find(name);
-        if (it == apps.end()) {
-            const auto rowBytes = 27 + 2 * name.size();
-            if (rows_ >= MaxRows || bytes_ + rowBytes > MaxFile || down > MaxBytes || up > MaxBytes) return;
-            apps.emplace(name, Usage{down, up});
-            bytes_ += rowBytes;
-            ++rows_;
-        } else {
-            it->second = Usage{down, up};
-        }
-    }
-    bool SetBucketTotal(Number tick, const std::u16string& name, Number down, Number up) {
-        if (tick > MaxTick || name.empty() || name.size() > 512 || down > MaxBytes || up > MaxBytes ||
-            tick < Day - LegacyDayOffset) return false;
-        const Number hour = DayStart(tick) + ((tick - DayStart(tick)) / Hour) * Hour;
-        auto& apps = Mutable(buckets[hour]);
-        auto it = apps.find(name);
-        if (it == apps.end()) {
-            const auto rowBytes = 27 + 2 * name.size();
-            if (rows_ >= MaxRows || bytes_ + rowBytes > MaxFile) return false;
-            apps.emplace(name, Usage{down, up});
-            bytes_ += rowBytes;
-            ++rows_;
-            return true;
-        }
-        if (down > it->second.down) it->second.down = down;
-        if (up > it->second.up) it->second.up = up;
-        return true;
-    }
     bool SetDayTotal(Number tick, const std::u16string& name, Number down, Number up) {
         if (tick > MaxTick || tick < Day - LegacyDayOffset || name.empty() || name.size() > 512 ||
             down > MaxBytes || up > MaxBytes) return false;
