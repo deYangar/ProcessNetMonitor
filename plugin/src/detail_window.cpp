@@ -2673,7 +2673,7 @@ void CDetailWindow::DrawHourlyChart(HDC hdc, int w, int y, int client_h, int spe
         RECT empty = { chart_left, chart_top, chart_right, chart_bottom };
         const wchar_t* empty_text = aggregate_day
             ? TR(L"此日期包含旧日汇总数据，无法还原小时分布")
-            : TR(L"今天还没有可显示的小时流量数据");
+            : TR(L"此日期没有可显示的小时流量数据");
         DrawTextW(hdc, empty_text, -1, &empty,
                   DT_CENTER | DT_SINGLELINE | DT_VCENTER);
     }
