@@ -235,6 +235,35 @@ COLORREF CDetailWindow::GetBorderColor() {
 
 // FormatSpeed / FormatBytes delegated to shared utils.h
 
+static int SortArrowSpace(float scale) {
+    return max(8, (int)(16 * scale));
+}
+
+static void DrawSortArrow(HDC hdc, const RECT& slot, bool ascending, COLORREF color) {
+    const int width = slot.right - slot.left;
+    const int height = slot.bottom - slot.top;
+    if (width < 4 || height < 4) return;
+    const int half_base = max(1, width / 3);
+    const int arrow_height = min(height - 2, width / 2);
+    const int cx = slot.left + width / 2;
+    const int top = slot.top + (height - arrow_height) / 2;
+    const int bottom = top + arrow_height;
+    const int base_y = ascending ? bottom : top;
+    POINT triangle[] = {
+        { cx - half_base, base_y },
+        { cx + half_base, base_y },
+        { cx, ascending ? top : bottom },
+    };
+    HBRUSH brush = CreateSolidBrush(color);
+    if (!brush) return;
+    HGDIOBJ old_brush = SelectObject(hdc, brush);
+    HGDIOBJ old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
+    Polygon(hdc, triangle, ARRAYSIZE(triangle));
+    SelectObject(hdc, old_pen);
+    SelectObject(hdc, old_brush);
+    DeleteObject(brush);
+}
+
 // Measure header text and fit column widths to the current language.
 // shrink=true : reset to DPI baseline first, then expand - language switch
 //               shrinks back columns of a shorter language (bi-directional).
@@ -249,7 +278,7 @@ void CDetailWindow::AutoSizeColumns(bool shrink) {
         for (int i = 1; i < count; i++) {
             if (!cols[i].title || !cols[i].title[0]) continue;
             int measured = PNM_MeasureText(hdc, m_font_header, cols[i].title);
-            int needed = measured + 12 + 20;  // padding + sort arrow
+            int needed = measured + 12 + SortArrowSpace(m_dpi_scale);
             if (shrink && bases) cols[i].width = bases[i];
             if (needed > cols[i].width) cols[i].width = needed;
         }
@@ -2617,10 +2646,14 @@ void CDetailWindow::DrawHourlyChart(HDC hdc, int w, int y, int client_h) {
         RECT cell = { m_chart_col_x[c] + pad, table_top, m_chart_col_x[c + 1] - pad, table_top + row_h };
         const bool active = (c == sort_col);
         SetTextColor(hdc, active ? GetAccentColor(false) : GetSecondaryTextColor());
-        wchar_t title[160];
-        if (active) swprintf_s(title, L"%s %s", header_titles[c], sort_asc ? L"\u25B2" : L"\u25BC");
-        else wcscpy_s(title, header_titles[c]);
-        DrawTextW(hdc, title, -1, &cell, (c == 0 ? DT_LEFT : DT_RIGHT) | DT_SINGLELINE | DT_VCENTER);
+        if (active) {
+            RECT arrow = cell;
+            arrow.left = max(cell.left, cell.right - SortArrowSpace(m_dpi_scale));
+            DrawSortArrow(hdc, arrow, sort_asc, GetAccentColor(false));
+            cell.right = arrow.left;
+        }
+        DrawTextW(hdc, header_titles[c], -1, &cell,
+                  (c == 0 ? DT_LEFT : DT_RIGHT) | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
     }
 
     // Rows: same alternating and hover brushes, bottom border and accent colors as DrawTableRows.
@@ -2925,8 +2958,13 @@ void CDetailWindow::DrawTableHeader(HDC hdc, int w, int y) {
     int cx = PADDING;
     for (int i = 0; i < NUM_COLS; i++) {
         bool has_arrow = (i == m_sort_col[m_active_tab] && i >= 1);
-        int arrow_w = has_arrow ? 18 : 0;
-        RECT rc = { cx + 4, y, cx + cols[i].width - 4 - arrow_w, y + TABLE_HEADER_H };
+        RECT rc = { cx + 4, y, cx + cols[i].width - 4, y + TABLE_HEADER_H };
+        if (has_arrow) {
+            RECT arrow = rc;
+            arrow.left = arrow.right - SortArrowSpace(m_dpi_scale);
+            DrawSortArrow(hdc, arrow, m_sort_asc[m_active_tab], GetAccentColor(false));
+            rc.right = arrow.left;
+        }
         UINT fmt = DT_SINGLELINE | DT_VCENTER;
         switch (cols[i].align) {
         case Column::LEFT: fmt |= DT_LEFT; break;
@@ -2934,14 +2972,6 @@ void CDetailWindow::DrawTableHeader(HDC hdc, int w, int y) {
         case Column::CENTER: fmt |= DT_CENTER; break;
         }
         DrawTextW(hdc, cols[i].title, -1, &rc, fmt);
-
-        if (has_arrow) {
-            SetTextColor(hdc, GetAccentColor(false));
-            const wchar_t* arrow = m_sort_asc[m_active_tab] ? L"\u25B2" : L"\u25BC";
-            RECT arrow_rc = { cx + cols[i].width - 4 - arrow_w + 2, y, cx + cols[i].width - 4, y + TABLE_HEADER_H };
-            DrawTextW(hdc, arrow, -1, &arrow_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-            SetTextColor(hdc, GetSecondaryTextColor());
-        }
 
         cx += cols[i].width;
     }

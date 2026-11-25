@@ -1496,6 +1496,76 @@ static BOOL CALLBACK OptionsSetFontProc(HWND h, LPARAM lp) {
     return TRUE;
 }
 
+static int OptionsLayoutRows(HWND hwnd, HDC hdc) {
+    // A combo's window rectangle is its closed height.  Use that for the row,
+    // and leave the drop-down list free to extend over the following rows.
+    const int rows[][3] = {
+        {1002, 1003}, {1005, 1004}, {1012}, {1010}, {1007},
+        {1011, 1008, 1009}, {1006}, {1013}, {1020}, {1015, 1014},
+        {1019, 1018}, {1021, 1022}, {1023, 1024, 1025}, {1026}, {IDOK, IDCANCEL},
+    };
+    int y = 10;
+    for (const auto& row : rows) {
+        HWND controls[ARRAYSIZE(row)] = {};
+        RECT rects[ARRAYSIZE(row)] = {};
+        int heights[ARRAYSIZE(row)] = {};
+        int row_height = 0;
+        if (row[0] == IDOK) y += 8;
+        for (size_t i = 0; i < ARRAYSIZE(row) && row[i]; ++i) {
+            HWND control = GetDlgItem(hwnd, row[i]);
+            if (!control) continue;
+            controls[i] = control;
+            RECT& rect = rects[i];
+            GetWindowRect(control, &rect);
+            MapWindowPoints(HWND_DESKTOP, hwnd, (LPPOINT)&rect, 2);
+
+            wchar_t cls[32] = {};
+            GetClassNameW(control, cls, ARRAYSIZE(cls));
+            TEXTMETRICW metrics = {};
+            HFONT font = (HFONT)SendMessageW(control, WM_GETFONT, 0, 0);
+            HGDIOBJ old_font = hdc && font ? SelectObject(hdc, font) : nullptr;
+            if (hdc) GetTextMetricsW(hdc, &metrics);
+            if (old_font) SelectObject(hdc, old_font);
+            const int line_height = metrics.tmHeight + metrics.tmExternalLeading;
+            int height = rect.bottom - rect.top;
+            if (lstrcmpW(cls, L"ComboBox") == 0) {
+                const LRESULT selection_height = SendMessageW(control, CB_GETITEMHEIGHT, (WPARAM)-1, 0);
+                if (selection_height != CB_ERR && selection_height < line_height + 4) {
+                    SendMessageW(control, CB_SETITEMHEIGHT, (WPARAM)-1, line_height + 4);
+                    RECT closed = {};
+                    GetWindowRect(control, &closed);
+                    height = closed.bottom - closed.top;
+                }
+                // Move without changing the drop-down list's size.
+                rect.bottom = rect.top + height;
+            } else if (lstrcmpW(cls, L"Static") == 0) {
+                height = max(20, line_height + 4);
+            } else if (lstrcmpW(cls, L"Edit") == 0) {
+                RECT client = {};
+                GetClientRect(control, &client);
+                const int borders = height - (client.bottom - client.top);
+                height = max(24, line_height + borders + 6);
+            } else if (lstrcmpW(cls, L"Button") == 0) {
+                const DWORD type = GetWindowLongPtrW(control, GWL_STYLE) & BS_TYPEMASK;
+                height = type == BS_AUTOCHECKBOX ? max(22, line_height + 6) : max(24, line_height + 8);
+            }
+            heights[i] = height;
+            row_height = max(row_height, height);
+        }
+        for (size_t i = 0; i < ARRAYSIZE(row) && row[i]; ++i) {
+            if (!controls[i]) continue;
+            const RECT& rect = rects[i];
+            const int height = heights[i];
+            UINT flags = SWP_NOZORDER | SWP_NOACTIVATE;
+            if (height == rect.bottom - rect.top) flags |= SWP_NOSIZE;
+            SetWindowPos(controls[i], nullptr, rect.left, y + (row_height - height) / 2,
+                         rect.right - rect.left, height, flags);
+        }
+        y += row_height + 4;
+    }
+    return y + 6;
+}
+
 // Forward declaration: auto-resize controls to fit translated text
 static void OptionsAdjustLayout(HWND hwnd);
 
@@ -1623,6 +1693,7 @@ static void OptionsAdjustLayout(HWND hwnd) {
     HFONT hDlgFont = (HFONT)SendMessageW(hwnd, WM_GETFONT, 0, 0);
     HDC hdc = GetDC(hwnd);
     HFONT hOld = hDlgFont ? (HFONT)SelectObject(hdc, hDlgFont) : nullptr;
+    const int desired_cy = OptionsLayoutRows(hwnd, hdc);
 
     int max_right = 0;
 
@@ -1706,7 +1777,9 @@ static void OptionsAdjustLayout(HWND hwnd) {
         GetWindowRect(hLangCombo, &rc);
         MapWindowPoints(HWND_DESKTOP, hwnd, (LPPOINT)&rc, 2);
         if (combo_w != rc.right - rc.left) {
-            SetWindowPos(hLangCombo, nullptr, 0, 0, combo_w, rc.bottom - rc.top,
+            RECT dropped = rc;
+            SendMessageW(hLangCombo, CB_GETDROPPEDCONTROLRECT, 0, (LPARAM)&dropped);
+            SetWindowPos(hLangCombo, nullptr, 0, 0, combo_w, dropped.bottom - dropped.top,
                          SWP_NOMOVE | SWP_NOZORDER);
         }
         // 右缘不计入 max_right：1014 属行控件，Step 1.6 挪到 label 右侧后
@@ -1780,13 +1853,7 @@ static void OptionsAdjustLayout(HWND hwnd) {
                         : GetSystemMetrics(SM_CXSCREEN);
     int desired_cx = max(500, max_right + MARGIN);
     if (desired_cx > mon_w - 40) desired_cx = mon_w - 40;
-    if (desired_cx != rcClient.right) {
-        RECT rcWnd = { 0, 0, desired_cx, rcClient.bottom };
-        DWORD dlgStyle = (DWORD)GetWindowLongPtrW(hwnd, GWL_STYLE);
-        DWORD dlgEx = (DWORD)GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        AdjustWindowRectEx(&rcWnd, dlgStyle, FALSE, dlgEx);
-        int new_w = rcWnd.right - rcWnd.left;
-        int new_h = rcWnd.bottom - rcWnd.top;
+    if (desired_cx != rcClient.right || desired_cy != rcClient.bottom) {
 
         // resize 保持窗口当前中心，不重新以父窗居中——父窗是任务栏窄条，
         // 以它为中心会把对话框拽出屏幕底边（语言切换必触发 resize，双向
@@ -1794,6 +1861,8 @@ static void OptionsAdjustLayout(HWND hwnd) {
         // 时的定位同规则
         RECT rcCur;
         GetWindowRect(hwnd, &rcCur);
+        int new_w = rcCur.right - rcCur.left + desired_cx - rcClient.right;
+        int new_h = rcCur.bottom - rcCur.top + desired_cy - rcClient.bottom;
         int x = rcCur.left + ((rcCur.right - rcCur.left) - new_w) / 2;
         int y = rcCur.top + ((rcCur.bottom - rcCur.top) - new_h) / 2;
         if (has_mon) {
@@ -2058,11 +2127,8 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         // Cancel button
         CreateWindowW(L"BUTTON", L"Cancel",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 465, 416, 75, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
-        // Use the proper UI font (Segoe UI 9pt) on every child control -
-        // default is the bitmap 'System' font (jagged, ugly).
+        // Use the same GUI font for all settings controls.
         EnumChildWindows(hwnd, OptionsSetFontProc, (LPARAM)GetStockObject(DEFAULT_GUI_FONT));
-        // Auto-resize controls and dialog to fit the current language's text
-        OptionsAdjustLayout(hwnd);
         return 0;
     }
     case WM_COMMAND:
@@ -2306,6 +2372,7 @@ ITMPlugin::OptionReturn CProcessNetPlugin::ShowOptionsDialog(void* hParent) {
         SetWindowPos(hwnd, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
     }
     
+    OptionsAdjustLayout(hwnd);
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
     
