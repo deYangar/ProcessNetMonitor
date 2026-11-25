@@ -300,6 +300,15 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
         CProcessNetPlugin::Instance().StopEtwCapture();
         // Stop the signature verification worker (file IO must not outlive us)
         SignatureCache::Instance().Shutdown();
+        // 进程级的崩溃钩子（VEH）登记在系统里，活得比本 DLL 的代码久。显式 FreeLibrary 后
+        // 映像被解除映射，链表里留的是死地址，此后任何异常的分发都会跳进去（连抛出方自己
+        // 能消化的第一机会异常也一样），进程栈溢出崩溃。TM 退出时 ~CPluginManager 会逐个
+        // FreeLibrary 插件，那时进程还活着；这一步卸不卸得掉取决于还有没有本 DLL 起的
+        // std::thread 在跑（_beginthreadex 在线程结束前持有模块引用），所以这里按「真被
+        // 卸载了」处理，不押在线程上。只在 FreeLibrary 分支摘：进程退出（reserved != NULL）
+        // 时映像一直留到进程结束，钩子始终有效，而且其它线程已被系统结束，没有理由再去碰
+        // 链表。放在收尾的最后一步：上面收尾里出异常照样写 crash.log。
+        if (reserved == nullptr) PnmRemoveCrashHooks();
     }
     return TRUE;
 }

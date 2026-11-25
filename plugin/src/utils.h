@@ -19,6 +19,10 @@ extern bool g_pnm_exit_threads_dead;
 // 进程退出时我们不能停兜底的 NT Kernel Logger，所以只在它为真时才启用兜底。
 extern std::atomic<bool> g_pnm_exit_watch_armed;
 
+// 卸载时摘掉登记在进程里的崩溃钩子（VEH）。只在显式 FreeLibrary 路径调（tooltip_popup.cpp
+// 的 DllMain），定义在 plugin_main.cpp。
+void PnmRemoveCrashHooks();
+
 // Debug output directory: <dll dir>\ProcessNetMonitor\debug\ - sits next to
 // the plugin's config folder (history.dat / settings.json live in
 // <dll dir>\ProcessNetMonitor\) so everything plugin-related stays in one

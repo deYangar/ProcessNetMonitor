@@ -19,7 +19,13 @@ extern HINSTANCE s_dll_hinst;
 // Read by PnmCrashHandler on the crash path: lock-free load only.
 static std::atomic<bool> g_crash_dump{ true };
 
-// ---- crash diagnostics: write minidump + crash.log on unhandled exception ----
+// Registration handle of PnmCrashHandler in the process-wide vectored list
+// (nullptr = not installed). Kept so the hook can be removed by handle on
+// explicit FreeLibrary - see PnmRemoveCrashHooks.
+static PVOID g_crash_veh = nullptr;
+
+// ---- crash diagnostics: write crash.log + minidump on a serious exception ----
+// Registered as a vectored handler only (first chance, any thread).
 static LONG WINAPI PnmCrashHandler(EXCEPTION_POINTERS* ep) {
     // Only dump real crashes - ignore benign first-chance/debug exceptions
     // such as 0x40010006 (DBG_PRINTEXCEPTION) that VEH sees on every debug print.
@@ -201,6 +207,26 @@ static void PnmInvalidParamHandler(const wchar_t* expr, const wchar_t* func,
         }
     }
     __fastfail(FAST_FAIL_FATAL_APP_EXIT);
+}
+
+// Called from DllMain on explicit FreeLibrary only (tooltip_popup.cpp). The
+// vectored list is process-wide: left in place, it keeps calling
+// PnmCrashHandler after this DLL's code is unmapped. The call itself faults
+// and the nested fault is dispatched through the list again, so the process
+// dies of stack overflow on ANY exception - including first-chance ones the
+// raiser was going to handle itself (probed 2026-11-25 on build 26300:
+// guarded RaiseException / C++ throw / OutputDebugString all crash this way).
+// TM frees every plugin while the process is still running
+// (~CPluginManager at exit). Whether that unmaps this DLL depends on the
+// threads: MSVC's _beginthreadex (what std::thread uses) holds a module
+// reference until its thread ends, so a live PacketCapture worker keeps the
+// DLL loaded and the hook valid. With no such thread left the DLL is really
+// unmapped, and the hook must not survive that.
+void PnmRemoveCrashHooks() {
+    if (g_crash_veh) {
+        RemoveVectoredExceptionHandler(g_crash_veh);
+        g_crash_veh = nullptr;
+    }
 }
 
 // WER LocalDumps: kernel-level crash dumps that do NOT depend on in-process
@@ -1160,13 +1186,23 @@ void CProcessNetPlugin::EnsureInitialized() {
 // cfg_base: host-provided plugins\ directory; nullptr => derive it from the
 // DLL's own location as a last resort.
 void CProcessNetPlugin::InitOnce(const wchar_t* cfg_base) {
-    // Crash diagnostics: the filter catches normal unhandled exceptions;
-    // the vectored handler also has a chance to catch failfast termination
-    // (e.g. heap corruption 0xc0000374), which bypasses the filter.
+    // Crash diagnostics: a vectored handler sees every exception at first
+    // chance, including failfast termination (e.g. heap corruption 0xc0000374)
+    // that bypasses the SEH-based unhandled-exception filter. The handle is
+    // kept so the hook can be removed by handle on explicit FreeLibrary
+    // (PnmRemoveCrashHooks) - the list is process-wide and would outlive
+    // this DLL otherwise.
+    // No SetUnhandledExceptionFilter here (2026-11-25): that is a single
+    // process-wide slot. Taking it displaced the host's own crash handler (TM
+    // crashtool.cpp), and a sibling plugin loading later saved PnmCrashHandler
+    // as its "previous" filter - restoring it at unload put a pointer into
+    // unmapped code back into the slot. For the serious codes the handler
+    // already writes crash.log / crash.dmp before any filter could run.
+    // The invalid-parameter handler needs no pairing: with /MT its slot lives
+    // in this DLL's own CRT and cannot outlive the image.
     // crash.log always on; crash.dmp / WER LocalDumps follow the "crash_dump"
     // setting, applied right after LoadSettings below.
-    SetUnhandledExceptionFilter(PnmCrashHandler);
-    AddVectoredExceptionHandler(1, PnmCrashHandler);
+    g_crash_veh = AddVectoredExceptionHandler(1, PnmCrashHandler);
     _set_invalid_parameter_handler(PnmInvalidParamHandler);
     // Use DLL's HINSTANCE (not EXE's) so resource loading (icons, etc.) works
     HINSTANCE hInst = s_dll_hinst ? s_dll_hinst : (HINSTANCE)GetModuleHandleW(NULL);
