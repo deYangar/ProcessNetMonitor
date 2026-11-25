@@ -1,4 +1,4 @@
-#include "detail_window.h"
+﻿#include "detail_window.h"
 #include "history_calendar.h"
 #include "history_load.h"
 #include "plugin_main.h"
@@ -837,6 +837,7 @@ void CDetailWindow::ClearHistory() {
         m_hourly_previous.clear();
         m_hourly_tick = 0;
         m_hourly_dirty = true;
+        m_hist_cache_valid = false;   // 库已清空，汇总缓存作废
     }
     m_history_exe_paths.clear();
     m_rows.clear();
@@ -882,6 +883,15 @@ void CDetailWindow::SelectChartDate(ULONGLONG date, ULONGLONG today) {
     InvalidateRect(m_hwnd, NULL, FALSE);
 }
 
+// 两段 Apps 汇总合并（review P2 的增量路径用）：饱和加与 HourlyHistory::Summarize 一致
+static void MergeApps(pnm::HourlyHistory::Apps& into, const pnm::HourlyHistory::Apps& from) {
+    for (const auto& [name, usage] : from) {
+        auto& total = into[name];
+        total.down = pnm::HourlyHistory::SaturatingAdd(total.down, usage.down);
+        total.up = pnm::HourlyHistory::SaturatingAdd(total.up, usage.up);
+    }
+}
+
 void CDetailWindow::BuildHistoryRows() {
     // Save expanded state before clearing
     std::set<std::wstring> expanded_names;
@@ -900,7 +910,24 @@ void CDetailWindow::BuildHistoryRows() {
     const auto [start_ms, end_ms] = calendar.Bounds({first, last}, now);
     const auto span_sec = end_ms > start_ms ? max(1.0, (end_ms - start_ms) / 1000.0) : 1.0;
 
-    const auto totals = m_hourly.Summarize(start_ms, end_ms);
+    // (review P2) 全量 Summarize 在每次重建时把所选范围的每个小时桶重新聚合
+    // 一遍（「近30天」最多 720 个桶，其中只有当前小时的桶在变，默认 500ms 一
+    // 次）。已结束的小时桶不再写入：缓存到 watermark 为止，跨小时/换范围才重
+    // 算；当前小时的桶单独汇总后并入。
+    const auto hour_start = now / History::Hour * History::Hour;
+    ULONGLONG cache_limit = min(end_ms, hour_start);
+    if (cache_limit < start_ms) cache_limit = start_ms;
+    if (!m_hist_cache_valid || m_hist_cache_start != start_ms || cache_limit < m_hist_cache_watermark) {
+        m_hist_cache = m_hourly.Summarize(start_ms, cache_limit);
+        m_hist_cache_start = start_ms;
+        m_hist_cache_watermark = cache_limit;
+        m_hist_cache_valid = true;
+    } else if (cache_limit > m_hist_cache_watermark) {
+        MergeApps(m_hist_cache, m_hourly.Summarize(m_hist_cache_watermark, cache_limit));
+        m_hist_cache_watermark = cache_limit;
+    }
+    auto totals = m_hist_cache;
+    if (end_ms > cache_limit) MergeApps(totals, m_hourly.Summarize(cache_limit, end_ms));
     for (const auto& [name16, usage] : totals) {
         const std::wstring name(name16.begin(), name16.end());
         const auto total_recv = usage.down, total_sent = usage.up;
@@ -956,9 +983,28 @@ void CDetailWindow::BuildHistoryRows() {
 // Persistence
 // ============================================================
 
+// B3 的失败提示文案用独立常量：恢复成功时按地址精确撤掉这一条，不误清
+// LoadHourlyHistory 挂着的加载类提示（「原文件已备份」是一次性事实，不该被撤）
+static const wchar_t kSaveFailNotice[] =
+    L"小时历史已连续多次保存失败，数据可能没有写入磁盘，将继续自动重试。";
+
 void CDetailWindow::SaveHistory(bool flush) {
     if (m_config_dir.empty() || !m_hourly_writable) return;
     const auto status = m_history_save.Status();
+    // 后台保存持续失败原来只保留脏标志静默重试，用户无从察觉「看着在记、
+    // 重启就没」（review B3）：连续失败 3 次（约 90 秒）提示一次，恢复成功
+    // 后重置，不反复打扰。
+    if (status == pnm::HistorySave::Saved || status == pnm::HistorySave::Superseded) {
+        m_save_fail_count = 0;
+        m_save_fail_notified = false;
+        if (m_history_notice == kSaveFailNotice) m_history_notice = nullptr;
+    } else if (status == pnm::HistorySave::Failed && ++m_save_fail_count >= 3 && !m_save_fail_notified) {
+        m_save_fail_notified = true;
+        if (!g_shutting_down) {   // 退出收尾（DllMain）里绝不弹框
+            m_history_notice = kSaveFailNotice;
+            ShowHistoryNotice();
+        }
+    }
     if (!m_hourly_dirty && status != pnm::HistorySave::Failed &&
         !(flush && status == pnm::HistorySave::Pending)) return;
     const auto path = std::filesystem::path(m_config_dir) / L"history-hourly-v1.dat";
@@ -969,16 +1015,51 @@ void CDetailWindow::SaveHistory(bool flush) {
         if (!saved) OutputDebugStringW(L"[PNM] Hourly history flush failed.\n");
     } else if (m_history_save.Queue(path, m_hourly)) {
         m_hourly_dirty = false;
+    } else {
+        ++m_save_fail_count;   // 连后台线程都起不了（极端情形），同样计入连续失败
+    }
+}
+
+// 清理上次退出残留的后台保存临时文件（review P3）：保存是「写临时文件 +
+// 原子替换」，写到一半进程被结束就留下 history-hourly-v1.dat.<pid>.<序号>.tmp，
+// 此后没有任何代码删它，长期使用会攒下单个最大 32 MB 的残留。只删 PID 不是
+// 本进程的——本进程的 .tmp 可能正被后台保存线程使用。
+static void CleanStaleHistoryTemps(const std::filesystem::path& dir) {
+    static const wchar_t kPrefix[] = L"history-hourly-v1.dat.";
+    static const wchar_t kSuffix[] = L".tmp";
+    const size_t stem = wcslen(kPrefix), tail = wcslen(kSuffix);
+    const auto digits = [](const std::wstring& s) {
+        if (s.empty()) return false;
+        for (wchar_t c : s) if (c < L'0' || c > L'9') return false;
+        return true;
+    };
+    std::error_code error;
+    std::filesystem::directory_iterator it(dir, std::filesystem::directory_options::skip_permission_denied, error), end;
+    for (; !error && it != end; it.increment(error)) {
+        const auto name = it->path().filename().wstring();
+        if (name.size() <= stem + tail ||
+            name.compare(0, stem, kPrefix) != 0 ||
+            name.compare(name.size() - tail, tail, kSuffix) != 0) continue;
+        // 中段必须是 <pid>.<序号> 两个纯数字段：与 MakeJob 的命名严格一致，
+        // 其余同名形态（含用户手工文件）一律不碰
+        const auto body = name.substr(stem, name.size() - stem - tail);
+        const auto dot = body.find(L'.');
+        if (dot == std::wstring::npos || dot == 0 || dot + 1 >= body.size() ||
+            body.find(L'.', dot + 1) != std::wstring::npos) continue;
+        if (!digits(body.substr(0, dot)) || !digits(body.substr(dot + 1))) continue;
+        if (wcstoul(body.c_str(), nullptr, 10) == GetCurrentProcessId()) continue;
+        DeleteFileW(it->path().c_str());
     }
 }
 
 void CDetailWindow::LoadHourlyHistory() {
     if (m_config_dir.empty()) return;
     const auto path = std::filesystem::path(m_config_dir) / L"history-hourly-v1.dat";
+    CleanStaleHistoryTemps(path.parent_path());
     using pnm::HistoryLoad;
     const auto result = pnm::LoadHistoryFile(path, m_hourly);
     m_history_notice = nullptr;
-    m_hourly_writable = result != HistoryLoad::Blocked;
+    m_hourly_writable = result != HistoryLoad::Blocked && result != HistoryLoad::NewerVersion;
     if (result == HistoryLoad::Loaded) m_hourly_dirty = m_hourly.Prune(WallClockMs());
     if (result == HistoryLoad::Recovered) {
         m_history_notice = L"无法读取小时历史。原文件已备份，将重新记录。";
@@ -986,7 +1067,10 @@ void CDetailWindow::LoadHourlyHistory() {
         SaveHistory(true);
     } else if (result == HistoryLoad::Blocked) {
         m_history_notice = L"无法读取或备份小时历史。原文件未改动，记录已暂停。";
+    } else if (result == HistoryLoad::NewerVersion) {
+        m_history_notice = L"小时历史由更新版本的插件写入。原文件未改动，当前版本暂停记录。";
     }
+    m_hist_cache_valid = false;   // 库内容可能整体换了，汇总缓存一律作废
 }
 
 void CDetailWindow::LoadHistory() {
@@ -1930,9 +2014,17 @@ LRESULT CDetailWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TIMER:
         if (wp == TIMER_DEFER_REBUILD) {
             KillTimer(m_hwnd, TIMER_DEFER_REBUILD);
-        m_history_dirty = true;
+            m_history_dirty = true;
             RebuildRows();
         }
+        return 0;
+
+    case WM_CAPTURECHANGED:
+        // 拖滚动条（表格页签与图表页签两处）时被别的窗口抢走捕获（切窗、弹
+        // 窗）：不清拖动状态，表格会一直跟着鼠标滚，直到下一次左键按下
+        // （review B5）
+        m_dragging_scrollbar = false;
+        m_chart_dragging = false;
         return 0;
 
     case WM_PNM_REFRESH:

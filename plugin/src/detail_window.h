@@ -263,6 +263,15 @@ private:
     const wchar_t* m_history_notice = nullptr;
     void ShowHistoryNotice();
     ULONGLONG m_last_save_tick = 0;
+    // 后台保存连续失败计数（review B3）：连续 3 次提示一次，成功即清零重置
+    int m_save_fail_count = 0;
+    bool m_save_fail_notified = false;
+    // 历史页签汇总缓存（review P2）：[m_hist_cache_start, m_hist_cache_watermark)
+    // 段的已结束小时桶聚合，跨小时/换范围才增量或重算；LoadHourlyHistory /
+    // ClearHistory 换库时整体作废
+    pnm::HourlyHistory::Apps m_hist_cache;
+    ULONGLONG m_hist_cache_start = 0, m_hist_cache_watermark = 0;
+    bool m_hist_cache_valid = false;
 
     // Time range filter (history tab)
     TimeRange m_time_range = TR_TODAY;
