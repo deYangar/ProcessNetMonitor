@@ -1835,7 +1835,10 @@ static void OptionsApplyLang(HWND hwnd) {
     SetWindowTextW(GetDlgItem(hwnd, 1026), TR(L"崩溃转储（崩溃时保存内存快照）"));
     SetWindowTextW(GetDlgItem(hwnd, 1013), TR(L"\u5728 TrafficMonitor \u9F20\u6807\u60AC\u505C\u63D0\u793A\u4E2D\u663E\u793A\u8FDB\u7A0B\u7F51\u901F\u4FE1\u606F"));
     SetWindowTextW(GetDlgItem(hwnd, 1020), TR(L"启用悬浮网速提示（关闭后仅 TrafficMonitor 官方悬停提示）"));
-    SetWindowTextW(GetDlgItem(hwnd, 1026), TR(L"在浮窗中显示 TrafficMonitor 鼠标提示"));
+    // 1027 只在宿主提供 CopyTooltipText 时才创建（见 WM_CREATE）
+    HWND hHostTooltipOpt = GetDlgItem(hwnd, 1027);
+    if (hHostTooltipOpt)
+        SetWindowTextW(hHostTooltipOpt, TR(L"在浮窗中显示 TrafficMonitor 鼠标提示"));
     SetWindowTextW(GetDlgItem(hwnd, 1015), TR(L"\u754C\u9762\u8BED\u8A00"));
     SetWindowTextW(GetDlgItem(hwnd, 1019), TR(L"\u989C\u8272\u6A21\u5F0F"));
     SetWindowTextW(GetDlgItem(hwnd, 1021), TR(L"悬浮窗背景"));
@@ -2354,18 +2357,25 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         OptionsUpdateOpacityEnabled(hwnd,
             CProcessNetPlugin::Instance().m_detail.GetPopupEffect());
 
-        HWND hHostTooltip = CreateWindowW(L"BUTTON", TR(L"在浮窗中显示 TrafficMonitor 鼠标提示"),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-            10, 408, 610, 22, hwnd, (HMENU)1026, nullptr, nullptr);
-        if (CProcessNetPlugin::Instance().m_detail.GetShowHostTooltip())
-            SendMessageW(hHostTooltip, BM_SETCHECK, BST_CHECKED, 0);
+        // 右栏「其他插件数据」的开关：只有宿主提供 ITrafficMonitor::CopyTooltipText
+        // （GetAPIVersion() >= 2）时才建这个控件。官方 V1.86 和上游 master 都没有
+        // 该接口，右栏永远出不来——那时摆一个勾了没反应的选项只会误导
+        // （2026-11-25 合并 PR #21 后修正）。ID 用 1027，1026 是上面的崩溃转储
+        if (CProcessNetPlugin::Instance().m_tooltip_api) {
+            HWND hHostTooltip = CreateWindowW(L"BUTTON", TR(L"在浮窗中显示 TrafficMonitor 鼠标提示"),
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                10, 408, 610, 22, hwnd, (HMENU)1027, nullptr, nullptr);
+            if (CProcessNetPlugin::Instance().m_detail.GetShowHostTooltip())
+                SendMessageW(hHostTooltip, BM_SETCHECK, BST_CHECKED, 0);
+        }
 
-        // OK button
+        // OK button（有右栏开关那一行时，按钮和对话框一起下移 26）
+        const int btn_y = CProcessNetPlugin::Instance().m_tooltip_api ? 444 : 418;
         CreateWindowW(L"BUTTON", L"OK",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 380, 444, 75, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 380, btn_y, 75, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
         // Cancel button
         CreateWindowW(L"BUTTON", L"Cancel",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 465, 416, 75, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 465, btn_y, 75, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
         // Use the same GUI font for all settings controls.
         EnumChildWindows(hwnd, OptionsSetFontProc, (LPARAM)GetStockObject(DEFAULT_GUI_FONT));
         return 0;
@@ -2417,7 +2427,11 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
                 plugin.m_popup_pinned = false;
                 plugin.m_popup.Hide();
             }
-            plugin.m_detail.SetShowHostTooltip(IsDlgButtonChecked(hwnd, 1026) == BST_CHECKED);
+            // 右栏开关：控件只在宿主支持时存在，不存在则设置原样保留
+            HWND hHostTooltipChk = GetDlgItem(hwnd, 1027);
+            if (hHostTooltipChk)
+                plugin.m_detail.SetShowHostTooltip(
+                    SendMessageW(hHostTooltipChk, BM_GETCHECK, 0, 0) == BST_CHECKED);
             if (plugin.m_popup.IsVisible()) {
                 plugin.UpdateHostTooltip(true);
                 plugin.PopupRefreshFromSnapshot();
@@ -2571,12 +2585,14 @@ ITMPlugin::OptionReturn CProcessNetPlugin::ShowOptionsDialog(void* hParent) {
     
     g_option_changed = false;
     
+    // 宿主提供右栏时多一行开关，对话框相应高 26
+    const int dlg_h = m_tooltip_api ? 544 : 518;
     HWND hwnd = CreateWindowExW(
         WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
         L"ProcessNetMonitorOptionsDlg",
         TR(L"\x63D2\x4EF6\x8BBE\x7F6E"),
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        0, 0, 650, 544,
+        0, 0, 650, dlg_h,
         (HWND)hParent, nullptr, GetModuleHandleW(NULL), nullptr
     );
     
