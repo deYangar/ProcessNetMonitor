@@ -2154,16 +2154,21 @@ void CTooltipPopup::UpdateAndShow(const std::vector<ProcDisplayInfo>& procs,
                                    double total_up, double total_down,
                                    const RECT& anchor_rect,
                                    const wchar_t* status,
-                                   HWND anchor_hwnd) {
+                                   HWND anchor_hwnd,
+                                   HWND host_target_hwnd) {
     m_procs = procs;
     m_total_up = total_up;
     m_total_down = total_down;
     m_status = status ? status : L"";
     m_last_anchor = anchor_rect;
-    if (anchor_hwnd && m_anchor_hwnd != anchor_hwnd) {
+    if (anchor_hwnd)
+        m_anchor_hwnd = anchor_hwnd;
+    // Tooltip target changed (main window <-> taskbar): the column shows other
+    // text, so its scroll position starts over.
+    if (host_target_hwnd && m_host_target_hwnd != host_target_hwnd) {
         m_host_scroll = m_host_wheel_remainder = 0;
         EndHostScrollDrag();
-        m_anchor_hwnd = anchor_hwnd;
+        m_host_target_hwnd = host_target_hwnd;
     }
 
     // Re-check dark mode（acrylic tint 已随主题分档，ApplyBackdrop 幂等

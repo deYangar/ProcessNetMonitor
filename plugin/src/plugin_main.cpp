@@ -1571,7 +1571,10 @@ void CProcessNetPlugin::ShowPopupAt(const RECT& anchor, HWND target, bool is_tas
     m_popup_is_taskbar = is_taskbar;
     UpdateHostTooltip(true);
     m_popup_anchor = anchor;
-    m_popup.UpdateAndShow(procs, su, sd, anchor, EtwPopupStatus(&m_etw_cap), target);
+    // anchor_hwnd 传 nullptr：锚窗由调用方 SetAnchorHwnd 设定（悬停路径 = TM
+    // 主窗口，点击固定路径 = 不动）。target 只是右栏文本的取数对象，悬浮窗
+    // 单独记它，换目标时右栏滚动归零
+    m_popup.UpdateAndShow(procs, su, sd, anchor, EtwPopupStatus(&m_etw_cap), nullptr, target);
 }
 
 void CProcessNetPlugin::HoverTick() {
@@ -1618,15 +1621,22 @@ void CProcessNetPlugin::HoverTick() {
     if (tm_wnd) {
         // Cursor over a TrafficMonitor window
         m_hover_leave_tick = 0;
-        bool switched = tm_wnd != m_hover_target || is_taskbar != m_hover_is_taskbar;
+        // 「换了目标」：右栏有内容时，同一个 TM 主窗口下 主窗口 ↔ 任务栏 也算换
+        // （右栏取的是当前悬停目标的提示文本）；右栏为空时只看窗口句柄，
+        // 与引入右栏之前的状态机一致
+        const bool host_column = !m_popup.HostTooltipEmpty();
+        bool switched = tm_wnd != m_hover_target ||
+                        (host_column && is_taskbar != m_hover_is_taskbar);
         if (switched) {
             // Switched target window: restart the hover delay
             m_hover_target = tm_wnd;
             m_hover_is_taskbar = is_taskbar;
             m_hover_start_tick = now;
         }
+        // 右栏有内容、可见且未固定时换目标：立刻按新目标重显示，右栏才会换成
+        // 新目标的文本。右栏为空时不走这一支，仍然只在首次悬停时定位
         if ((!m_popup.IsVisible() && now - m_hover_start_tick >= 400) ||
-            (switched && m_popup.IsVisible() && !m_popup_pinned)) {
+            (switched && host_column && m_popup.IsVisible() && !m_popup_pinned)) {
             RECT anchor;
             if (is_taskbar) {
                 // Use the actual taskbar dialog rect (hover_wnd), not the parent
@@ -1641,6 +1651,10 @@ void CProcessNetPlugin::HoverTick() {
             } else {
                 GetWindowRect(tm_wnd, &anchor);
             }
+            // 锚窗 = TM 主窗口（任务栏对话框是它的子窗口）：IsCursorNear 对整棵
+            // 子树豁免，光标在任务栏 TM 窗口里挪动不算「靠近」悬浮窗。锚窗句柄
+            // 只用于这件事；「右栏取的是哪个目标的文本」由 ShowPopupAt 另行传入
+            m_popup.SetAnchorHwnd(tm_wnd);
             ShowPopupAt(anchor, is_taskbar ? hover_wnd : tm_wnd, is_taskbar);
         }
     } else if (!over_popup) {

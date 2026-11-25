@@ -37,16 +37,25 @@ public:
     // status: optional one-line status/warning shown under the total speed (may be nullptr)
     // anchor_hwnd: the TrafficMonitor window this popup is anchored to, used to locate
     //               its native tooltip window so we can avoid overlapping it.
+    //               nullptr = leave the anchor unchanged.
+    // host_target_hwnd: which window the host tooltip column was fetched for (TM main
+    //               window or taskbar window). A change resets the column's scroll
+    //               position. Kept apart from anchor_hwnd on purpose: anchor_hwnd is
+    //               the subtree IsCursorNear() exempts and must stay the TM main window.
     void UpdateAndShow(const std::vector<ProcDisplayInfo>& procs,
                        double total_up, double total_down,
                        const RECT& anchor_rect,
                        const wchar_t* status = nullptr,
-                       HWND anchor_hwnd = nullptr);
+                       HWND anchor_hwnd = nullptr,
+                       HWND host_target_hwnd = nullptr);
     // Update data only (no reposition); used while popup stays visible
     void UpdateData(const std::vector<ProcDisplayInfo>& procs,
                     double total_up, double total_down,
                     const wchar_t* status = nullptr);
     void SetHostTooltip(const wchar_t* text);
+    // True when the host tooltip column has nothing to show (host without the
+    // interface, option off, or empty text) - the popup is then single-column.
+    bool HostTooltipEmpty() const { return m_host_tooltip.empty(); }
 
     // Re-run tooltip avoidance if the native tooltip has appeared/moved.
     // Returns true if the popup was repositioned.
@@ -360,6 +369,7 @@ public:
     int m_host_scroll_max = 0;
     int m_host_wheel_remainder = 0;
     int m_host_thumb_grab = -1;
+    HWND m_host_target_hwnd = nullptr;   // tooltip target the column belongs to (see UpdateAndShow)
 
     // Hover 反馈（2026-10-16 咩咩反馈按钮无接入效果突兀）：两个 section
     // 标题条 + 查看详细按钮。矩形由 DrawContent 记录（与 m_rcDetailBtn
