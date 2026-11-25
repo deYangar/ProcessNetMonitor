@@ -182,9 +182,10 @@ ProcessNetMonitor/
 
 ## 数据存储
 
-- **历史流量**：`%APPDATA%\TrafficMonitor\plugins\ProcessNetMonitor\history.dat`（非 portable 模式）或 `<exe_dir>\plugins\ProcessNetMonitor\history.dat`（portable 模式）
-- **排序/设置**：同目录下 `settings.json`（含 `debug_logs` 开关，默认 `false`）
-- 数据格式版本 v4，自动兼容 v2/v3 旧格式
+- **历史流量**：`%APPDATA%\TrafficMonitor\plugins\ProcessNetMonitor\history-hourly-v1.dat`（非 portable 模式）或 `<exe_dir>\plugins\ProcessNetMonitor\history-hourly-v1.dat`（portable 模式）
+- **排序/设置**：同目录下 `settings.json`（含 `debug_logs` 开关，默认 `false`；`crash_dump` 崩溃转储开关，默认 `true`）
+- 小时库按 UTC 小时聚合，保留 31 天，行数与文件大小超限自动淘汰最旧的小时桶
+- 旧版的 `history.dat` 不再读取也不迁移：升级后历史从零开始记录，旧文件保留在原处，可手动删除
 
 ## 调试日志与崩溃排查
 
@@ -194,7 +195,7 @@ ProcessNetMonitor/
   plugins/
   ├── ProcessNetMonitor.dll
   └── ProcessNetMonitor/
-      ├── settings.json / history.dat   ← 配置
+      ├── settings.json / history-hourly-v1.dat   ← 配置与历史（旧 history.dat 已停用，可删）
       ├── lang/                         ← 语言文件（如 English.ini）
       └── debug/                        ← 诊断输出
           ├── werdumps/                 ← WER 转储目录（崩溃转储开启时启动创建，常驻空目录）
