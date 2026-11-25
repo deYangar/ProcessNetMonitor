@@ -46,6 +46,7 @@ public:
     void UpdateData(const std::vector<ProcDisplayInfo>& procs,
                     double total_up, double total_down,
                     const wchar_t* status = nullptr);
+    void SetHostTooltip(const wchar_t* text);
 
     // Re-run tooltip avoidance if the native tooltip has appeared/moved.
     // Returns true if the popup was repositioned.
@@ -53,7 +54,7 @@ public:
     void Hide();
 
     bool IsVisible() const { return m_visible; }
-    bool IsHovering() const { return m_hovering; }
+    bool IsHovering() const { return m_hovering || m_host_thumb_grab >= 0; }
     HWND GetHwnd() const { return m_hwnd; }
 
     // ---- 右键菜单（2026-11-10 方案）----
@@ -98,6 +99,8 @@ public:
     }
 
     std::wstring m_status;   // status/warning line (empty = none)
+    std::vector<std::wstring> m_host_tooltip;
+    bool m_host_tooltip_collapsed = false;
 
     // Public for standalone WndProc access
     LRESULT HandleMessage(UINT msg, WPARAM wp, LPARAM lp);
@@ -138,12 +141,19 @@ private:
     std::function<void(const RECT&)> m_on_anchor_moved;
 
     // Layout & rendering
-    void CalcLayout(HDC hdc, int& out_w, int& out_h, int& out_up_count, int& out_down_count);
+    void CalcLayout(int& width, int& height) const;
+    int ProcessColumnWidth() const;
+    int HostColumnWidth() const;
+    int HostToggleWidth() const;
     void DrawBackground(HDC hdc, int w, int h, bool content_only);
     // 内容绘制主体（所有呈现路径共用，画到任意 memory DC）。
     // content_only=true 时跳过背景填充（coverage 双底色 pass 用：内容
     // 画在白底/黑底上解覆盖率）
     void DrawContent(HDC dc, int w, int h, bool content_only);
+    void DrawHostTooltipColumn(HDC dc, int left, int right, int height);
+    void DrawHostToggle(HDC dc, int left, int height);
+    void ScrollHostTooltip(int offset);
+    void EndHostScrollDrag();
 
     // ---- ULW per-pixel 呈现（透明系三档的唯一实现） ----
     // 实测（2026-10-16 harness+探针矩阵）本机 DWM 对「含内容像素的 SWCA
@@ -174,9 +184,9 @@ private:
     bool CaptureSnapNoFlash(const RECT& popup_rect, int w, int h);
     // 兜底自截规避（affinity 不可用的回退路径）：清空 ULW 表面后截屏
     void ClearLayeredSurfaceForCapture();
-    void DrawProcRow(HDC hdc, int y, const ProcDisplayInfo& proc, bool is_upload);
-    void DrawSectionTitle(HDC hdc, int y, const wchar_t* title, bool is_upload, bool hover);
-    void PositionWindow(const RECT& anchor_rect);
+    void DrawProcRow(HDC hdc, int width, int y, const ProcDisplayInfo& proc, bool is_upload);
+    void DrawSectionTitle(HDC hdc, int width, int y, const wchar_t* title, bool is_upload, bool hover);
+    void PositionWindow(const RECT& anchor_rect, bool keep_origin = false);
 
     // DPI handling (per-monitor, same approach as TM's DPIFromRect)
     void UpdateDpiScale(const RECT& anchor_rect);
@@ -341,6 +351,15 @@ public:
 
     // "查看详细" button rect (updated in OnPaint)
     RECT m_rcDetailBtn = {};
+    RECT m_rcHostToggle = {};
+    bool m_hover_host_toggle = false;
+    RECT m_rcHostBody = {};
+    RECT m_rcHostTrack = {};
+    RECT m_rcHostThumb = {};
+    int m_host_scroll = 0;
+    int m_host_scroll_max = 0;
+    int m_host_wheel_remainder = 0;
+    int m_host_thumb_grab = -1;
 
     // Hover 反馈（2026-10-16 咩咩反馈按钮无接入效果突兀）：两个 section
     // 标题条 + 查看详细按钮。矩形由 DrawContent 记录（与 m_rcDetailBtn

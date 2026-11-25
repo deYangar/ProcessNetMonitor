@@ -612,6 +612,16 @@ LRESULT CTooltipPopup::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
 
     case WM_MOUSEMOVE:
+        if (m_host_thumb_grab >= 0) {
+            const int travel = (m_rcHostTrack.bottom - m_rcHostTrack.top) -
+                               (m_rcHostThumb.bottom - m_rcHostThumb.top);
+            if (travel > 0) {
+                const int pos = std::clamp(GET_Y_LPARAM(lp) - static_cast<int>(m_rcHostTrack.top)
+                                           - m_host_thumb_grab, 0, travel);
+                ScrollHostTooltip(MulDiv(pos, m_host_scroll_max, travel));
+            }
+            return 0;
+        }
         if (!m_tracking) {
             TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, m_hwnd, 0 };
             TrackMouseEvent(&tme);
@@ -624,10 +634,13 @@ LRESULT CTooltipPopup::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
             bool up = PtInRect(&m_rcSectionUp, pt) != FALSE;
             bool down = PtInRect(&m_rcSectionDown, pt) != FALSE;
             bool btn = PtInRect(&m_rcDetailBtn, pt) != FALSE;
-            if (up != m_hover_up || down != m_hover_down || btn != m_hover_btn) {
+            bool toggle = PtInRect(&m_rcHostToggle, pt) != FALSE;
+            if (up != m_hover_up || down != m_hover_down || btn != m_hover_btn ||
+                toggle != m_hover_host_toggle) {
                 m_hover_up = up;
                 m_hover_down = down;
                 m_hover_btn = btn;
+                m_hover_host_toggle = toggle;
                 InvalidateRect(m_hwnd, NULL, FALSE);
             }
         }
@@ -640,16 +653,28 @@ LRESULT CTooltipPopup::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
             GetCursorPos(&pt);
             ScreenToClient(m_hwnd, &pt);
             SetCursor(LoadCursor(nullptr,
-                      PtInRect(&m_rcDetailBtn, pt) ? IDC_HAND : IDC_ARROW));
+                      (PtInRect(&m_rcDetailBtn, pt) || PtInRect(&m_rcHostToggle, pt))
+                          ? IDC_HAND : IDC_ARROW));
             return TRUE;
         }
         return DefWindowProcW(m_hwnd, msg, wp, lp);
 
     case WM_LBUTTONDOWN:
-        // Only open detail window when clicking the "查看详细" button
         {
             POINT pt = { (short)LOWORD(lp), (short)HIWORD(lp) };
-            if (PtInRect(&m_rcDetailBtn, pt)) {
+            if (PtInRect(&m_rcHostThumb, pt)) {
+                SetCapture(m_hwnd);
+                if (GetCapture() == m_hwnd)
+                    m_host_thumb_grab = pt.y - m_rcHostThumb.top;
+            } else if (PtInRect(&m_rcHostTrack, pt)) {
+                const int page = m_rcHostBody.bottom - m_rcHostBody.top;
+                ScrollHostTooltip(m_host_scroll + (pt.y < m_rcHostThumb.top ? -page : page));
+            } else if (!m_host_tooltip.empty() && PtInRect(&m_rcHostToggle, pt)) {
+                m_host_tooltip_collapsed = !m_host_tooltip_collapsed;
+                InvalidateRect(m_hwnd, nullptr, FALSE);
+                PositionWindow(m_last_anchor, true);
+                UpdateWindow(m_hwnd);
+            } else if (PtInRect(&m_rcDetailBtn, pt)) {
                 auto& plugin = CProcessNetPlugin::Instance();
                 plugin.m_popup_pinned = false;
                 plugin.ToggleDetailWindow(m_hwnd);
@@ -657,6 +682,32 @@ LRESULT CTooltipPopup::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
             }
         }
         return 0;
+
+    case WM_LBUTTONUP:
+    case WM_CANCELMODE:
+        EndHostScrollDrag();
+        return 0;
+
+    case WM_CAPTURECHANGED:
+        m_host_thumb_grab = -1;
+        return 0;
+
+    case WM_MOUSEWHEEL: {
+        POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        ScreenToClient(m_hwnd, &pt);
+        if (m_host_scroll_max > 0 && PtInRect(&m_rcHostBody, pt)) {
+            UINT lines = 3;
+            SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
+            const int page = m_rcHostBody.bottom - m_rcHostBody.top;
+            const int step = lines == WHEEL_PAGESCROLL ? page :
+                min(page, static_cast<int>(min(lines, static_cast<UINT>(page))) * STATUS_H);
+            m_host_wheel_remainder += GET_WHEEL_DELTA_WPARAM(wp);
+            const int ticks = m_host_wheel_remainder / WHEEL_DELTA;
+            m_host_wheel_remainder %= WHEEL_DELTA;
+            ScrollHostTooltip(m_host_scroll - ticks * step);
+        }
+        return 0;
+    }
 
     case WM_CONTEXTMENU:
         // 右键菜单（2026-11-10 方案）：lp 是屏幕坐标，(-1,-1)=键盘触发
@@ -708,8 +759,8 @@ void CTooltipPopup::OnMouseLeave() {
     m_tracking = false;
     m_hovering = false;
     // 清 hover 高亮（有状态翻转才重绘）
-    if (m_hover_up || m_hover_down || m_hover_btn) {
-        m_hover_up = m_hover_down = m_hover_btn = false;
+    if (m_hover_up || m_hover_down || m_hover_btn || m_hover_host_toggle) {
+        m_hover_up = m_hover_down = m_hover_btn = m_hover_host_toggle = false;
         if (m_hwnd) InvalidateRect(m_hwnd, NULL, FALSE);
     }
     // Don't hide immediately - the hover timer handles hide delays
@@ -776,60 +827,47 @@ COLORREF CTooltipPopup::GetSectionBgColor() {
 // Layout calculation
 // ============================================================
 
-void CTooltipPopup::CalcLayout(HDC hdc, int& out_w, int& out_h, int& out_up_count, int& out_down_count) {
-    HFONT hOldFont = (HFONT)SelectObject(hdc, m_font_normal);
-
-    int max_text_w = 0;
-
-    // Count displayable processes per section (direction-specific)
-    int up_count = 0, down_count = 0;
-    for (size_t i = 0; i < m_procs.size(); i++) {
-        if (m_procs[i].speed_up > 0.01 && up_count < MAX_SHOW) up_count++;
-        if (m_procs[i].speed_down > 0.01 && down_count < MAX_SHOW) down_count++;
+void CTooltipPopup::SetHostTooltip(const wchar_t* text) {
+    m_host_tooltip.clear();
+    for (const wchar_t* line = text; *line;) {
+        const wchar_t* end = line + wcscspn(line, L"\r\n");
+        if (end != line) m_host_tooltip.emplace_back(line, end);
+        line = end + wcsspn(end, L"\r\n");
     }
-    // Fill remaining slots with historical processes
-    int up_total = min((int)m_procs.size(), MAX_SHOW);
-    int down_total = min((int)m_procs.size(), MAX_SHOW);
-    up_count = max(up_count, min(up_total, MAX_SHOW));
-    down_count = max(down_count, min(down_total, MAX_SHOW));
-    if (up_count == 0) up_count = 1;
-    if (down_count == 0) down_count = 1;
-
-    out_up_count = up_count;
-    out_down_count = down_count;
-
-    // Measure text widths
-    for (size_t i = 0; i < m_procs.size() && i < MAX_SHOW; i++) {
-        SIZE sz;
-        GetTextExtentPoint32W(hdc, m_procs[i].name.c_str(), (int)m_procs[i].name.size(), &sz);
-        max_text_w = max(max_text_w, sz.cx);
-
-        wchar_t spd[64];
-        FormatSpeed(max(m_procs[i].speed_up, m_procs[i].speed_down), spd, 64);
-        GetTextExtentPoint32W(hdc, spd, (int)wcslen(spd), &sz);
-        max_text_w = max(max_text_w, sz.cx);
+    if (m_host_tooltip.empty()) {
+        m_host_scroll = m_host_wheel_remainder = 0;
+        EndHostScrollDrag();
     }
+}
 
-    SelectObject(hdc, hOldFont);
-
-    // Fixed width: long process names are truncated with an ellipsis instead
-    // of stretching the window (user request 2026-08-04).
-    // Name column: ~20 chars at 100% DPI (SunloginClient fits, longer names
-    // get ellipsized by DrawProcRow's truncation logic).
-    // 2026-10-16 咩咩反馈「进程名和流速之间留白大」：速度右对齐贴右缘，
-    // 间隙=窗口宽-两段文本宽，收窄四件套（名字列 105→90 / 列间隔 12→8 /
-    // 速度列 110→85 / 窗口下限 300→260）整体收 ~40px，长名照旧省略
+int CTooltipPopup::ProcessColumnWidth() const {
     const int NAME_COL_W = (int)(90 * m_dpi_scale);
-    out_w = PADDING + ICON_SIZE + (int)(6 * m_dpi_scale) + NAME_COL_W
-            + (int)(8 * m_dpi_scale) + SPEED_AREA_W + PADDING;
-    out_w = max(out_w, MIN_WIDTH);
+    return max(MIN_WIDTH, 2 * PADDING + ICON_SIZE + NAME_COL_W
+        + (int)(6 * m_dpi_scale) + (int)(8 * m_dpi_scale) + SPEED_AREA_W);
+}
 
-    out_h = PADDING + HEADER_H
-            + (m_status.empty() ? 0 : STATUS_H + 2)
-            + SECTION_H + up_count * ROW_HEIGHT + GAP_H
-            + SECTION_H + down_count * ROW_HEIGHT
-            + BTN_AREA_H
-            + PADDING;
+int CTooltipPopup::HostToggleWidth() const {
+    return max(1, static_cast<int>(18 * m_dpi_scale));
+}
+
+int CTooltipPopup::HostColumnWidth() const {
+    if (m_host_tooltip.empty()) return 0;
+    RECT work{}, monitor{};
+    PNM_GetWorkAreaForRect(m_last_anchor, work, monitor);
+    const int margin = max(4, static_cast<int>(4 * m_dpi_scale));
+    const int available = (work.right - work.left - HostToggleWidth() - 2 * margin) / 2;
+    // On exceptionally narrow work areas retain the original single-column popup.
+    return available >= ProcessColumnWidth() * 3 / 4 ? min(available, ProcessColumnWidth()) : 0;
+}
+
+void CTooltipPopup::CalcLayout(int& width, int& height) const {
+    const int column = HostColumnWidth();
+    width = column ? column + HostToggleWidth() + (m_host_tooltip_collapsed ? 0 : column)
+                   : ProcessColumnWidth();
+    // Both sections fill unused rows from the same recent process list.
+    const int rows = max(1, min(static_cast<int>(m_procs.size()), MAX_SHOW));
+    height = 2 * PADDING + HEADER_H + (m_status.empty() ? 0 : STATUS_H + 2)
+        + 2 * (SECTION_H + rows * ROW_HEIGHT) + GAP_H + BTN_AREA_H;
 }
 
 // ============================================================
@@ -894,9 +932,7 @@ static void DrawHoverWash(HDC hdc, const RECT* rc, bool dark_theme) {
     if (mem) DeleteDC(mem);
 }
 
-void CTooltipPopup::DrawSectionTitle(HDC hdc, int y, const wchar_t* title, bool is_upload, bool hover) {
-    RECT client;
-    GetClientRect(m_hwnd, &client);
+void CTooltipPopup::DrawSectionTitle(HDC hdc, int width, int y, const wchar_t* title, bool is_upload, bool hover) {
     int bar_h = (int)(20 * m_dpi_scale);
 
     if (m_acrylic_active) {
@@ -905,14 +941,14 @@ void CTooltipPopup::DrawSectionTitle(HDC hdc, int y, const wchar_t* title, bool 
         // 反馈改薄纱：AlphaBlend 均匀半透明在 coverage 双底解算下是精
         // 确解（A-C=(1-α)·255 逐通道一致，f 还原为纱色），无色偏伪色
         if (hover) {
-            RECT wash = { PADDING - 2, y, client.right - PADDING + 2, y + bar_h + 2 };
+            RECT wash = { PADDING - 2, y, width - PADDING + 2, y + bar_h + 2 };
             DrawHoverWash(hdc, &wash, UseDarkTheme());
         }
     } else {
         // 降级档（Win7/关背板，整窗实心面板）：保留实心条，深一档区分区块
         COLORREF sec_bg = GetSectionBgColor();
         if (hover) sec_bg = UseDarkTheme() ? RGB(60, 60, 60) : RGB(227, 227, 227);
-        RECT rc = { PADDING - 2, y, client.right - PADDING + 2, y + bar_h + 2 };
+        RECT rc = { PADDING - 2, y, width - PADDING + 2, y + bar_h + 2 };
         int radius = max(2, (int)(6 * m_dpi_scale));
         HBRUSH hBrush = CreateSolidBrush(sec_bg);
         HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, hBrush);
@@ -933,16 +969,13 @@ void CTooltipPopup::DrawSectionTitle(HDC hdc, int y, const wchar_t* title, bool 
 
     HFONT hOldFont = (HFONT)SelectObject(hdc, m_font_normal);
 
-    RECT text_rc = { PADDING + 2, y, client.right - PADDING, y + (int)(22 * m_dpi_scale) };
+    RECT text_rc = { PADDING + 2, y, width - PADDING, y + (int)(22 * m_dpi_scale) };
     DrawTextW(hdc, title, -1, &text_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
     SelectObject(hdc, hOldFont);
 }
 
-void CTooltipPopup::DrawProcRow(HDC hdc, int y, const ProcDisplayInfo& proc, bool is_upload) {
-    RECT client;
-    GetClientRect(m_hwnd, &client);
-
+void CTooltipPopup::DrawProcRow(HDC hdc, int width, int y, const ProcDisplayInfo& proc, bool is_upload) {
     int x = PADDING + 2;
 
     // 1. Process icon
@@ -971,7 +1004,7 @@ void CTooltipPopup::DrawProcRow(HDC hdc, int y, const ProcDisplayInfo& proc, boo
 
     SIZE name_sz;
     GetTextExtentPoint32W(hdc, display_name.c_str(), (int)display_name.size(), &name_sz);
-    int max_name_w = client.right - PADDING - SPEED_AREA_W - (int)(10 * m_dpi_scale) - x; // leave room for speed
+    int max_name_w = width - PADDING - SPEED_AREA_W - (int)(10 * m_dpi_scale) - x; // leave room for speed
     if (name_sz.cx > max_name_w) {
         // Truncate with ellipsis
         while (display_name.size() > 3 && name_sz.cx > max_name_w) {
@@ -981,7 +1014,7 @@ void CTooltipPopup::DrawProcRow(HDC hdc, int y, const ProcDisplayInfo& proc, boo
         }
     }
 
-    RECT name_rc = { x, y, client.right - PADDING - SPEED_AREA_W + (int)(10 * m_dpi_scale), y + ROW_HEIGHT };
+    RECT name_rc = { x, y, width - PADDING - SPEED_AREA_W + (int)(10 * m_dpi_scale), y + ROW_HEIGHT };
     DrawTextW(hdc, display_name.c_str(), -1, &name_rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
     // 3. Speed (right-aligned, accent color)
@@ -990,7 +1023,7 @@ void CTooltipPopup::DrawProcRow(HDC hdc, int y, const ProcDisplayInfo& proc, boo
     FormatSpeed(speed, spd_buf, 64);
 
     SetTextColor(hdc, GetAccentColor(is_upload));
-    RECT spd_rc = { client.right - PADDING - SPEED_AREA_W, y, client.right - PADDING, y + ROW_HEIGHT };
+    RECT spd_rc = { width - PADDING - SPEED_AREA_W, y, width - PADDING, y + ROW_HEIGHT };
     SelectObject(hdc, m_font_normal);  // 速度数字回归常规（2026-10-18 咩咩：半粗实
                                        // 渲染为 Bold 过粗；透明化后判定/翻转精确，
                                        // 靠颜色本身说话）：函数尾恢复 hOldFont
@@ -999,7 +1032,7 @@ void CTooltipPopup::DrawProcRow(HDC hdc, int y, const ProcDisplayInfo& proc, boo
     // 4. Subtle separator line
     HPEN hOldPen = (HPEN)SelectObject(hdc, m_pen_separator);
     MoveToEx(hdc, PADDING + ICON_SIZE + 6, y + ROW_HEIGHT - 1, NULL);
-    LineTo(hdc, client.right - PADDING, y + ROW_HEIGHT - 1);
+    LineTo(hdc, width - PADDING, y + ROW_HEIGHT - 1);
     SelectObject(hdc, hOldPen);
 
     SelectObject(hdc, hOldFont);
@@ -1414,15 +1447,15 @@ void CTooltipPopup::RefreshBackdrop(const RECT& popup_rect) {
     // 正是中位数的语义（咩咩 13:38 实测：进程列沾一条黑边就误翻白字）。
     // 同一轮截屏的右侧速度列区域单独收一份：accent 亮/深变体的独立判
     // 定用（左右背景亮度分裂时左判定管不到右列）
-    int judge_w = w - SPEED_AREA_W + (int)(10 * m_dpi_scale);
-    if (judge_w < w / 2) judge_w = w / 2;   // 布局异常时保底半宽
-    if (judge_w > w) judge_w = w;
+    const int column = HostColumnWidth();
+    const int left_w = min(w, column ? column : ProcessColumnWidth());
+    const int judge_w = min(left_w, max(left_w / 2, left_w - SPEED_AREA_W + (int)(10 * m_dpi_scale)));
     std::vector<unsigned short> lums, lums_r;
     lums.reserve((size_t)((h / 4 + 1) * (judge_w / 4 + 1)));
     {
         unsigned char* p8 = (unsigned char*)m_snap_bits;
         for (int y = 0; y < h; y += 4)
-            for (int x = 0; x < w; x += 4) {
+            for (int x = 0; x < left_w; x += 4) {
                 size_t i = ((size_t)y * w + x) * 4;
                 unsigned short l = (unsigned short)(
                     (299 * p8[i + 2] + 587 * p8[i + 1] + 114 * p8[i]) / 1000);
@@ -1483,6 +1516,139 @@ void CTooltipPopup::RefreshBackdrop(const RECT& popup_rect) {
     }
 }
 
+void CTooltipPopup::DrawHostToggle(HDC dc, int left, int height) {
+    const int width = HostToggleWidth();
+    const int cx = left + width / 2;
+    const int cy = height / 2;
+    const int half_h = max(1, static_cast<int>(18 * m_dpi_scale));
+    m_rcHostToggle = { left, cy - half_h, left + width, cy + half_h };
+
+    HPEN old_pen = (HPEN)SelectObject(dc, m_pen_separator);
+    MoveToEx(dc, cx, PADDING, nullptr);
+    LineTo(dc, cx, m_rcHostToggle.top);
+    MoveToEx(dc, cx, m_rcHostToggle.bottom, nullptr);
+    LineTo(dc, cx, height - PADDING);
+    SelectObject(dc, old_pen);
+
+    const COLORREF fill = m_hover_host_toggle
+        ? (UseDarkTheme() ? RGB(65, 65, 69) : RGB(222, 222, 222)) : GetSectionBgColor();
+    HBRUSH brush = CreateSolidBrush(fill);
+    HBRUSH old_brush = (HBRUSH)SelectObject(dc, brush);
+    old_pen = (HPEN)SelectObject(dc, m_pen_separator);
+    const int radius = max(2, static_cast<int>(6 * m_dpi_scale));
+    RoundRect(dc, left, m_rcHostToggle.top, left + width - 1, m_rcHostToggle.bottom,
+              radius, radius);
+    SelectObject(dc, old_brush);
+    DeleteObject(brush);
+
+    const int dx = max(2, static_cast<int>(3 * m_dpi_scale));
+    const int dy = max(3, static_cast<int>(5 * m_dpi_scale));
+    const int direction = m_host_tooltip_collapsed ? 1 : -1;
+    const POINT chevron[] = { { cx - direction * dx, cy - dy },
+                              { cx + direction * dx, cy },
+                              { cx - direction * dx, cy + dy } };
+    HPEN arrow_pen = CreatePen(PS_SOLID, max(1, static_cast<int>(2 * m_dpi_scale)), GetTextColor());
+    SelectObject(dc, arrow_pen);
+    Polyline(dc, chevron, ARRAYSIZE(chevron));
+    SelectObject(dc, old_pen);
+    DeleteObject(arrow_pen);
+}
+
+void CTooltipPopup::ScrollHostTooltip(int offset) {
+    offset = std::clamp(offset, 0, m_host_scroll_max);
+    if (offset != m_host_scroll) {
+        m_host_scroll = offset;
+        InvalidateRect(m_hwnd, nullptr, FALSE);
+    }
+}
+
+void CTooltipPopup::EndHostScrollDrag() {
+    if (m_host_thumb_grab < 0) return;
+    m_host_thumb_grab = -1;
+    if (GetCapture() == m_hwnd) ReleaseCapture();
+}
+
+struct HostTextSpan {
+    const wchar_t* text;
+    int length;
+};
+
+static std::vector<HostTextSpan> WrapHostText(HDC dc,
+    const std::vector<std::wstring>& paragraphs, int width) {
+    std::vector<HostTextSpan> rows;
+    for (const auto& paragraph : paragraphs) {
+        const wchar_t* text = paragraph.data();
+        int remaining = static_cast<int>(paragraph.size());
+        while (remaining > 0) {
+            int fit = 0;
+            SIZE size{};
+            GetTextExtentExPointW(dc, text, remaining, width, &fit, nullptr, &size);
+            // Prefer word boundaries, but hard wrap tokens that can't fit on their own.
+            if (fit > 0 && fit < remaining && text[fit] != L' ') {
+                int boundary = fit;
+                while (boundary > 0 && text[boundary - 1] != L' ') --boundary;
+                if (boundary > 0 && text[boundary - 1] == L' ' && text[0] != L' ')
+                    fit = boundary;
+            }
+            if (fit < remaining && fit > 0 && IS_HIGH_SURROGATE(text[fit - 1]) &&
+                IS_LOW_SURROGATE(text[fit])) --fit;
+            if (fit == 0)
+                fit = remaining > 1 && IS_SURROGATE_PAIR(text[0], text[1]) ? 2 : 1;
+            rows.push_back({ text, fit });
+            text += fit;
+            remaining -= fit;
+        }
+    }
+    return rows;
+}
+
+void CTooltipPopup::DrawHostTooltipColumn(HDC dc, int left, int right, int height) {
+    if (right - left <= 2 * PADDING) return;
+    SetTextColor(dc, UseTextTheme() ? RGB(112, 183, 255) : RGB(24, 102, 182));
+    RECT title = { left + PADDING, PADDING, right - PADDING, PADDING + HEADER_H };
+    const std::wstring label = std::wstring(L"\u25C6 ") + TR(L"\u5176\u4ED6\u63D2\u4EF6\u6570\u636E");
+    DrawTextW(dc, label.c_str(), -1, &title, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+
+    m_rcHostBody = { title.left, title.bottom, right - PADDING, height - PADDING };
+    const int page = m_rcHostBody.bottom - m_rcHostBody.top;
+    if (page <= 0) return;
+
+    TEXTMETRICW metrics{};
+    GetTextMetricsW(dc, &metrics);
+    const int row_height = max(STATUS_H, static_cast<int>(metrics.tmHeight + metrics.tmExternalLeading));
+    RECT text = m_rcHostBody;
+    auto rows = WrapHostText(dc, m_host_tooltip, text.right - text.left);
+    if (static_cast<int>(rows.size()) * row_height > page) {
+        const int scroll_width = max(1, static_cast<int>(10 * m_dpi_scale));
+        m_rcHostTrack = { text.right - scroll_width, text.top, text.right, text.bottom };
+        text.right = m_rcHostTrack.left - max(1, PADDING / 2);
+        rows = WrapHostText(dc, m_host_tooltip, text.right - text.left);
+    }
+    const int content_height = static_cast<int>(rows.size()) * row_height;
+    m_host_scroll_max = max(0, content_height - page);
+    m_host_scroll = min(m_host_scroll, m_host_scroll_max);
+    if (m_host_scroll_max > 0) {
+        const int thumb_height = min(page, max(static_cast<int>(16 * m_dpi_scale),
+                                                MulDiv(page, page, content_height)));
+        const int thumb_top = m_rcHostTrack.top + MulDiv(m_host_scroll, page - thumb_height, m_host_scroll_max);
+        m_rcHostThumb = { m_rcHostTrack.left, thumb_top, m_rcHostTrack.right, thumb_top + thumb_height };
+        const bool dark = UseDarkTheme();
+        HBRUSH track = CreateSolidBrush(dark ? RGB(46, 46, 49) : RGB(231, 231, 231));
+        HBRUSH thumb = CreateSolidBrush(dark ? RGB(130, 130, 136) : RGB(149, 149, 156));
+        FillRect(dc, &m_rcHostTrack, track);
+        FillRect(dc, &m_rcHostThumb, thumb);
+        DeleteObject(track);
+        DeleteObject(thumb);
+    }
+
+    SetTextColor(dc, GetTextColor());
+    const int first = m_host_scroll / row_height;
+    int y = text.top - (m_host_scroll % row_height);
+    for (int i = first; i < static_cast<int>(rows.size()) && y < text.bottom; ++i, y += row_height) {
+        ExtTextOutW(dc, text.left, y, ETO_CLIPPED, &text, rows[i].text, rows[i].length, nullptr);
+    }
+}
+
 void CTooltipPopup::DrawContent(HDC dc, int w, int h, bool content_only) {
     // Background（coverage pass 用 content_only：白/黑底上只画边框等内容，
     // 面板由 ULW 背景 alpha 提供）
@@ -1491,6 +1657,17 @@ void CTooltipPopup::DrawContent(HDC dc, int w, int h, bool content_only) {
     // Set up fonts
     HFONT hOldFont = (HFONT)SelectObject(dc, m_font_normal);
     SetBkMode(dc, TRANSPARENT);
+    const int column = HostColumnWidth();
+    const int left_w = min(w, column ? column : ProcessColumnWidth());
+    m_rcHostToggle = {};
+    m_rcHostBody = m_rcHostTrack = m_rcHostThumb = {};
+    m_host_scroll_max = 0;
+    if (column && w - left_w >= HostToggleWidth()) {
+        DrawHostToggle(dc, left_w, h);
+        if (!m_host_tooltip_collapsed)
+            DrawHostTooltipColumn(dc, left_w + HostToggleWidth(), w, h);
+    }
+    w = left_w;
 
     int y = PADDING;
 
@@ -1518,14 +1695,14 @@ void CTooltipPopup::DrawContent(HDC dc, int w, int h, bool content_only) {
 
     // === Upload section ===
     m_rcSectionUp = { PADDING - 2, y, w - PADDING + 2, y + (int)(20 * m_dpi_scale) + 2 };
-    DrawSectionTitle(dc, y, TR(L"\u25B2 \u5B9E\u65F6\u4E0A\u4F20"), true, m_hover_up);
+    DrawSectionTitle(dc, w, y, TR(L"\u25B2 \u5B9E\u65F6\u4E0A\u4F20"), true, m_hover_up);
     y += SECTION_H;
 
     // Upload section: show processes with upload activity first, then fill with historical
     int up_count = 0;
     for (size_t i = 0; i < m_procs.size() && up_count < MAX_SHOW; i++) {
         if (m_procs[i].speed_up > 0.01) {
-            DrawProcRow(dc, y, m_procs[i], true);
+            DrawProcRow(dc, w, y, m_procs[i], true);
             y += ROW_HEIGHT;
             up_count++;
         }
@@ -1533,7 +1710,7 @@ void CTooltipPopup::DrawContent(HDC dc, int w, int h, bool content_only) {
     // Fill remaining with historical processes (sorted by total speed)
     for (size_t i = 0; i < m_procs.size() && up_count < MAX_SHOW; i++) {
         if (m_procs[i].speed_up <= 0.01) {
-            DrawProcRow(dc, y, m_procs[i], true);
+            DrawProcRow(dc, w, y, m_procs[i], true);
             y += ROW_HEIGHT;
             up_count++;
         }
@@ -1548,21 +1725,21 @@ void CTooltipPopup::DrawContent(HDC dc, int w, int h, bool content_only) {
 
     // === Download section ===
     m_rcSectionDown = { PADDING - 2, y, w - PADDING + 2, y + (int)(20 * m_dpi_scale) + 2 };
-    DrawSectionTitle(dc, y, TR(L"\u25BC \u5B9E\u65F6\u4E0B\u8F7D"), false, m_hover_down);
+    DrawSectionTitle(dc, w, y, TR(L"\u25BC \u5B9E\u65F6\u4E0B\u8F7D"), false, m_hover_down);
     y += SECTION_H;
 
     // Download section: show processes with download activity first, then fill
     int down_count = 0;
     for (size_t i = 0; i < m_procs.size() && down_count < MAX_SHOW; i++) {
         if (m_procs[i].speed_down > 0.01) {
-            DrawProcRow(dc, y, m_procs[i], false);
+            DrawProcRow(dc, w, y, m_procs[i], false);
             y += ROW_HEIGHT;
             down_count++;
         }
     }
     for (size_t i = 0; i < m_procs.size() && down_count < MAX_SHOW; i++) {
         if (m_procs[i].speed_down <= 0.01) {
-            DrawProcRow(dc, y, m_procs[i], false);
+            DrawProcRow(dc, w, y, m_procs[i], false);
             y += ROW_HEIGHT;
             down_count++;
         }
@@ -1660,12 +1837,10 @@ void CTooltipPopup::OnPaint() {
 // Positioning
 // ============================================================
 
-void CTooltipPopup::PositionWindow(const RECT& anchor_rect) {
+void CTooltipPopup::PositionWindow(const RECT& anchor_rect, bool keep_origin) {
     // Get popup size
-    HDC hdc = GetDC(m_hwnd);
-    int pw = 0, ph = 0, up_c = 0, down_c = 0;
-    CalcLayout(hdc, pw, ph, up_c, down_c);
-    ReleaseDC(m_hwnd, hdc);
+    int pw = 0, ph = 0;
+    CalcLayout(pw, ph);
 
     // Work area of the monitor that contains the anchor (multi-monitor safe,
     // fixes popup landing on the primary screen when TM is on a secondary one)
@@ -1705,6 +1880,15 @@ void CTooltipPopup::PositionWindow(const RECT& anchor_rect) {
             y = anchor_rect.bottom + margin;
     }
 
+    // Keep the divider under the cursor when toggling, unless expansion hits an edge.
+    if (keep_origin) {
+        RECT current{};
+        if (GetWindowRect(m_hwnd, &current)) {
+            x = current.left;
+            y = current.top;
+        }
+    }
+
     // Clamp to the anchor's own monitor work area
     if (x + pw > work.right) x = work.right - pw - margin;
     if (x < work.left) x = work.left + margin;
@@ -1714,7 +1898,7 @@ void CTooltipPopup::PositionWindow(const RECT& anchor_rect) {
     // --- Avoid overlapping TrafficMonitor's native tooltip -----------------
     // TM's tooltip is a small "tooltips_class32" popup owned by the hovered TM
     // window. If it overlaps our popup, nudge our popup away from it.
-    {
+    if (!keep_origin) {
         std::vector<RECT> tips;
         FindForeignPopups(m_anchor_hwnd, tips);
         int tip_margin = max(4, (int)(8 * m_dpi_scale));
@@ -1959,8 +2143,11 @@ void CTooltipPopup::UpdateAndShow(const std::vector<ProcDisplayInfo>& procs,
     m_total_down = total_down;
     m_status = status ? status : L"";
     m_last_anchor = anchor_rect;
-    if (anchor_hwnd)
+    if (anchor_hwnd && m_anchor_hwnd != anchor_hwnd) {
+        m_host_scroll = m_host_wheel_remainder = 0;
+        EndHostScrollDrag();
         m_anchor_hwnd = anchor_hwnd;
+    }
 
     // Re-check dark mode（acrylic tint 已随主题分档，ApplyBackdrop 幂等
     // 判断同样按主题重设；可见期间的 UpdateData 刷新不重算本成员——tint
@@ -1985,10 +2172,8 @@ void CTooltipPopup::UpdateAndShow(const std::vector<ProcDisplayInfo>& procs,
     }
 
     // Resize and show
-    HDC hdc = GetDC(m_hwnd);
-    int pw = 0, ph = 0, up_c = 0, down_c = 0;
-    CalcLayout(hdc, pw, ph, up_c, down_c);
-    ReleaseDC(m_hwnd, hdc);
+    int pw = 0, ph = 0;
+    CalcLayout(pw, ph);
 
     SetWindowPos(m_hwnd, NULL, 0, 0, pw, ph, SWP_NOMOVE | SWP_NOZORDER);
     if (m_blur_hwnd)
@@ -2046,10 +2231,8 @@ void CTooltipPopup::UpdateData(const std::vector<ProcDisplayInfo>& procs,
         int old_w = old_rc.right - old_rc.left;
         int old_h = old_rc.bottom - old_rc.top;
 
-        HDC hdc = GetDC(m_hwnd);
-        int pw = 0, ph = 0, up_c = 0, down_c = 0;
-        CalcLayout(hdc, pw, ph, up_c, down_c);
-        ReleaseDC(m_hwnd, hdc);
+        int pw = 0, ph = 0;
+        CalcLayout(pw, ph);
 
         if (pw != old_w || ph != old_h) {
             // Size changed: resize and reposition (anchor may need re-clamping),
@@ -2059,7 +2242,7 @@ void CTooltipPopup::UpdateData(const std::vector<ProcDisplayInfo>& procs,
             if (m_blur_hwnd)
                 SetWindowPos(m_blur_hwnd, NULL, 0, 0, pw, ph,
                              SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-            if (!IsCursorNear())
+            if (pw != old_w || !IsCursorNear())
                 PositionWindow(m_last_anchor);
         }
         InvalidateRect(m_hwnd, NULL, FALSE);
@@ -2185,6 +2368,8 @@ void CTooltipPopup::RecreateScaledResources() {
 
 void CTooltipPopup::Hide() {
     if (m_visible) {
+        EndHostScrollDrag();
+        m_host_scroll = m_host_wheel_remainder = 0;
         // 事件跟随先卸载（锚窗子类化只在可见期存在；HoverTick 的 reconcile
         // 每 tick 也会收敛，这里即时卸掉）
         DetachAnchorTracker();
@@ -2193,7 +2378,7 @@ void CTooltipPopup::Hide() {
         m_visible = false;
         m_hovering = false;
         m_tracking = false;
-        m_hover_up = m_hover_down = m_hover_btn = false;
+        m_hover_up = m_hover_down = m_hover_btn = m_hover_host_toggle = false;
         // 反色判定基准过期：下次显示时 PositionWindow 必重判（隐含期间
         // 背后内容已变化）
         m_last_snap_rect = {};

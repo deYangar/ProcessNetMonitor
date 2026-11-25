@@ -1143,6 +1143,7 @@ void CDetailWindow::SaveSettings() {
     }
     fprintf(f, "  \"show_speed_items\": %s,\n", m_show_speed_items ? "true" : "false");
     fprintf(f, "  \"popup_enabled\": %s,\n", m_popup_enabled ? "true" : "false");
+    fprintf(f, "  \"show_host_tooltip\": %s,\n", m_show_host_tooltip ? "true" : "false");
     fprintf(f, "  \"popup_effect\": %d,\n", m_popup_effect);
     fprintf(f, "  \"popup_opacity\": %d,\n", m_popup_opacity);
     fprintf(f, "  \"debug_logs\": %s,\n", m_debug_logs ? "true" : "false");
@@ -1263,6 +1264,15 @@ void CDetailWindow::LoadSettings() {
                 std::string sub = json.substr(pos + 1, 16);
                 m_popup_enabled = (sub.find("true") != std::string::npos);
             }
+        }
+    }
+    m_show_host_tooltip = true;
+    {
+        size_t pos = json.find("\"show_host_tooltip\"");
+        if (pos != std::string::npos && (pos = json.find(':', pos)) != std::string::npos) {
+            pos = json.find_first_not_of(" \t\r\n", pos + 1);
+            if (pos != std::string::npos && json.compare(pos, 5, "false") == 0)
+                m_show_host_tooltip = false;
         }
     }
     // Parse popup_effect (0=acrylic, 1=transparent, 2=blur, 3=opaque;

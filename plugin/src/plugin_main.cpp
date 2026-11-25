@@ -396,7 +396,7 @@ int CProcessNetItem::OnMouseEvent(MouseEventType type, int x, int y, void* hWnd,
                 if (anchor.left < wr.left) { anchor.left = wr.left; anchor.right = wr.left + 2 * half; }
                 if (anchor.right > wr.right) { anchor.right = wr.right; anchor.left = wr.right - 2 * half; }
                 plugin.m_popup_pinned = true;
-                plugin.ShowPopupAt(anchor);
+                plugin.ShowPopupAt(anchor, (HWND)hWnd, true);
             }
         } else {
             // Main window click: toggle detail window (existing behavior), dismiss popup
@@ -958,6 +958,7 @@ void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
         m_inited = true;
         InitOnce(p->GetPluginConfigDir());
     }
+    m_tooltip_api = p->GetAPIVersion() >= 2;
 }
 
 // TrafficMonitor 1.85.x never calls OnInitialize (the hook was added in
@@ -1306,7 +1307,24 @@ void CProcessNetPlugin::GetProcessDisplayInfo(
 //   - Right-click / context menu open -> popup hides immediately (no grace,
 //     pinned included) and stays suppressed until the menu closes.
 
-void CProcessNetPlugin::ShowPopupAt(const RECT& anchor) {
+void CProcessNetPlugin::UpdateHostTooltip(bool force) {
+    if (!m_tooltip_api || !m_detail.GetShowHostTooltip()) {
+        m_popup.SetHostTooltip(L"");
+        return;
+    }
+    ULONGLONG now = GetTickCount64();
+    if (!force && now - m_host_tooltip_tick < 1000) return;
+    m_host_tooltip_tick = now;
+
+    wchar_t text[4096]{};
+    auto target = m_popup_is_taskbar ? ITrafficMonitor::TT_TASKBAR : ITrafficMonitor::TT_MAIN_WINDOW;
+    if (m_app->CopyTooltipText(target, this, text, ARRAYSIZE(text)))
+        m_popup.SetHostTooltip(text);
+    else
+        m_popup.SetHostTooltip(L"");
+}
+
+void CProcessNetPlugin::ShowPopupAt(const RECT& anchor, HWND target, bool is_taskbar) {
     // Snapshot under the lock: RefreshTick (timer thread) rewrites the
     // cached stats concurrently (unsynchronized std::vector copy was heap
     // corruption 0xc0000374).
@@ -1321,8 +1339,10 @@ void CProcessNetPlugin::ShowPopupAt(const RECT& anchor) {
     }
     std::vector<CTooltipPopup::ProcDisplayInfo> procs;
     GetProcessDisplayInfo(procs, snap);
+    m_popup_is_taskbar = is_taskbar;
+    UpdateHostTooltip(true);
     m_popup_anchor = anchor;
-    m_popup.UpdateAndShow(procs, su, sd, anchor, EtwPopupStatus(&m_etw_cap));
+    m_popup.UpdateAndShow(procs, su, sd, anchor, EtwPopupStatus(&m_etw_cap), target);
 }
 
 void CProcessNetPlugin::HoverTick() {
@@ -1351,7 +1371,7 @@ void CProcessNetPlugin::HoverTick() {
         m_hover_target = nullptr;
         m_hover_start_tick = 0;
         m_hover_leave_tick = 0;
-        PopTMTooltips();   // idempotent; covers the main window's 1 s gap
+        PopTMTooltips();
         return;
     }
 
@@ -1369,13 +1389,15 @@ void CProcessNetPlugin::HoverTick() {
     if (tm_wnd) {
         // Cursor over a TrafficMonitor window
         m_hover_leave_tick = 0;
-        if (tm_wnd != m_hover_target) {
+        bool switched = tm_wnd != m_hover_target || is_taskbar != m_hover_is_taskbar;
+        if (switched) {
             // Switched target window: restart the hover delay
             m_hover_target = tm_wnd;
             m_hover_is_taskbar = is_taskbar;
             m_hover_start_tick = now;
         }
-        if (!m_popup.IsVisible() && now - m_hover_start_tick >= 400) {
+        if ((!m_popup.IsVisible() && now - m_hover_start_tick >= 400) ||
+            (switched && m_popup.IsVisible() && !m_popup_pinned)) {
             RECT anchor;
             if (is_taskbar) {
                 // Use the actual taskbar dialog rect (hover_wnd), not the parent
@@ -1390,8 +1412,7 @@ void CProcessNetPlugin::HoverTick() {
             } else {
                 GetWindowRect(tm_wnd, &anchor);
             }
-            m_popup.SetAnchorHwnd(tm_wnd);
-            ShowPopupAt(anchor);
+            ShowPopupAt(anchor, is_taskbar ? hover_wnd : tm_wnd, is_taskbar);
         }
     } else if (!over_popup) {
         // Cursor elsewhere: start/continue the hide grace period.
@@ -1429,6 +1450,7 @@ void CProcessNetPlugin::HoverTick() {
 
     // --- data refresh while visible (lightweight: no reposition unless anchor moved) ---
     if (m_popup.IsVisible()) {
+        UpdateHostTooltip();
         // Snapshot under the lock: RefreshTick (timer thread) rewrites the
         // cached stats concurrently (unsynchronized std::vector copy was
         // heap corruption 0xc0000374).
@@ -1513,6 +1535,7 @@ static void OptionsApplyLang(HWND hwnd) {
     SetWindowTextW(GetDlgItem(hwnd, 1006), TR(L"\u8C03\u8BD5\u65E5\u5FD7\uFF08\u5199\u5165\u63D2\u4EF6\u76EE\u5F55 debug\\\uFF09"));
     SetWindowTextW(GetDlgItem(hwnd, 1013), TR(L"\u5728 TrafficMonitor \u9F20\u6807\u60AC\u505C\u63D0\u793A\u4E2D\u663E\u793A\u8FDB\u7A0B\u7F51\u901F\u4FE1\u606F"));
     SetWindowTextW(GetDlgItem(hwnd, 1020), TR(L"启用悬浮网速提示（关闭后仅 TrafficMonitor 官方悬停提示）"));
+    SetWindowTextW(GetDlgItem(hwnd, 1026), TR(L"在浮窗中显示 TrafficMonitor 鼠标提示"));
     SetWindowTextW(GetDlgItem(hwnd, 1015), TR(L"\u754C\u9762\u8BED\u8A00"));
     SetWindowTextW(GetDlgItem(hwnd, 1019), TR(L"\u989C\u8272\u6A21\u5F0F"));
     SetWindowTextW(GetDlgItem(hwnd, 1021), TR(L"悬浮窗背景"));
@@ -2023,12 +2046,18 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         OptionsUpdateOpacityEnabled(hwnd,
             CProcessNetPlugin::Instance().m_detail.GetPopupEffect());
 
+        HWND hHostTooltip = CreateWindowW(L"BUTTON", TR(L"在浮窗中显示 TrafficMonitor 鼠标提示"),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+            10, 380, 610, 22, hwnd, (HMENU)1026, nullptr, nullptr);
+        if (CProcessNetPlugin::Instance().m_detail.GetShowHostTooltip())
+            SendMessageW(hHostTooltip, BM_SETCHECK, BST_CHECKED, 0);
+
         // OK button
         CreateWindowW(L"BUTTON", L"OK",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 380, 390, 75, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 380, 416, 75, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
         // Cancel button
         CreateWindowW(L"BUTTON", L"Cancel",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 465, 390, 75, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 465, 416, 75, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
         // Use the proper UI font (Segoe UI 9pt) on every child control -
         // default is the bitmap 'System' font (jagged, ugly).
         EnumChildWindows(hwnd, OptionsSetFontProc, (LPARAM)GetStockObject(DEFAULT_GUI_FONT));
@@ -2074,6 +2103,11 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             if (!popup_on && plugin.m_popup.IsVisible()) {
                 plugin.m_popup_pinned = false;
                 plugin.m_popup.Hide();
+            }
+            plugin.m_detail.SetShowHostTooltip(IsDlgButtonChecked(hwnd, 1026) == BST_CHECKED);
+            if (plugin.m_popup.IsVisible()) {
+                plugin.UpdateHostTooltip(true);
+                plugin.PopupRefreshFromSnapshot();
             }
 
             // 悬浮窗背景效果 + 透明度：保存后立即应用（可见时当场刷新；
@@ -2229,7 +2263,7 @@ ITMPlugin::OptionReturn CProcessNetPlugin::ShowOptionsDialog(void* hParent) {
         L"ProcessNetMonitorOptionsDlg",
         TR(L"\x63D2\x4EF6\x8BBE\x7F6E"),
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        0, 0, 650, 490,
+        0, 0, 650, 516,
         (HWND)hParent, nullptr, GetModuleHandleW(NULL), nullptr
     );
     

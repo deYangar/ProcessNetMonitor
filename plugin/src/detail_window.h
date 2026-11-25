@@ -71,6 +71,8 @@ public:
     // hovering a TM window). OFF = only TM's native tooltip carries our info.
     bool GetPopupEnabled() const { return m_popup_enabled; }
     void SetPopupEnabled(bool v) { m_popup_enabled = v; }
+    bool GetShowHostTooltip() const { return m_show_host_tooltip; }
+    void SetShowHostTooltip(bool v) { m_show_host_tooltip = v; }
     // 悬浮窗背景效果：0=自动（系统支持时亚克力，否则整窗透明度），
     // 1=强制整窗透明度（逃生门：Win10 上亚克力窗口移动偶有一帧延迟）
     int GetPopupEffect() const { return m_popup_effect; }
@@ -284,6 +286,7 @@ private:
     int m_refresh_ms = 500;         // plugin data refresh interval (ms)
     bool m_show_speed_items = true; // show Up/Down items in TM main window/taskbar
     bool m_popup_enabled = true;    // hover popup enabled (default ON; setting: settings.json "popup_enabled")
+    bool m_show_host_tooltip = true;
     int m_popup_effect = 0;         // 悬浮窗背景效果 0=亚克力 1=透明 2=模糊 3=不透明 (settings.json "popup_effect")
     int m_popup_opacity = 100;      // 悬浮窗不透明度 10-100 (settings.json "popup_opacity")
     std::wstring m_lang = L"auto";  // 界面语言：auto=跟随 TM，或具体 BCP-47
