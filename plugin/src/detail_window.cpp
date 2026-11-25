@@ -2356,15 +2356,10 @@ void CDetailWindow::OnMouseWheel(int delta) {
     POINT cursor{};
     GetCursorPos(&cursor);
     ScreenToClient(m_hwnd, &cursor);
+    // Page by what the last chart layout could show. Recomputing the table
+    // geometry here drifted from DrawHourlyChart and made the step one row too large.
     if (m_active_tab == 2 && PtInRect(&m_rcChartTable, cursor)) {
-        RECT client{};
-        GetClientRect(m_hwnd, &client);
-        const int reserve = max(190, (int)(220 * m_dpi_scale));
-        const int plot_bottom = max(m_rcChartPlot.top + 24, client.bottom - PADDING - reserve);
-        const int table_top = plot_bottom + 30;
-        const int row_h = max(20, (int)(22 * m_dpi_scale));
-        const int visible_rows = max(1, (client.bottom - PADDING - PADDING - table_top - row_h) / row_h);
-        const int step = max(1, visible_rows - 1);
+        const int step = max(1, m_chart_visible_rows - 1);
         m_chart_table_scroll = max(0, m_chart_table_scroll + (delta > 0 ? -step : step));
         InvalidateRect(m_hwnd, &m_rcChartTable, FALSE);
         return;
@@ -2899,8 +2894,8 @@ void CDetailWindow::DrawHourlyChart(HDC hdc, int w, int y, int client_h, int spe
         m_chart_thumb_h = 0;
     }
 
-        if (m_chart_hover_hour >= 0 && m_chart_hover_hour < hour_count) {
-            const int i = m_chart_hover_hour;
+    if (m_chart_hover_hour >= 0 && m_chart_hover_hour < hour_count) {
+        const int i = m_chart_hover_hour;
         const uint64_t total = pnm::HourlyHistory::SaturatingAdd(bars[i].down, bars[i].up);
         wchar_t down_value[32], up_value[32], total_value[32], tooltip[192];
         FormatBytes(bars[i].down, down_value, 32);
