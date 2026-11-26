@@ -1,213 +1,91 @@
-# ProcessNetMonitor - TrafficMonitor 插件
+# ProcessNetMonitor：小时流量图表与双栏浮窗
 
-[TrafficMonitor](https://github.com/zhongyang219/TrafficMonitor) 的插件，显示每个进程的网络速度。
+这是 [ProcessNetMonitor](https://github.com/deYangar/ProcessNetMonitor) 的 fork，基于上游 v1.19.0（`1c4f9e6`）。它是 [TrafficMonitor](https://github.com/zhongyang219/TrafficMonitor) 的进程网络监控插件。本分支保留了任务栏网速、进程排行和连接详情，并新增**按小时查看历史流量**和**在同一个浮窗查看宿主及其他插件的提示**。
 
-## 效果预览
+## Fork 之后的改动
 
-![悬浮网速窗口（亚克力背景）](docs/screenshot-main.png)
+### 历史流量时间范围
 
-![悬浮信息窗口](docs/screenshot-popup.png)
+点击浮窗里的「查看详细」，切换到「历史流量」。可使用「今日」「昨日」「近3天」「近7天」「近30天」，也可点击「近30天」右侧的「自定义日期」，选择开始日期和结束日期后点击「应用」。
 
-![详情窗口-实时流量](docs/screenshot-detail-realtime.png)
+- 可选范围为最近 30 个本地日历日，包含今天。开始日和结束日都计入统计；如果结束日是今天，统计到当前时刻。
+- 点击「查看结束日图表」可打开所选范围最后一天的小时图表。切回「历史流量」时，原来的范围仍会保留。
 
-![详情窗口-历史流量](docs/screenshot-detail-history.png)
+![历史流量日期范围选择](image/README/历史流量添加日期选择.png)
 
-## 功能
+### 小时流量图表
 
-- **任务栏**：两行显示，Upload 和 Download 各一行
-  - 进程名左对齐、速度右对齐，不受 TM 全局「数值右对齐」设置影响，永不裁切
-  ```
-  U:mihomo-alp. 5.6KB/s
-  D:mihomo-alp. 1.4KB/s
-  ```
-- **透明区域**（可选显示项目）：任务栏上完全不可见，点击弹出悬浮信息窗口
-  - 默认宽度 100px，插件「选项」中可自定义（0~500px）
-  - 适合只想使用 TM 自带速度显示的用户
-- **悬浮信息窗口**：鼠标悬停主悬浮窗或点击任务栏插件区域时弹出带进程图标的详情窗口
-  - 进程图标 + 名称 + 上传/下载速度
-  - 深色/浅色主题跟随系统设置
-  - 上传/下载各显示 Top 5 进程
-  - 空闲进程按 EMA（指数移动平均）排序，展示近期活跃进程
-  - 圆角窗口，DWM 阴影
-  - 任务栏点击弹出后，鼠标在悬浮窗或任务栏上均保持显示
-- **详情窗口**（点击插件区域打开）：
-  - 实时流量：可排序表格，显示进程名 / 类别 / 下载速度 / 上传速度 / 连接数
-  - 历史流量：按自然日（今日/昨日/近3天/近7天/近30天，本地 0 点对齐）统计每进程总流量和平均速度
-  - 展开行：火绒风格，点击进程名展开显示子进程 PID / 路径 / 连接详情表（协议/本地地址/远程地址/归属地/状态）
-  - 连接状态颜色编码：绿=ESTABLISHED, 蓝=LISTENING, 橙=TIME_WAIT, 深橙=CLOSE_WAIT
-  - 多进程合并：Chrome 等多进程软件按名称合并为一行，展开后显示各子进程
-  - 右键菜单：定位文件 / 文件属性 / 结束进程
-  - 右键菜单：调试日志开关（默认关，开启后生成诊断日志，见「调试日志与崩溃排查」）
-  - 历史数据持久化：关闭重启后历史数据不丢失
-  - 排序状态持久化：排序设置保存到文件，TM 重启后恢复
-- **高 DPI 支持**：适配 150%/175%/200% 等系统缩放，跟随显示器 DPI 变化自动调整
-- **自定义图标**：详情窗口标题栏显示插件专属图标
-- **可拖拽滚动条**：自绘滚动条支持鼠标拖拽、点击翻页、滚轮滚动
-- **不显示系统速度**：系统速度由 TrafficMonitor 本身提供，插件只显示进程级信息
-- **右键隐藏**：任务栏插件区域右键即可隐藏悬浮信息窗口
-- **ETW 内核级采集**（v1.10.0）：优先使用 ETW（NT Kernel Logger）按进程精确统计 TCP+UDP 字节，TUN 代理环境下自动过滤虚拟网卡侧重复流量（与 AppNetworkCounter 归属一致）
-- **高频刷新**（v1.10.0）：自建定时器默认 500ms 刷新（插件「选项」可调 100/250/500/1000ms），滚动 1 秒速度窗口与 TM 主面板同拍
-- **附加模式提示**（v1.10.0）：NT Kernel Logger 被其他工具（如 AppNetworkCounter）占用时，悬浮窗显示黄色警告并提示疑似占用者
-- **进程永不消失**（v1.10.0）：出现过流量的进程永久保留在列表（速度显示 0）
-- **悬浮窗固定宽度**（v1.10.0）：长进程名自动省略号，窗口宽度不随名称伸缩
-- **签名分类**（v1.11.0）：程序类别列按 Authenticode 签名离线判定——系统进程（微软内嵌/目录签名）/ 第三方程序（其他有效签名）/ 未签名（无签名或签名无效）；后台线程验证 + 按路径缓存，界面不卡顿
-- **进程名永不过期**（v1.11.0）：ProcessStart 事件正确解析，短命进程启动瞬间缓存文件名，退出后名字依然显示，不再退化成 `<pid>` 纯数字
-- **连接归属地显示**（v1.12.0）：连接表格新增「归属地」列——国内中文省市+ISP、国外中文国家+英文省市（离线库 ip2region，IPv4+IPv6 全支持，微秒级查询）
-- **IP 库自动管理**（v1.12.0）：首次自动下载（多 CDN 源兜底）、默认 7 天自动更新、可配代理（http/socks5）、立即更新按钮、可用开关完全关闭（关闭后不下载不显示）
-- **窗口缩放与宽高记忆**（v1.12.0）：详情窗口可拖拽缩放、最小尺寸限制、宽高自动持久化；连接表格列宽自适应窗口；归属地超长自动换行完整显示
-- **保留地址过滤**（v1.12.0）：内网/环回/链路本地/组播显示 `-`；TEST-NET、6to4、fake-IP 基准测试段（198.18/15 等）显示「保留地址」
-- **悬浮窗避让官方鼠标提示**（v1.13.0）：鼠标悬停时，插件悬浮窗自动检测 TrafficMonitor 的 `tooltips_class32` 原生提示并水平错开到左侧或右侧，防止两个提示重叠（issue #8）
-- **历史流量自然日统计**（v1.14.0）：历史流量改为「今日/昨日/近3天/近7天/近30天」5 个自然日档位，按本地时间 0 点对齐；昨日平均速度按完整 24 小时计算（issue #9）
-- **原生鼠标提示开关**（v1.14.0）：插件「选项」可关闭 TrafficMonitor 悬停提示框中的插件进程网速段落，插件自己的悬浮窗/详情窗不受影响（issue #9）
-- **ETW 智能降载**（v1.16.0）：ETW 主导采集后自动停用 raw socket 抓包与 EStats 轮询，不再吃掉千兆带宽 10~30% 吞吐（issue #11）；ETW 静默超过 15s 自动回退传统全量采集，恢复后再次停用
+在详情窗口切换到「流量图表」。点击日期按钮可直接从日历中选一天，也可用「前一天」「后一天」逐日切换，或点「今天」回到当天。图表显示所选日期各小时的下载量和上传量。
 
-## 流量统计原理
+- **定位某个小时**：点击柱子后，汇总和程序列表只统计该小时。再点同一根柱子，或点击「查看全天」，即可恢复全天统计。
+- **查看单个程序**：列表可按程序名、下载量或上传量排序。展开程序行可查看它当天的小时明细。图表的筛选和展开操作与实时进程表分开。
+- **保存与恢复**：小时数据以 UTC 记录，图表按系统本地日期展示。定期保存由后台执行。小时历史无法读取时，先尝试备份原文件；备份成功才重新记录，备份失败则暂停写入。
 
-### 主方案：ETW 内核级采集（v1.10.0+）
+**从上游升级**：旧版 `history.dat` 只有日汇总，不能还原小时分布。本 fork 不导入也不覆盖旧文件，新数据另存为 `history-hourly-v1.dat`，从启用本 fork 后开始积累。
 
-使用 ETW 消费经典 **NT Kernel Logger** 会话（优先自建，缓冲 120×256KB；被其他工具占用时自动附加并提示），通过 TDH schema 解析 `TcpIp/UdpIp` 事件的每进程发送/接收字节数：
+![小时流量图表日期选择](image/README/流量图标添加日期选择.png)
 
-- 按 PID 累计字节，滚动 1 秒窗口计算速度
-- **TUN 虚拟网卡过滤**：saddr/daddr 任一端落在虚拟网卡子网（如 mihomo 的 198.18.0.0/15）即过滤——同一份数据在内核出现两次（应用 TUN 侧 + 代理物理侧）时只保留物理侧
-- 兼容 TCP + UDP、IPv4 + IPv6，无需管理员权限即可消费（自建会话需管理员，普通权限自动回退）
+### 双栏悬浮窗
 
-**回退方案**：ETW 不可用时回退传统采集（`GetPerTcpConnectionEStats` TCP + raw socket UDP），并在悬浮窗提示。ETW 主导时传统采集自动停用以降低系统负载（v1.16.0+），静默超过 15s 自动回退全量采集，恢复后再次停用。
+悬停在 TrafficMonitor 主窗口或任务栏窗口时，左栏保留实时网速、上传和下载排行，以及「查看详细」按钮。右栏以蓝色 **「◆ 其他插件数据」** 为固定标题，显示当前悬停目标对应的 TrafficMonitor 统计和其他插件提示，不重复显示 ProcessNetMonitor 自己的提示。该功能可在插件设置内关闭。
 
-### 传统方案（回退）
+- **展开时左右等宽**。右栏正文自动换行，内容超出可见范围时，可使用滚轮或拖动滑块查看全文，不用省略号截断正文。
+- **分隔线中间的箭头**可收起或恢复右栏，只查看排行时无需打开设置。
+- **宿主要求**：右栏需要支持 `CopyTooltipText()` 的 TrafficMonitor，例如带该接口的[V1.86 构建](https://github.com/WaterCry/TrafficMonitor/tree/processnetmonitor-tooltip)。仅有 V1.86 版本号并不代表接口可用。宿主不支持、没有可用文本或关闭插件选项时，仍可使用原有单栏浮窗。
 
-#### TCP 流量
-使用 `GetPerTcpConnectionEStats` API 直接从 TCP 协议栈内核读取每条连接的 `DataBytesIn` / `DataBytesOut` 累计值，按 PID 聚合后计算 delta 得到速度。
+![隐藏鼠标显示](image/README/1795606884413.png)
 
-**优势**：
-- 不依赖网卡抓包，WLAN/以太网/VPN 均可正常工作
-- 双向流量均准确（解决了 raw socket 在 WLAN 上无法捕获入站包的问题）
-- 自动跳过 loopback 连接（127.0.0.1），避免代理软件流量双重计算
+![显示鼠标显示](image/README/1795606859379.png)
 
-#### UDP 流量
-使用 raw socket（`SIO_RCVALL`）抓包，通过 UDP 端口到 PID 的映射表匹配进程。
+## 安装与配置
 
-#### 网卡选择
-跟随 TrafficMonitor 的网卡设置（自动选择/选择全部/指定网卡），每 5 秒检测配置变化并自动切换。
+1. 关闭 TrafficMonitor，将与**宿主进程架构**匹配的 DLL 放入其 `plugins/` 目录：x64 使用 `ProcessNetMonitor.dll`，x86 使用 `ProcessNetMonitor_x86.dll`。
+2. 重新启动 TrafficMonitor，在插件管理中确认 ProcessNetMonitor 已加载。在任务栏显示项目中按需添加 `Up`、`Down` 或「透明区域」。
+3. 悬停查看排行，点击浮窗里的「查看详细」可进入实时流量、历史流量或流量图表。点击任务栏上的 ProcessNetMonitor 插件项可固定浮窗，再点一次解除固定。
 
-## 编译环境
+插件「选项」中的 **「在浮窗中显示 TrafficMonitor 鼠标提示」** 默认开启，只控制右栏。插件不会修改宿主的原生提示设置。不想同时看到两个提示窗口时，可在 TrafficMonitor 的「主窗口设置」或「任务栏设置」中自行关闭对应的「显示鼠标提示」。
 
-- **编译器**：MSVC 14.44.35207 (Visual Studio 2022 BuildTools)
-- **SDK**：Windows SDK 10.0.26100.0
-- **C++ 标准**：C++17
-- **依赖库**：iphlpapi.lib, ws2_32.lib, gdi32.lib, user32.lib, shell32.lib, dwmapi.lib, advapi32.lib, tdh.lib, dbghelp.lib
+界面默认使用中文，可跟随宿主语言或在插件选项中选择。英文翻译文件位于 `plugin/src/lang/English.ini`，安装位置为 `plugins/ProcessNetMonitor/lang/English.ini`。
 
-## 编译部署
+## 保留的上游功能
+
+- **任务栏和悬浮窗**：按进程显示上传、下载速度，浮窗分方向显示 Top 5，支持透明区域、深浅主题和高 DPI。
+- **详情窗口**：实时表格、按自然日汇总的历史流量、子进程及连接明细、程序签名分类；可选用 ip2region 离线库查看连接归属地。
+- **流量采集**：优先使用 ETW 按 PID 统计 TCP 和 UDP，支持过滤 TUN 重复流量。ETW 不可用时回退到 TCP EStats 和 UDP 原始套接字采集。
+
+### 界面参考
+
+以下为仓库中的上游截图，用于参考原有界面，不展示本 fork 的小时图表和双栏功能。
+
+- [任务栏与主窗口](docs/screenshot-main.png)
+- [原有悬浮窗](docs/screenshot-popup.png)
+- [实时流量详情](docs/screenshot-detail-realtime.png)
+- [历史流量详情](docs/screenshot-detail-history.png)
+
+## 数据存储与排障
+
+插件配置目录通常位于 `%APPDATA%\TrafficMonitor\plugins\ProcessNetMonitor\`；宿主使用便携模式时位于 `<TrafficMonitor.exe 所在目录>\plugins\ProcessNetMonitor\`。
+
+| 文件或目录                      | 用途                                   |
+| ------------------------------- | -------------------------------------- |
+| `history-hourly-v1.dat`       | 本 fork 的小时历史                     |
+| `history-hourly-v1.dat.bak.*` | 无法读取的小时历史文件的备份           |
+| `history.dat`                 | 上游旧版日汇总，本 fork 不读取、不覆盖 |
+| `settings.json`               | 插件及界面设置                         |
+| `debug/`                      | 采集诊断和崩溃信息                     |
+
+采集诊断日志默认关闭，可在详情窗口内右键开启。闪退时可提供 `debug/` 下已有的日志或转储，以及 DLL 的版本和架构。右栏未显示时，先检查插件选项是否开启，再确认宿主确实提供 `CopyTooltipText()`。
+
+## 从源码构建
+
+使用 Visual Studio 2022 Build Tools（MSVC `14.44.35207`）、Windows SDK `10.0.26100.0` 和 C++17。`build.bat` 包含原开发机的绝对路径，运行前需将脚本开头的工作目录改为本仓库的 `plugin/`，并核对工具链路径。
 
 ```bat
-:: 编译 64 位（默认）
 build.bat x64
-
-:: 编译 32 位
 build.bat x86
-
-:: 编译两个架构
 build.bat all
 ```
 
-build.bat 会自动：编译 → 杀 TM → 复制 DLL → 启动 TM
+上述命令只构建，不会关闭、替换或重启 TrafficMonitor。输出位于 `plugin/`。`deploy` 和 `deploy_all` 才会尝试结束宿主进程并部署到脚本指定的测试目录；使用前请核对目标路径。构建 DLL 时保留 `/MT` 静态运行库和显式链接参数 `/OPT:REF`。
 
-**注意**：如果 TM 以管理员权限运行，build.bat 用 WMI `Win32_Process.Terminate` 来杀进程，无需手动提权。
-
-## 文件结构
-
-```
-ProcessNetMonitor/
-├── build.bat                    # 编译+部署脚本（支持 x86/x64/all）
-├── plugin/
-│   ├── src/
-│   │   ├── PluginInterface.h    # TM 插件接口定义
-│   │   ├── capture.h / .cpp     # 传统采集（GetPerTcpConnectionEStats + raw socket，ETW 回退）
-│   │   ├── etw_capture.h/.cpp   # ETW 内核级采集（NT Kernel Logger + TDH）
-│   │   ├── plugin_main.h / .cpp # 插件主体（3个item：Up/Down/透明区域）
-│   │   ├── tooltip_popup.h/.cpp # 富文本悬浮信息窗口
-│   │   ├── detail_window.h/.cpp # 火绒风格详情窗口
-│   │   ├── i18n.h / .cpp        # 轻量本地化模块（多语言支持）
-│   │   ├── lang/English.ini     # 英文语言文件（与 TM 语言文件同格式）
-│   │   ├── resource.rc          # 资源文件（图标）
-│   │   ├── app.ico              # 插件图标
-│   ├── ProcessNetMonitor.dll         # 64 位编译输出
-│   ├── ProcessNetMonitor_x86.dll     # 32 位编译输出
-├── TrafficMonitor/
-│   └── TrafficMonitor/          # TM 主程序
-│       └── plugins/             # 插件DLL放这里
-└── README.md
-```
-
-## 多语言（Localization）
-
-插件 UI 默认中文，支持跟随 TrafficMonitor 主程序语言自动切换（v1.15.0+）：
-
-- 语言文件位于 `plugins/ProcessNetMonitor/lang/`（插件配置目录内），格式与 TM 的 `language/*.ini` 完全一致
-  （UTF-8 BOM，`[text]` section，`KEY = "value"`）
-- 中文为内置兜底：未找到语言文件或 key 未翻译时，自动显示中文原文，不影响使用
-- 内置 **English**；其他语言欢迎社区贡献（见下）
-- 界面语言可跟随 TM 主程序自动切换，也可在插件「选项」手动选择（重启后保持）
-- IP 归属地随界面语言切换：中文界面显示中文国家名（ISO 映射 + 国内省市展开），
-  其他语言界面直接使用 ip2region 数据原文（国外字段为英文，国内段显示 China）
-
-### 贡献翻译
-
-无需编译，只需提交一个 ini 文件：
-
-1. 复制 `plugin/src/lang/English.ini` 为 `plugin/src/lang/<语言名>.ini`
-2. 修改 `[general]` 的 `BCP_47`（如 `id-ID`）与 `DISPLAY_NAME`，并在 `TRANSLATOR` 署名
-3. 把 `[text]` 中每个 `"英文"` 翻译成你的语言（**key 保持中文原文不变**）
-4. 提交 PR；安装时把 ini 放入 `plugins/ProcessNetMonitor/lang/`
-
-语言文件命名与 `BCP_47` 的对应关系见 `plugin/src/i18n.cpp` 的 `LangFileFromBcp47()`。
-
-> ### Contributing a translation
->
-> No compilation needed - just submit one ini file:
->
-> 1. Copy `plugin/src/lang/English.ini` to `plugin/src/lang/<your-language>.ini`
-> 2. Edit `BCP_47` (e.g. `id-ID`) and `DISPLAY_NAME` under `[general]`, and sign your name in `TRANSLATOR`
-> 3. Translate every `"English"` value under `[text]` into your language (**keep the Chinese keys unchanged**)
-> 4. Submit a PR; when installing, put the ini file into `plugins/ProcessNetMonitor/lang/`
->
-> See `LangFileFromBcp47()` in `plugin/src/i18n.cpp` for the mapping between file names and `BCP_47`.
-
-## TM 配置
-
-1. 打开 TM → 右键 → 选项 → 插件
-2. 勾选 "Up"、"Down" 和 "透明区域"（可选）显示项目
-3. 在任务栏设置中将需要的项目添加到任务栏显示
-
-**推荐设置**：选项 → 主窗口设置 → 取消勾选「显示鼠标提示」，否则主悬浮窗鼠标悬停时会同时出现两个信息窗口（TM 自带的文本提示 + 本插件的富文本弹窗）
-
-## 数据存储
-
-- **历史流量**：`%APPDATA%\TrafficMonitor\plugins\ProcessNetMonitor\history.dat`（非 portable 模式）或 `<exe_dir>\plugins\ProcessNetMonitor\history.dat`（portable 模式）
-- **排序/设置**：同目录下 `settings.json`（含 `debug_logs` 开关，默认 `false`）
-- 数据格式版本 v4，自动兼容 v2/v3 旧格式
-
-## 调试日志与崩溃排查
-
-- **开关**：详情窗口行右键 → 「调试日志: 关 (点击开启)」。默认**关闭**（不写 etw_capture.log / capture.log）
-- **位置**：所有日志都写在插件目录下，与配置同处一处：
-  ```
-  plugins/
-  ├── ProcessNetMonitor.dll
-  └── ProcessNetMonitor/
-      ├── settings.json / history.dat   ← 配置
-      ├── lang/                         ← 语言文件（如 English.ini）
-      └── debug/                        ← 诊断输出
-          ├── werdumps/                 ← WER 转储目录（启动时创建，常驻空目录）
-          ├── etw_capture.log           ← ETW 采集诊断（开关开启后每 5 秒一条）
-          ├── capture.log               ← 传统采集诊断（开关开启后生成）
-          ├── crash.log                 ← 崩溃日志（仅崩溃时生成）
-          └── crash.dmp / crash.dmp.log ← 崩溃转储（仅崩溃时生成）
-  ```
-- **崩溃日志不受开关控制**：crash.log / crash.dmp / werdumps/ 仅在崩溃时写入，平时不产生文件（debug 目录仅含空的 werdumps 文件夹），保持始终启用以便排查闪退。
-- **遇到闪退时**：把 `debug/` 目录（含 crash.log、werdumps 下的 .dmp）连同 DLL 版本一起反馈即可定位。
-
-## 版本历史
-
-完整版本更新记录见 [CHANGELOG.md](docs/CHANGELOG.md)。
-
-Full release history: [CHANGELOG.md](docs/CHANGELOG.md).
+上游各版本的详细记录见 [CHANGELOG.md](docs/CHANGELOG.md)。

@@ -108,7 +108,11 @@ public:
     bool m_popup_created = false;
     bool m_popup_pinned = false;   // click-pinned: stays visible after mouse leaves
     RECT m_popup_anchor = {};      // anchor rect of the currently shown popup
-    void ShowPopupAt(const RECT& anchor);
+    void ShowPopupAt(const RECT& anchor, HWND target, bool is_taskbar);
+    void UpdateHostTooltip(bool force = false);
+    bool m_tooltip_api = false;
+    ULONGLONG m_host_tooltip_tick = 0;
+    bool m_popup_is_taskbar = false;
     CDetailWindow m_detail;
     PacketCapture m_capture;
     EtwCapture m_etw_cap;   // production ETW per-process byte counter (primary when active)
@@ -119,6 +123,9 @@ public:
     std::vector<ProcTraffic> m_cached_stats;
     double m_cached_up = 0;
     double m_cached_down = 0;
+    bool m_cached_uses_etw = false;
+    ULONGLONG m_cached_sample_tick = 0, m_cached_sample_wall = 0;
+    void StampHistorySample(bool usesEtw); // caller holds m_data_lock
 
     // High-frequency refresh timer (independent of TM's 1s DataRequired tick)
     HANDLE m_refresh_timer = nullptr;

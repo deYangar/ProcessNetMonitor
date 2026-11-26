@@ -396,7 +396,7 @@ int CProcessNetItem::OnMouseEvent(MouseEventType type, int x, int y, void* hWnd,
                 if (anchor.left < wr.left) { anchor.left = wr.left; anchor.right = wr.left + 2 * half; }
                 if (anchor.right > wr.right) { anchor.right = wr.right; anchor.left = wr.right - 2 * half; }
                 plugin.m_popup_pinned = true;
-                plugin.ShowPopupAt(anchor);
+                plugin.ShowPopupAt(anchor, (HWND)hWnd, true);
             }
         } else {
             // Main window click: toggle detail window (existing behavior), dismiss popup
@@ -574,6 +574,7 @@ void CProcessNetPlugin::DataRequired() {
                     m_items[0].Update(stats, su, sd);
                     m_items[1].Update(stats, su, sd);
                     m_cached_stats = stats;
+                    StampHistorySample(true);
                     m_cached_up = su;
                     m_cached_down = sd;
                     // Tooltip write stays inside the lock: BuildTooltip
@@ -643,6 +644,7 @@ void CProcessNetPlugin::DataRequired() {
     // at 0 connections. If ETW yields no rows (session hiccup / all filtered),
     // keep legacy data so the UI never blanks out.
     bool etw_active = m_etw_cap.HasData();
+    bool usesEtw = false;
     if (etw_active) {
         auto es = m_etw_cap.GetStats(dt);
         if (!es.empty()) {
@@ -652,6 +654,7 @@ void CProcessNetPlugin::DataRequired() {
                 if (it != conn_by_pid.end()) e.conn_count = it->second;
             }
             stats = std::move(es);
+            usesEtw = true;
         }
     }
     double su = 0, sd = 0;
@@ -664,6 +667,7 @@ void CProcessNetPlugin::DataRequired() {
         m_items[0].Update(stats, su, sd);
         m_items[1].Update(stats, su, sd);
         m_cached_stats = stats;
+        StampHistorySample(usesEtw);
         m_cached_up = su;
         m_cached_down = sd;
         LeaveCriticalSection(&m_data_lock);
@@ -762,6 +766,7 @@ void CProcessNetPlugin::RefreshTick() {
 
     auto stats = m_capture.GetStats(dt);
     bool etw_active = m_etw_cap.HasData();
+    bool usesEtw = false;
     if (etw_active) {
         auto es = m_etw_cap.GetStats(dt);
         if (!es.empty()) {
@@ -774,6 +779,7 @@ void CProcessNetPlugin::RefreshTick() {
                 if (it != conn_by_pid.end()) e.conn_count = it->second;
             }
             stats = std::move(es);
+            usesEtw = true;
         }
     }
 
@@ -786,6 +792,7 @@ void CProcessNetPlugin::RefreshTick() {
     {
         EnterCriticalSection(&m_data_lock);
         m_cached_stats = stats;
+        StampHistorySample(usesEtw);
         m_cached_up = su;
         m_cached_down = sd;
         m_items[0].Update(stats, su, sd);
@@ -806,18 +813,34 @@ void CProcessNetPlugin::RefreshTick() {
     m_refresh_busy.store(false);
 }
 
+void CProcessNetPlugin::StampHistorySample(bool usesEtw) {
+    FILETIME fileTime{};
+    GetSystemTimeAsFileTime(&fileTime);
+    const ULONGLONG ticks = (static_cast<ULONGLONG>(fileTime.dwHighDateTime) << 32) |
+        fileTime.dwLowDateTime;
+    constexpr ULONGLONG unixEpoch = 116444736000000000ULL;
+    m_cached_uses_etw = usesEtw;
+    m_cached_sample_tick = GetTickCount64();
+    m_cached_sample_wall = ticks >= unixEpoch ? (ticks - unixEpoch) / 10000 : 0;
+}
+
 // Runs on the detail window's UI thread (WM_PNM_REFRESH handler)
 void CProcessNetPlugin::DetailRefreshFromSnapshot() {
     std::vector<ProcTraffic> snap;
     double su = 0, sd = 0;
+    bool usesEtw = false;
+    ULONGLONG sampleTick = 0, sampleWall = 0;
     {
         EnterCriticalSection(&m_data_lock);
         snap = m_cached_stats;
         su = m_cached_up;
         sd = m_cached_down;
+        usesEtw = m_cached_uses_etw;
+        sampleTick = m_cached_sample_tick;
+        sampleWall = m_cached_sample_wall;
         LeaveCriticalSection(&m_data_lock);
     }
-    m_detail.UpdateData(snap, su, sd);
+    m_detail.UpdateData(snap, su, sd, usesEtw, sampleTick, sampleWall);
 }
 
 // Runs on the popup's UI thread (WM_PNM_REFRESH handler)
@@ -935,6 +958,7 @@ void CProcessNetPlugin::OnInitialize(ITrafficMonitor* p) {
         m_inited = true;
         InitOnce(p->GetPluginConfigDir());
     }
+    m_tooltip_api = p->GetAPIVersion() >= 2;
 }
 
 // TrafficMonitor 1.85.x never calls OnInitialize (the hook was added in
@@ -1283,7 +1307,24 @@ void CProcessNetPlugin::GetProcessDisplayInfo(
 //   - Right-click / context menu open -> popup hides immediately (no grace,
 //     pinned included) and stays suppressed until the menu closes.
 
-void CProcessNetPlugin::ShowPopupAt(const RECT& anchor) {
+void CProcessNetPlugin::UpdateHostTooltip(bool force) {
+    if (!m_tooltip_api || !m_detail.GetShowHostTooltip()) {
+        m_popup.SetHostTooltip(L"");
+        return;
+    }
+    ULONGLONG now = GetTickCount64();
+    if (!force && now - m_host_tooltip_tick < 1000) return;
+    m_host_tooltip_tick = now;
+
+    wchar_t text[4096]{};
+    auto target = m_popup_is_taskbar ? ITrafficMonitor::TT_TASKBAR : ITrafficMonitor::TT_MAIN_WINDOW;
+    if (m_app->CopyTooltipText(target, this, text, ARRAYSIZE(text)))
+        m_popup.SetHostTooltip(text);
+    else
+        m_popup.SetHostTooltip(L"");
+}
+
+void CProcessNetPlugin::ShowPopupAt(const RECT& anchor, HWND target, bool is_taskbar) {
     // Snapshot under the lock: RefreshTick (timer thread) rewrites the
     // cached stats concurrently (unsynchronized std::vector copy was heap
     // corruption 0xc0000374).
@@ -1298,8 +1339,10 @@ void CProcessNetPlugin::ShowPopupAt(const RECT& anchor) {
     }
     std::vector<CTooltipPopup::ProcDisplayInfo> procs;
     GetProcessDisplayInfo(procs, snap);
+    m_popup_is_taskbar = is_taskbar;
+    UpdateHostTooltip(true);
     m_popup_anchor = anchor;
-    m_popup.UpdateAndShow(procs, su, sd, anchor, EtwPopupStatus(&m_etw_cap));
+    m_popup.UpdateAndShow(procs, su, sd, anchor, EtwPopupStatus(&m_etw_cap), target);
 }
 
 void CProcessNetPlugin::HoverTick() {
@@ -1328,7 +1371,7 @@ void CProcessNetPlugin::HoverTick() {
         m_hover_target = nullptr;
         m_hover_start_tick = 0;
         m_hover_leave_tick = 0;
-        PopTMTooltips();   // idempotent; covers the main window's 1 s gap
+        PopTMTooltips();
         return;
     }
 
@@ -1346,13 +1389,15 @@ void CProcessNetPlugin::HoverTick() {
     if (tm_wnd) {
         // Cursor over a TrafficMonitor window
         m_hover_leave_tick = 0;
-        if (tm_wnd != m_hover_target) {
+        bool switched = tm_wnd != m_hover_target || is_taskbar != m_hover_is_taskbar;
+        if (switched) {
             // Switched target window: restart the hover delay
             m_hover_target = tm_wnd;
             m_hover_is_taskbar = is_taskbar;
             m_hover_start_tick = now;
         }
-        if (!m_popup.IsVisible() && now - m_hover_start_tick >= 400) {
+        if ((!m_popup.IsVisible() && now - m_hover_start_tick >= 400) ||
+            (switched && m_popup.IsVisible() && !m_popup_pinned)) {
             RECT anchor;
             if (is_taskbar) {
                 // Use the actual taskbar dialog rect (hover_wnd), not the parent
@@ -1367,8 +1412,7 @@ void CProcessNetPlugin::HoverTick() {
             } else {
                 GetWindowRect(tm_wnd, &anchor);
             }
-            m_popup.SetAnchorHwnd(tm_wnd);
-            ShowPopupAt(anchor);
+            ShowPopupAt(anchor, is_taskbar ? hover_wnd : tm_wnd, is_taskbar);
         }
     } else if (!over_popup) {
         // Cursor elsewhere: start/continue the hide grace period.
@@ -1406,6 +1450,7 @@ void CProcessNetPlugin::HoverTick() {
 
     // --- data refresh while visible (lightweight: no reposition unless anchor moved) ---
     if (m_popup.IsVisible()) {
+        UpdateHostTooltip();
         // Snapshot under the lock: RefreshTick (timer thread) rewrites the
         // cached stats concurrently (unsynchronized std::vector copy was
         // heap corruption 0xc0000374).
@@ -1451,6 +1496,76 @@ static BOOL CALLBACK OptionsSetFontProc(HWND h, LPARAM lp) {
     return TRUE;
 }
 
+static int OptionsLayoutRows(HWND hwnd, HDC hdc) {
+    // A combo's window rectangle is its closed height.  Use that for the row,
+    // and leave the drop-down list free to extend over the following rows.
+    const int rows[][3] = {
+        {1002, 1003}, {1005, 1004}, {1012}, {1010}, {1007},
+        {1011, 1008, 1009}, {1006}, {1013}, {1020}, {1015, 1014},
+        {1019, 1018}, {1021, 1022}, {1023, 1024, 1025}, {1026}, {IDOK, IDCANCEL},
+    };
+    int y = 10;
+    for (const auto& row : rows) {
+        HWND controls[ARRAYSIZE(row)] = {};
+        RECT rects[ARRAYSIZE(row)] = {};
+        int heights[ARRAYSIZE(row)] = {};
+        int row_height = 0;
+        if (row[0] == IDOK) y += 8;
+        for (size_t i = 0; i < ARRAYSIZE(row) && row[i]; ++i) {
+            HWND control = GetDlgItem(hwnd, row[i]);
+            if (!control) continue;
+            controls[i] = control;
+            RECT& rect = rects[i];
+            GetWindowRect(control, &rect);
+            MapWindowPoints(HWND_DESKTOP, hwnd, (LPPOINT)&rect, 2);
+
+            wchar_t cls[32] = {};
+            GetClassNameW(control, cls, ARRAYSIZE(cls));
+            TEXTMETRICW metrics = {};
+            HFONT font = (HFONT)SendMessageW(control, WM_GETFONT, 0, 0);
+            HGDIOBJ old_font = hdc && font ? SelectObject(hdc, font) : nullptr;
+            if (hdc) GetTextMetricsW(hdc, &metrics);
+            if (old_font) SelectObject(hdc, old_font);
+            const int line_height = metrics.tmHeight + metrics.tmExternalLeading;
+            int height = rect.bottom - rect.top;
+            if (lstrcmpW(cls, L"ComboBox") == 0) {
+                const LRESULT selection_height = SendMessageW(control, CB_GETITEMHEIGHT, (WPARAM)-1, 0);
+                if (selection_height != CB_ERR && selection_height < line_height + 4) {
+                    SendMessageW(control, CB_SETITEMHEIGHT, (WPARAM)-1, line_height + 4);
+                    RECT closed = {};
+                    GetWindowRect(control, &closed);
+                    height = closed.bottom - closed.top;
+                }
+                // Move without changing the drop-down list's size.
+                rect.bottom = rect.top + height;
+            } else if (lstrcmpW(cls, L"Static") == 0) {
+                height = max(20, line_height + 4);
+            } else if (lstrcmpW(cls, L"Edit") == 0) {
+                RECT client = {};
+                GetClientRect(control, &client);
+                const int borders = height - (client.bottom - client.top);
+                height = max(24, line_height + borders + 6);
+            } else if (lstrcmpW(cls, L"Button") == 0) {
+                const DWORD type = GetWindowLongPtrW(control, GWL_STYLE) & BS_TYPEMASK;
+                height = type == BS_AUTOCHECKBOX ? max(22, line_height + 6) : max(24, line_height + 8);
+            }
+            heights[i] = height;
+            row_height = max(row_height, height);
+        }
+        for (size_t i = 0; i < ARRAYSIZE(row) && row[i]; ++i) {
+            if (!controls[i]) continue;
+            const RECT& rect = rects[i];
+            const int height = heights[i];
+            UINT flags = SWP_NOZORDER | SWP_NOACTIVATE;
+            if (height == rect.bottom - rect.top) flags |= SWP_NOSIZE;
+            SetWindowPos(controls[i], nullptr, rect.left, y + (row_height - height) / 2,
+                         rect.right - rect.left, height, flags);
+        }
+        y += row_height + 4;
+    }
+    return y + 6;
+}
+
 // Forward declaration: auto-resize controls to fit translated text
 static void OptionsAdjustLayout(HWND hwnd);
 
@@ -1490,6 +1605,7 @@ static void OptionsApplyLang(HWND hwnd) {
     SetWindowTextW(GetDlgItem(hwnd, 1006), TR(L"\u8C03\u8BD5\u65E5\u5FD7\uFF08\u5199\u5165\u63D2\u4EF6\u76EE\u5F55 debug\\\uFF09"));
     SetWindowTextW(GetDlgItem(hwnd, 1013), TR(L"\u5728 TrafficMonitor \u9F20\u6807\u60AC\u505C\u63D0\u793A\u4E2D\u663E\u793A\u8FDB\u7A0B\u7F51\u901F\u4FE1\u606F"));
     SetWindowTextW(GetDlgItem(hwnd, 1020), TR(L"启用悬浮网速提示（关闭后仅 TrafficMonitor 官方悬停提示）"));
+    SetWindowTextW(GetDlgItem(hwnd, 1026), TR(L"在浮窗中显示 TrafficMonitor 鼠标提示"));
     SetWindowTextW(GetDlgItem(hwnd, 1015), TR(L"\u754C\u9762\u8BED\u8A00"));
     SetWindowTextW(GetDlgItem(hwnd, 1019), TR(L"\u989C\u8272\u6A21\u5F0F"));
     SetWindowTextW(GetDlgItem(hwnd, 1021), TR(L"悬浮窗背景"));
@@ -1577,6 +1693,7 @@ static void OptionsAdjustLayout(HWND hwnd) {
     HFONT hDlgFont = (HFONT)SendMessageW(hwnd, WM_GETFONT, 0, 0);
     HDC hdc = GetDC(hwnd);
     HFONT hOld = hDlgFont ? (HFONT)SelectObject(hdc, hDlgFont) : nullptr;
+    const int desired_cy = OptionsLayoutRows(hwnd, hdc);
 
     int max_right = 0;
 
@@ -1660,7 +1777,9 @@ static void OptionsAdjustLayout(HWND hwnd) {
         GetWindowRect(hLangCombo, &rc);
         MapWindowPoints(HWND_DESKTOP, hwnd, (LPPOINT)&rc, 2);
         if (combo_w != rc.right - rc.left) {
-            SetWindowPos(hLangCombo, nullptr, 0, 0, combo_w, rc.bottom - rc.top,
+            RECT dropped = rc;
+            SendMessageW(hLangCombo, CB_GETDROPPEDCONTROLRECT, 0, (LPARAM)&dropped);
+            SetWindowPos(hLangCombo, nullptr, 0, 0, combo_w, dropped.bottom - dropped.top,
                          SWP_NOMOVE | SWP_NOZORDER);
         }
         // 右缘不计入 max_right：1014 属行控件，Step 1.6 挪到 label 右侧后
@@ -1734,13 +1853,7 @@ static void OptionsAdjustLayout(HWND hwnd) {
                         : GetSystemMetrics(SM_CXSCREEN);
     int desired_cx = max(500, max_right + MARGIN);
     if (desired_cx > mon_w - 40) desired_cx = mon_w - 40;
-    if (desired_cx != rcClient.right) {
-        RECT rcWnd = { 0, 0, desired_cx, rcClient.bottom };
-        DWORD dlgStyle = (DWORD)GetWindowLongPtrW(hwnd, GWL_STYLE);
-        DWORD dlgEx = (DWORD)GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        AdjustWindowRectEx(&rcWnd, dlgStyle, FALSE, dlgEx);
-        int new_w = rcWnd.right - rcWnd.left;
-        int new_h = rcWnd.bottom - rcWnd.top;
+    if (desired_cx != rcClient.right || desired_cy != rcClient.bottom) {
 
         // resize 保持窗口当前中心，不重新以父窗居中——父窗是任务栏窄条，
         // 以它为中心会把对话框拽出屏幕底边（语言切换必触发 resize，双向
@@ -1748,6 +1861,8 @@ static void OptionsAdjustLayout(HWND hwnd) {
         // 时的定位同规则
         RECT rcCur;
         GetWindowRect(hwnd, &rcCur);
+        int new_w = rcCur.right - rcCur.left + desired_cx - rcClient.right;
+        int new_h = rcCur.bottom - rcCur.top + desired_cy - rcClient.bottom;
         int x = rcCur.left + ((rcCur.right - rcCur.left) - new_w) / 2;
         int y = rcCur.top + ((rcCur.bottom - rcCur.top) - new_h) / 2;
         if (has_mon) {
@@ -2000,17 +2115,20 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         OptionsUpdateOpacityEnabled(hwnd,
             CProcessNetPlugin::Instance().m_detail.GetPopupEffect());
 
+        HWND hHostTooltip = CreateWindowW(L"BUTTON", TR(L"在浮窗中显示 TrafficMonitor 鼠标提示"),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+            10, 380, 610, 22, hwnd, (HMENU)1026, nullptr, nullptr);
+        if (CProcessNetPlugin::Instance().m_detail.GetShowHostTooltip())
+            SendMessageW(hHostTooltip, BM_SETCHECK, BST_CHECKED, 0);
+
         // OK button
         CreateWindowW(L"BUTTON", L"OK",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 380, 390, 75, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 380, 416, 75, 24, hwnd, (HMENU)IDOK, nullptr, nullptr);
         // Cancel button
         CreateWindowW(L"BUTTON", L"Cancel",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 465, 390, 75, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
-        // Use the proper UI font (Segoe UI 9pt) on every child control -
-        // default is the bitmap 'System' font (jagged, ugly).
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 465, 416, 75, 24, hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
+        // Use the same GUI font for all settings controls.
         EnumChildWindows(hwnd, OptionsSetFontProc, (LPARAM)GetStockObject(DEFAULT_GUI_FONT));
-        // Auto-resize controls and dialog to fit the current language's text
-        OptionsAdjustLayout(hwnd);
         return 0;
     }
     case WM_COMMAND:
@@ -2051,6 +2169,11 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             if (!popup_on && plugin.m_popup.IsVisible()) {
                 plugin.m_popup_pinned = false;
                 plugin.m_popup.Hide();
+            }
+            plugin.m_detail.SetShowHostTooltip(IsDlgButtonChecked(hwnd, 1026) == BST_CHECKED);
+            if (plugin.m_popup.IsVisible()) {
+                plugin.UpdateHostTooltip(true);
+                plugin.PopupRefreshFromSnapshot();
             }
 
             // 悬浮窗背景效果 + 透明度：保存后立即应用（可见时当场刷新；
@@ -2206,7 +2329,7 @@ ITMPlugin::OptionReturn CProcessNetPlugin::ShowOptionsDialog(void* hParent) {
         L"ProcessNetMonitorOptionsDlg",
         TR(L"\x63D2\x4EF6\x8BBE\x7F6E"),
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        0, 0, 650, 490,
+        0, 0, 650, 516,
         (HWND)hParent, nullptr, GetModuleHandleW(NULL), nullptr
     );
     
@@ -2249,6 +2372,7 @@ ITMPlugin::OptionReturn CProcessNetPlugin::ShowOptionsDialog(void* hParent) {
         SetWindowPos(hwnd, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
     }
     
+    OptionsAdjustLayout(hwnd);
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
     
