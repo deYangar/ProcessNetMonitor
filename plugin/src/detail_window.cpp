@@ -52,6 +52,7 @@ struct DateDialog {
     Calendar::DateRange range;
     Calendar::Number today;
     bool single;
+    Calendar::Number oldest = 0;   // 日期可选的最早一天；0 = 保留窗口的起点
     HWND first = nullptr, last = nullptr;
     HFONT font = nullptr;
 
@@ -76,7 +77,8 @@ struct DateDialog {
                 control(L"STATIC", label, SS_CENTERIMAGE, -1, 10, y, 112, 20);
                 const auto child = control(DATETIMEPICK_CLASSW, nullptr, WS_TABSTOP | DTS_SHORTDATEFORMAT,
                                            y + 100, 128, y, 112, 20);
-                SYSTEMTIME limits[] = {Calendar::AsUtc(Calendar::OldestDate(dialog->today)),
+                SYSTEMTIME limits[] = {Calendar::AsUtc(dialog->oldest ? dialog->oldest
+                                                                     : Calendar::OldestDate(dialog->today)),
                                        Calendar::AsUtc(dialog->today)};
                 auto value = Calendar::AsUtc(date);
                 SendMessageW(child, DTM_SETFORMATW, 0, reinterpret_cast<LPARAM>(L"yyyy-MM-dd"));
@@ -884,6 +886,20 @@ void CDetailWindow::SelectChartDate(ULONGLONG date, ULONGLONG today) {
     m_chart_hours.clear();
     m_chart_hits.clear();
     InvalidateRect(m_hwnd, NULL, FALSE);
+}
+
+ULONGLONG CDetailWindow::ChartOldest(ULONGLONG today) const {
+    // 作者把边界定在保留窗口的起点（29 天前）。小时库启用没几天、或中间断档时，
+    // 那之前的日子图表上什么都没有，「前一天」却能一直翻进去；所以再和「最早
+    // 还有数据的那天」取较晚的一个。完全没有数据时最早就是今天：按钮灰显、点了不动
+    const auto window_start = Calendar::OldestDate(today);
+    ULONGLONG oldest = 0;   // 最早还有数据的那个小时桶（小时表或旧日汇总表）
+    if (!m_hourly.buckets.empty()) oldest = m_hourly.buckets.begin()->first;
+    if (!m_hourly.daily.empty()) {
+        const auto day = m_hourly.daily.begin()->first;
+        if (!oldest || day < oldest) oldest = day;
+    }
+    return oldest ? max(window_start, Calendar().Date(oldest)) : today;
 }
 
 // 两段 Apps 汇总合并（review P2 的增量路径用）：饱和加与 HourlyHistory::Summarize 一致
@@ -2146,13 +2162,13 @@ void CDetailWindow::OnLButtonDown(int x, int y) {
         if (PtInRect(&m_rcChartPrev, { x, y })) {
             const auto today = Calendar().Date(WallClockMs());
             const auto date = m_chart_date ? m_chart_date : today;
-            if (date > Calendar::OldestDate(today)) SelectChartDate(date - Calendar::Day, today);
+            if (date > ChartOldest(today)) SelectChartDate(date - Calendar::Day, today);
             return;
         }
         if (PtInRect(&m_rcChartDate, { x, y })) {
             const auto today = Calendar().Date(WallClockMs());
-            const auto date = max(Calendar::OldestDate(today), min(today, m_chart_date ? m_chart_date : today));
-            DateDialog dialog{{date, date}, today, true};
+            const auto date = max(ChartOldest(today), min(today, m_chart_date ? m_chart_date : today));
+            DateDialog dialog{{date, date}, today, true, ChartOldest(today)};
             if (dialog.Show(m_hinst, m_hwnd, m_font_row)) SelectChartDate(dialog.range.first, today);
             return;
         }
@@ -2613,7 +2629,7 @@ void CDetailWindow::DrawHourlyChart(HDC hdc, int w, int y, int client_h, int spe
     using History = pnm::HourlyHistory;
     const pnm::HistoryCalendar calendar;
     const auto today = calendar.Date(now);
-    const auto oldest = Calendar::OldestDate(today);
+    const auto oldest = ChartOldest(today);
     const auto date = m_chart_date ? max(oldest, min(today, m_chart_date)) : today;
     if (m_chart_date && m_chart_date != date) m_chart_date = date == today ? 0 : date;
     const auto start = calendar.Start(date);

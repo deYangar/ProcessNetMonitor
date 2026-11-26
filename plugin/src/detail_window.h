@@ -280,6 +280,8 @@ private:
     std::pair<ULONGLONG, ULONGLONG> HistoryDates(ULONGLONG today) const;
     void RefreshHistoryRange();
     void SelectChartDate(ULONGLONG date, ULONGLONG today);
+    // 图表能翻到的最早一天：库的保留窗口起点与最早还有数据的那天，取较晚的
+    ULONGLONG ChartOldest(ULONGLONG today) const;
     RECT m_rcCustomDates = {}, m_rcOpenChart = {}, m_rcChartDate = {}, m_rcChartAll = {};
 
     // Table state (per-tab sort)
