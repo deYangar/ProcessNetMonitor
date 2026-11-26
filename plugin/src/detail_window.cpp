@@ -542,7 +542,9 @@ bool CDetailWindow::Initialize(HINSTANCE hInst) {
         WS_EX_APPWINDOW,
         className, L"ProcessNetMonitor",
         WS_POPUP | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, MIN_WIDTH + 40, MIN_HEIGHT + 80,
+        // 初始高度 = 最小高度 + 富余（物理像素，不做 DPI 缩放）：150% 缩放下
+        // 600+200 = 800（2026-11-26 拍板默认高度 800px）；100% 下 600
+        CW_USEDEFAULT, CW_USEDEFAULT, MIN_WIDTH + 40, MIN_HEIGHT + 200,
         NULL, NULL, m_hinst, NULL);
 
     if (!m_hwnd) return false;
