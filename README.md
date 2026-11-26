@@ -115,6 +115,9 @@
 
 ## 双栏悬浮窗
 
+> [!IMPORTANT]
+> 本功能依赖的宿主接口**尚未进入 TrafficMonitor 上游和官方发布版**：官方 V1.86 和上游 master 下不会出现右栏，也不会出现对应的设置项。要使用右栏，需要自行编译 [WaterCry 维护的分支](https://github.com/WaterCry/TrafficMonitor/tree/processnetmonitor-tooltip)（`processnetmonitor-tooltip`）。插件在不受支持的宿主上行为与旧版完全一致。
+
 悬浮窗可以多出一个右栏，把 TrafficMonitor 的鼠标提示和其他插件的数据显示进来（v1.20.0）。
 
 ![双栏悬浮窗-展开](image/README/1795606859379.png)
