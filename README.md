@@ -4,13 +4,19 @@
 
 ## 效果预览
 
-![悬浮网速窗口（亚克力背景）](docs/screenshot-main.png)
+### 主界面
 
-![悬浮信息窗口](docs/screenshot-popup.png)
+| 悬浮网速窗口（亚克力背景） | 悬浮信息窗口 |
+| --- | --- |
+| ![悬浮网速窗口（亚克力背景）](docs/screenshot-main.png) | ![悬浮信息窗口](docs/screenshot-popup.png) |
+| **详情窗口 - 实时流量** | **详情窗口 - 历史流量** |
+| ![详情窗口-实时流量](docs/screenshot-detail-realtime.png) | ![详情窗口-历史流量](docs/screenshot-detail-history.png) |
 
-![详情窗口-实时流量](docs/screenshot-detail-realtime.png)
+### v1.20.0 新功能
 
-![详情窗口-历史流量](docs/screenshot-detail-history.png)
+| 流量图表 - 按小时查看与明细 | 双栏悬浮窗 - 右栏显示其他插件数据 |
+| --- | --- |
+| ![流量图表](image/README/流量图表小时筛选.png) | ![双栏悬浮窗](image/README/双栏悬浮窗-展开.png) |
 
 ## 功能
 
@@ -95,17 +101,13 @@
 
 详情窗口的「历史流量」页签，除了「今日 / 昨日 / 近3天 / 近7天 / 近30天」五个档位，还可以自己选起止日期（v1.20.0）。
 
-![历史流量自定义日期](image/README/历史流量添加日期选择.png)
-
 - **选范围**：点「自定义日期」，选开始日期和结束日期后点「应用」。可选范围是最近 30 个本地日历日（含今天），首尾两天都计入统计；结束日是今天时统计到当前时刻
 - **看某一天的图表**：点「查看结束日图表」直接跳到所选范围最后一天的流量图表；切回「历史流量」时原来的范围还在
 - **跨天自动刷新**：详情窗停在「历史流量」页签时过了 0 点，列表自动按新的一天刷新
 
 ## 流量图表
 
-详情窗口的第三个页签（v1.20.0）。
-
-![流量图表](image/README/流量图标添加日期选择.png)
+详情窗口的第三个页签（v1.20.0），截图见顶部「效果预览」。
 
 - **按小时查看**：某一天 24 小时各程序的上/下行流量柱状图；「前一天」「后一天」逐日切换，「今天」回到当天；没有更早数据时「前一天」灰显，到今天以后「后一天」灰显
 - **选日期**：点中间的日期按钮，从日历里直接选一天，最早可选到有数据的那一天
@@ -118,11 +120,7 @@
 > [!IMPORTANT]
 > 本功能依赖的宿主接口**尚未进入 TrafficMonitor 上游和官方发布版**：官方 V1.86 和上游 master 下不会出现右栏，也不会出现对应的设置项。要使用右栏，需要自行编译 [WaterCry 维护的分支](https://github.com/WaterCry/TrafficMonitor/tree/processnetmonitor-tooltip)（`processnetmonitor-tooltip`）。插件在不受支持的宿主上行为与旧版完全一致。
 
-悬浮窗可以多出一个右栏，把 TrafficMonitor 的鼠标提示和其他插件的数据显示进来（v1.20.0）。
-
-![双栏悬浮窗-展开](image/README/1795606859379.png)
-
-![双栏悬浮窗-收起](image/README/1795606884413.png)
+悬浮窗可以多出一个右栏，把 TrafficMonitor 的鼠标提示和其他插件的数据显示进来（v1.20.0），截图见顶部「效果预览」。
 
 - **需要主程序支持**：右栏的文本由 TrafficMonitor 主程序提供。目前只有 [WaterCry 维护的 TrafficMonitor 分支](https://github.com/WaterCry/TrafficMonitor/tree/processnetmonitor-tooltip)（`processnetmonitor-tooltip`）实现了对应接口，需要自行编译主程序；官方 V1.86 和上游 master 都没有这个接口
 - **开启方式**：主程序支持时，插件「选项」里有「在浮窗中显示 TrafficMonitor 鼠标提示」，默认开启；关闭后恢复单栏
