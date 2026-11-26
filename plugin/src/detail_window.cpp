@@ -124,9 +124,12 @@ struct DateDialog {
         INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_DATE_CLASSES};
         if (!InitCommonControlsEx(&controls)) return false;
         // A standard dialog template with all controls created in WM_INITDIALOG.
+        // The template takes the style as two WORDs; mask instead of truncating a
+        // constant, which the compiler flags (C4310).
+        constexpr DWORD kStyle = static_cast<DWORD>(WS_POPUP) | WS_CAPTION | WS_SYSMENU |
+                                 DS_MODALFRAME | DS_CENTER;
         alignas(DWORD) const WORD layout[] = {
-            WORD(WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_CENTER),
-            WORD((WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_CENTER) >> 16),
+            WORD(kStyle & 0xFFFF), WORD(kStyle >> 16),
             0, 0, 0, 0, 0, 250, WORD(single ? 72 : 98), 0, 0, 0
         };
         // Keep a copy alive even if the owner recreates its fonts during the modal loop.
