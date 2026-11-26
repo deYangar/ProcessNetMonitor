@@ -1742,10 +1742,12 @@ static BOOL CALLBACK OptionsSetFontProc(HWND h, LPARAM lp) {
 static int OptionsLayoutRows(HWND hwnd, HDC hdc) {
     // A combo's window rectangle is its closed height.  Use that for the row,
     // and leave the drop-down list free to extend over the following rows.
+    // 1026 是崩溃转储开关，排在调试日志之后；1027 是「在浮窗中显示 TrafficMonitor
+    // 鼠标提示」，只在宿主提供 CopyTooltipText 时才创建（见 WM_CREATE）。
     const int rows[][3] = {
         {1002, 1003}, {1005, 1004}, {1012}, {1010}, {1007},
-        {1011, 1008, 1009}, {1006}, {1013}, {1020}, {1015, 1014},
-        {1019, 1018}, {1021, 1022}, {1023, 1024, 1025}, {1026}, {IDOK, IDCANCEL},
+        {1011, 1008, 1009}, {1006}, {1026}, {1013}, {1020}, {1015, 1014},
+        {1019, 1018}, {1021, 1022}, {1023, 1024, 1025}, {1027}, {IDOK, IDCANCEL},
     };
     int y = 10;
     for (const auto& row : rows) {
@@ -1804,7 +1806,8 @@ static int OptionsLayoutRows(HWND hwnd, HDC hdc) {
             SetWindowPos(controls[i], nullptr, rect.left, y + (row_height - height) / 2,
                          rect.right - rect.left, height, flags);
         }
-        y += row_height + 4;
+        // 行里没有控件（1027 未创建）时不占高度，下面的行紧接上来
+        if (row_height) y += row_height + 4;
     }
     return y + 6;
 }
